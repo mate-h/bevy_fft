@@ -1,0 +1,8 @@
+[package]
+name = "bevy_fft"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy_image = "0.15.0"
+bevy_render = "0.15.0"
