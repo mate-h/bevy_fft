@@ -384,7 +384,6 @@ dependencies = [
  "bevy_reflect",
  "bevy_render",
  "bevy_utils",
- "encase",
  "gigs",
  "half",
 ]

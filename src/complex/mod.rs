@@ -1,133 +1,45 @@
-use bevy_math::ops;
-use encase::ShaderType;
-use half::f16;
-use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+use bevy_app::{App, Plugin};
+use bevy_asset::{embedded_asset, AssetServer, Handle};
+use bevy_ecs::{
+    system::Resource,
+    world::{FromWorld, World},
+};
+use bevy_render::render_resource::Shader;
 
-#[allow(non_camel_case_types)]
-#[derive(Copy, Clone, PartialEq)]
-#[repr(align(4))]
-pub struct c16 {
-    pub real: f16,
-    pub complex: f16,
+pub struct ComplexNumsPlugin;
+
+impl Plugin for ComplexNumsPlugin {
+    fn build(&self, app: &mut App) {
+        embedded_asset!(app, "c32.wgsl");
+        embedded_asset!(app, "c32_2.wgsl");
+        embedded_asset!(app, "c32_3.wgsl");
+        embedded_asset!(app, "c32_4.wgsl");
+
+        app.init_resource::<ComplexNumsShaders>();
+    }
 }
 
-impl c16 {
-    pub fn new(real: f16, complex: f16) -> Self {
-        Self { real, complex }
-    }
+#[derive(Resource)]
+#[expect(dead_code)]
+struct ComplexNumsShaders {
+    c32: Handle<Shader>,
+    c32_2: Handle<Shader>,
+    c32_3: Handle<Shader>,
+    c32_4: Handle<Shader>,
+}
 
-    pub fn conjugate(self) -> Self {
+impl FromWorld for ComplexNumsShaders {
+    fn from_world(world: &mut World) -> Self {
+        let asset_server = world.resource::<AssetServer>();
+        let c32 = asset_server.load::<Shader>("embedded://bevy_fft/complex/c32.wgsl");
+        let c32_2 = asset_server.load::<Shader>("embedded://bevy_fft/complex/c32_2.wgsl");
+        let c32_3 = asset_server.load::<Shader>("embedded://bevy_fft/complex/c32_3.wgsl");
+        let c32_4 = asset_server.load::<Shader>("embedded://bevy_fft/complex/c32_4.wgsl");
         Self {
-            real: self.real,
-            complex: -self.complex,
+            c32,
+            c32_2,
+            c32_3,
+            c32_4,
         }
-    }
-
-    pub fn exp(theta: f32) -> Self {
-        let (sin, cos) = ops::sin_cos(theta);
-        Self {
-            real: f16::from_f32(cos),
-            complex: f16::from_f32(sin),
-        }
-    }
-}
-
-impl Add for c16 {
-    type Output = Self;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        Self {
-            real: self.real + rhs.real,
-            complex: self.complex + rhs.complex,
-        }
-    }
-}
-
-impl AddAssign for c16 {
-    fn add_assign(&mut self, rhs: Self) {
-        *self = *self + rhs;
-    }
-}
-
-impl Neg for c16 {
-    type Output = Self;
-
-    fn neg(self) -> Self::Output {
-        Self {
-            real: -self.real,
-            complex: -self.complex,
-        }
-    }
-}
-
-impl Sub for c16 {
-    type Output = Self;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        Self {
-            real: self.real - rhs.real,
-            complex: self.complex - rhs.complex,
-        }
-    }
-}
-
-impl SubAssign for c16 {
-    fn sub_assign(&mut self, rhs: Self) {
-        *self = *self - rhs;
-    }
-}
-
-impl Mul for c16 {
-    type Output = Self;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        let real = self.real * rhs.real - self.complex * rhs.complex;
-        let complex = self.real * rhs.complex + rhs.real * self.complex;
-        Self { real, complex }
-    }
-}
-
-impl Mul<f16> for c16 {
-    type Output = Self;
-
-    fn mul(self, rhs: f16) -> Self::Output {
-        Self {
-            real: self.real * rhs,
-            complex: self.complex * rhs,
-        }
-    }
-}
-
-impl MulAssign for c16 {
-    fn mul_assign(&mut self, rhs: Self) {
-        *self = *self * rhs
-    }
-}
-
-impl Div for c16 {
-    type Output = Self;
-
-    fn div(self, rhs: Self) -> Self::Output {
-        let c2_d2 = rhs.real * rhs.real + rhs.complex * rhs.complex;
-        let real = (self.real * rhs.real + self.complex * rhs.complex) / c2_d2;
-        let complex = (self.complex * rhs.real - self.real * rhs.complex) / c2_d2;
-        Self { real, complex }
-    }
-}
-
-impl Div<f16> for c16 {
-    type Output = Self;
-
-    fn div(self, rhs: f16) -> Self::Output {
-        Self {
-            real: self.real / rhs,
-            complex: self.complex / rhs,
-        }
-    }
-}
-
-impl DivAssign for c16 {
-    fn div_assign(&mut self, rhs: Self) {
-        *self = *self / rhs;
     }
 }
