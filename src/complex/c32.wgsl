@@ -22,7 +22,7 @@ struct c32_4 {
     imag: vec4<f32>,
 }
 
-// PACKING
+// UNPACKING
 
 fn unpack_c32(packed: u32) -> c32 {
     let unpacked = unpack2x16float(packed);
@@ -30,8 +30,8 @@ fn unpack_c32(packed: u32) -> c32 {
 }
 
 fn unpack_c32_2(packed: vec2<u32>) -> c32_2 {
-    let unpacked_x = unpack2x16float(packed);
-    let unpacked_y = unpack2x16float(packed);
+    let unpacked_x = unpack2x16float(packed.x);
+    let unpacked_y = unpack2x16float(packed.y);
     return c32_2(
         vec2(unpacked_x.x, unpacked_y.x),
         vec2(unpacked_x.y, unpacked_y.y)
@@ -59,7 +59,7 @@ fn unpack_c32_4(packed: vec4<u32>) -> c32_4 {
     );
 }
 
-// UNPACKING
+// PACKING
 
 fn pack_c32(unpacked: c32) -> u32 {
     return pack2x16float(unpacked.real, unpacked.complex);
@@ -78,12 +78,115 @@ fn pack_c32_3(unpacked: c32_3) -> vec3<u32> {
     return vec3(packed_x, packed_y, packed_z);
 }
 
-fn pack_c32_4(unpacked: c32_4) -> vec3<u32> {
+fn pack_c32_4(unpacked: c32_4) -> vec4<u32> {
     let packed_x = pack2x16float(vec2(unpacked.real.x, unpacked.imag.x));
     let packed_y = pack2x16float(vec2(unpacked.real.y, unpacked.imag.y));
     let packed_z = pack2x16float(vec2(unpacked.real.z, unpacked.imag.z));
     let packed_w = pack2x16float(vec2(unpacked.real.w, unpacked.imag.w));
-    return vec3(packed_x, packed_y, packed_z, packed_w);
+    return vec4(packed_x, packed_y, packed_z, packed_w);
+}
+
+// LOADING
+
+fn load_real_c32(tex: texture_2d<f32>, pos: vec2<u32>) -> c32 {
+    let real = textureLoad(tex, pos, 0u).x;
+    return c32(real, 0.0);
+}
+
+fn load_real_c32_2(tex: texture_2d<f32>, pos: vec2<u32>) -> c32 {
+    let real = textureLoad(tex, pos, 0u).xy;
+    return c32(real, 0.0);
+}
+
+fn load_real_c32_3(tex: texture_2d<f32>, pos: vec2<u32>) -> c32 {
+    let real = textureLoad(tex, pos, 0u).xyz;
+    return c32(real, 0.0);
+}
+
+fn load_real_c32_4(tex: texture_2d<f32>, pos: vec2<u32>) {
+    let real = textureLoad(tex, pos, 0u).xyzw;
+    return c32(real, 0.0);
+}
+
+fn load_c32(tex: texture_storage_2d<r32uint>, pos: vec2<u32>) -> c32 {
+    let packed = textureLoad(tex, pos, 0u).x;
+    return unpack_c32(packed);
+}
+
+fn load_c32_2(tex: texture_storage_2d<rg32uint>, pos: vec2<u32>) -> c32 {
+    let packed = textureLoad(tex, pos, 0u).xy;
+    return unpack_c32_2(packed);
+}
+
+fn load_c32_3(tex: texture_storage_2d<rgba32uint>, pos: vec2<u32>) -> c32 {
+    let packed = textureLoad(tex, pos, 0u).xyz;
+    return unpack_c32_3(packed);
+}
+
+fn load_c32_4(tex: texture_storage_2d<rgba32uint>, pos: vec2<u32>) {
+    let packed = textureLoad(tex, pos, 0u).xyzw;
+    return unpack_c32_3(packed);
+}
+
+// STORING
+
+fn store_c32(tex: texture_storage_2d<r32uint>, pos: vec2<u32>, c: c32) {
+    let packed = pack_c32(c);
+    textureStore(tex, pos, vec4(packed, 0.0, 0.0, 0.0));
+}
+
+fn store_c32_2(tex: texture_storage_2d<rg32uint>, pos: vec2<u32>, c: c32_2) {
+    let packed = pack_c32_2(c);
+    textureStore(tex, pos, vec4(packed, 0.0, 0.0));
+}
+
+fn store_c32_3(tex: texture_storage_2d<rgba32uint>, pos: vec2<u32>, c: c32_3) {
+    let packed = pack_c32_3(c);
+    textureStore(tex, pos, vec4(packed, 0.0));
+}
+
+fn store_c32_4(tex: texture_storage_2d<rgba32uint>, pos: vec2<u32>, c: c32_4) {
+    let packed = pack_c32_4(c);
+    textureStore(tex, pos, vec4(packed));
+}
+
+fn store_real_c32(tex: texture_storage_2d<f32>, pos: vec2<u32>, c: c32) {
+    textureStore(tex, pos, vec4(c.real, 0.0, 0.0, 0.0));
+}
+
+fn store_real_c32_2(tex: texture_storage_2d<f32>, pos: vec2<u32>, c: c32_3) {
+    textureStore(tex, pos, vec4(c.real, 0.0, 0.0));
+}
+
+fn store_real_c32_3(tex: texture_storage_2d<f32>, pos: vec2<u32>, c: c32_3) {
+    textureStore(tex, pos, vec4(c.real, 0.0));
+}
+
+fn store_real_c32_4(tex: texture_storage_2d<f32>, pos: vec2<u32>, c: c32_4) {
+    textureStore(tex, pos, vec4(c.real));
+}
+
+
+
+
+
+
+
+
+
+fn load_real_c32_2(tex: texture_2d<f32>, pos: vec2<u32>) -> c32 {
+    let real = textureLoad(tex, pos, 0u).xy;
+    return c32(real, 0.0);
+}
+
+fn load_real_c32_3(tex: texture_2d<f32>, pos: vec2<u32>) -> c32 {
+    let real = textureLoad(tex, pos, 0u).xyz;
+    return c32(real, 0.0);
+}
+
+fn load_real_c32_4(tex: texture_2d<f32>, pos: vec2<u32>) {
+    let real = textureLoad(tex, pos, 0u).xyzw;
+    return c32(real, 0.0);
 }
 
 // ARITHMETIC
@@ -128,46 +231,45 @@ fn mul_c32_4(c1: c32_4, c2: c32_4) -> c32_4 {
     return c32_2(real, imag);
 }
 
+fn muls_c32(c1: c32, c2: c32) -> c32 {
+    let real = c1.real * c2.real - c1.imag * c2.imag;
+    let imag = c1.real * c2.imag + c1.imag * c2.real;
+    return c32(real, imag);
+}
+
+fn muls_c32_2(c1: c32_2, c2: c32) -> c32_2 {
+    let real = c1.real * c2.real - c1.imag * c2.imag;
+    let imag = c1.real * c2.imag + c1.imag * c2.real;
+    return c32_2(real, imag);
+}
+
+fn muls_c32_3(c1: c32_3, c2: c32) -> c32_3 {
+    let real = c1.real * c2.real - c1.imag * c2.imag;
+    let imag = c1.real * c2.imag + c1.imag * c2.real;
+    return c32_2(real, imag);
+}
+
+fn muls_c32_4(c1: c32_4, c2: c32) -> c32_4 {
+    let real = c1.real * c2.real - c1.imag * c2.imag;
+    let imag = c1.real * c2.imag + c1.imag * c2.real;
+    return c32_2(real, imag);
+}
+
 // fma(c1, c2, c3) = c1 * c2 + c3
 // these are manually implemented for scalar*vector multiplication
 
 fn fma_c32(c1: c32, c2: c32, c3: c32) -> c32 {
-    let real = c1.real * c2.real - c1.imag * c2.imag;
-    let imag = c1.real * c2.imag + c1.imag * c2.real;
-    return c32_2(real + c3.real, imag + c3.imag);
+    return add_c32(muls_c32(c1, c2), c3);
 }
 
 fn fma_c32_2(c1: c32_2, c2: c32, c3: c32_2) -> c32_2 {
-    let real = c1.real * c2.real - c1.imag * c2.imag;
-    let imag = c1.real * c2.imag + c1.imag * c2.real;
-    return c32_2(real + c3.real, imag + c3.imag);
+    return add_c32_2(muls_c32_2(c1, c2), c3);
 }
 
 fn fma_c32_3(c1: c32_3, c2: c32, c3: c32_3) -> c32_3 {
-    let real = c1.real * c2.real - c1.imag * c2.imag;
-    let imag = c1.real * c2.imag + c1.imag * c2.real;
-    return c32_2(real + c3.real, imag + c3.imag);
+    return add_c32_3(muls_c32_3(c1, c2), c3);
 }
 
 fn fma_c32_4(c1: c32_4, c2: c32, c3: c32_4) -> c32_4 {
-    let real = c1.real * c2.real - c1.imag * c2.imag;
-    let imag = c1.real * c2.imag + c1.imag * c2.real;
-    return c32_2(real + c3.real, imag + c3.imag);
-}
-
-fn exp_c32(theta: f32) -> c32 {
-    return c32(cos(theta), sin(theta));
-}
-
-fn exp_c32_2(theta: vec2<f32>) -> c32_2 {
-    return c32_2(cos(theta), sin(theta));
-}
-
-fn exp_c32_3(theta: vec3<f32>) -> c32_3 {
-    return c32_2(cos(theta), sin(theta));
-}
-
-
-fn exp_c32_4(theta: vec4<f32>) -> c32_4 {
-    return c32_2(cos(theta), sin(theta));
+    return add_c32_4(muls_c32_4(c1, c2), c3);
 }
