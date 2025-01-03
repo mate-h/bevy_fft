@@ -1,55 +1,12 @@
-
-#import bevy_fft::c32::c32;
-
-#if CHANNELS == 1 
-
 #import bevy_fft::c32::{
-    c32 as c32_n,
-    load_c32 as load_c32_n,
-    load_real_c32 as load_real_c32,
-    store_c32 as store_c32_n,
-    fma_c32 as fma_c32_n,
+    c32,
+    c32_n,
+    load_c32_n,
+    load_real_c32,
+    store_c32_n,
+    fma_c32_n,
 }
 
-@group(0) @binding(3) var freq_tex: texture_storage_2d<r32uint>;
-
-#else if CHANNELS == 2
-
-#import bevy_fft::c32::{
-    c32_2 as c32_n,
-    load_c32_2 as load_c32_n,
-    load_real_c32_2 as load_real_c32_n,
-    store_c32_2 as store_c32_n,
-    fma_c32_2 as fma_c32_n
-}
-
-@group(0) @binding(3) var freq_tex: texture_storage_2d<rg32uint>;
-
-#else if CHANNELS == 3
-
-#import bevy_fft::c32::{
-    c32_3 as c32_n,
-    load_c32_3 as load_c32_n,
-    load_real_c32_3 as load_real_c32_n,
-    store_c32_3 as store_c32_n,
-    fma_c32_3 as fma_c32_n,
-}
-
-@group(0) @binding(3) var freq_tex: texture_storage_2d<rgba32uint>;
-
-#else if CHANNELS == 4
-
-#import bevy_fft::c32::{
-    c32_4 as c32_n,
-    load_c32_4 as load_c32_n,
-    load_real_c32_4 as load_real_c32_n,
-    store_c32_4 as store_c32_n,
-    fma_c32_4 as fma_c32_n,
-}
-
-@group(0) @binding(3) var freq_tex: texture_storage_2d<rgba32uint>;
-
-#endif
 
 struct FftUniform {
     src_size: vec2<u32>,
@@ -59,7 +16,8 @@ struct FftUniform {
 
 @group(0) @binding(0) var<uniform> uniform: FftUniform;
 @group(0) @binding(1) var<uniform> roots: array<c32, 8192>;
-@group(0) @binding(2) var in_tex: texture_2d<u32>;
+@group(0) @binding(2) var src_tex: texture_storage_2d<texel_c32>;
+@group(0) @binding(3) var dst_tex: texture_storage_2d<texel_c32_n>;
 
 var<workgroup> temp: array<c32_n, 256>;
 
