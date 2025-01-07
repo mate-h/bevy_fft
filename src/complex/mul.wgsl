@@ -4,7 +4,8 @@
     c32,
     c32_n,
     load_c32_n,
-    store_c32_n,
+    mul_c32_n,
+    muls_c32_n,
     fma_c32_n,
 }
 
@@ -28,7 +29,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     #ifdef SRC_SCALAR
     let src = load_c32(src_tex, id.xy);
     let new_dst = muls_c32_n(dst, src);
-    #else 
+    #else
     let src = load_c32_n(src_tex, id.xy);
     let new_dst = mul_c32_n(dst, src);
     #endif
