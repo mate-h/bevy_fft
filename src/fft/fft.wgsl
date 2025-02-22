@@ -8,13 +8,13 @@
 }
 
 
-struct FftUniform {
+struct FftSettings {
     src_size: vec2<u32>,
     src_padding: vec2<u32>,
     orders: u32,
 }
 
-@group(0) @binding(0) var<uniform> uniform: FftUniform;
+@group(0) @binding(0) var<uniform> uniform: FftSettings;
 @group(0) @binding(1) var<uniform> roots: array<c32, 8192>;
 @group(0) @binding(2) var src_tex: texture_storage_2d<texel_c32>;
 @group(0) @binding(3) var dst_tex: texture_storage_2d<texel_c32_n>;
