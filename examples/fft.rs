@@ -1,7 +1,7 @@
 use bevy::{log, prelude::*};
 use bevy_fft::{
     complex::image::ComplexImage,
-    fft::{FftPlugin, FftSettings},
+    fft::{FftPlugin, FftRoots, FftSettings, C32},
 };
 
 fn main() {
@@ -37,6 +37,9 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
             size: UVec2::new(256, 256),
             orders: 8,
             padding: UVec2::ZERO,
+        },
+        FftRoots {
+            roots: [C32::default(); 8192],
         },
         Sprite {
             custom_size: Some(Vec2::new(256.0, 256.0)),

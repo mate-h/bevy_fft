@@ -17,7 +17,10 @@ mod node;
 pub mod resources;
 
 use node::{FftComputeNode, FftNode};
-use resources::{prepare_fft_bind_groups, prepare_fft_textures, FftBindGroupLayouts, FftPipelines};
+use resources::{
+    prepare_fft_bind_groups, prepare_fft_roots_buffer, prepare_fft_textures, FftBindGroupLayouts,
+    FftPipelines, FftRootsBuffer,
+};
 
 mod shaders {
     use bevy_asset::{weak_handle, Handle};
@@ -39,10 +42,17 @@ pub struct FftSettings {
     pub padding: UVec2,
 }
 
-#[derive(Component, Clone, Copy, Reflect, ShaderType)]
+#[derive(Clone, Default, Copy, Reflect, ShaderType)]
+#[repr(C)]
+pub struct C32 {
+    pub re: f32,
+    pub im: f32,
+}
+
+#[derive(Component, Clone, Copy, Reflect, ShaderType, ExtractComponent)]
 #[repr(C)]
 pub struct FftRoots {
-    pub roots: [f32; 8192],
+    pub roots: [C32; 8192],
 }
 
 impl Default for FftSettings {
@@ -76,10 +86,13 @@ impl Plugin for FftPlugin {
         load_internal_asset!(app, shaders::C32, "../complex/c32.wgsl", Shader::from_wgsl);
         // load_internal_asset!(app, shaders::IFFT, "ifft.wgsl", Shader::from_wgsl);
 
-        app.register_type::<FftSettings>().add_plugins((
-            ExtractComponentPlugin::<FftSettings>::default(),
-            UniformComponentPlugin::<FftSettings>::default(),
-        ));
+        app.register_type::<FftSettings>()
+            .register_type::<FftRoots>()
+            .add_plugins((
+                ExtractComponentPlugin::<FftSettings>::default(),
+                UniformComponentPlugin::<FftSettings>::default(),
+                ExtractComponentPlugin::<FftRoots>::default(),
+            ));
     }
 
     fn finish(&self, app: &mut App) {
@@ -90,23 +103,25 @@ impl Plugin for FftPlugin {
         render_app
             .init_resource::<FftBindGroupLayouts>()
             .init_resource::<FftPipelines>()
+            .init_resource::<FftRootsBuffer>()
             .add_systems(
                 Render,
                 (
                     prepare_fft_textures.in_set(RenderSet::PrepareResources),
                     prepare_fft_bind_groups.in_set(RenderSet::PrepareBindGroups),
+                    prepare_fft_roots_buffer
+                        .in_set(RenderSet::PrepareResources)
+                        .before(RenderSet::PrepareBindGroups),
                 ),
             )
             .add_render_graph_node::<FftComputeNode>(Core3d, FftNode::ComputeFFT);
     }
 }
 
-// Add necessary type definitions for bind groups and pipeline specialization
 #[derive(Component)]
 pub struct FftTextures {
     pub input: CachedTexture,
     pub output: CachedTexture,
-    pub temp: CachedTexture,
 }
 
 #[derive(Component)]

@@ -38,21 +38,25 @@ struct packed_c32_4 {
     value: vec4<u32>,
 }
 
-#ifdef CHANNELS
-#if CHANNELS == 1 
-    alias c32_n = c32;
-    alias packed_c32_n = packed_c32;
-#else if CHANNELS == 2;
-    alias c32_n = c32_2;
-    alias packed_c32_n = packed_c32_2;
-#else if CHANNELS == 3;
-    alias c32_n = c32_3;
-    alias packed_c32_n = packed_c32_3;
-#else if CHANNELS == 4;
-    alias c32_n = c32_4;
-    alias packed_c32_n = packed_c32_4;
-#endif
-#endif
+// #ifdef CHANNELS
+// #if CHANNELS == 1 
+//     alias c32_n = c32;
+//     alias packed_c32_n = packed_c32;
+// #else if CHANNELS == 2;
+//     alias c32_n = c32_2;
+//     alias packed_c32_n = packed_c32_2;
+// #else if CHANNELS == 3;
+//     alias c32_n = c32_3;
+//     alias packed_c32_n = packed_c32_3;
+// #else if CHANNELS == 4;
+//     alias c32_n = c32_4;
+//     alias packed_c32_n = packed_c32_4;
+// #endif
+// #endif
+
+// without conditional compilation
+alias c32_n = c32_4;
+alias packed_c32_n = packed_c32_4;
 
 // UNPACKING
 

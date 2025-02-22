@@ -8,15 +8,16 @@ use bevy_ecs::{
     world::{FromWorld, World},
 };
 use bevy_render::{
+    extract_component::ComponentUniforms,
     render_resource::{
-        binding_types::{texture_storage_2d, uniform_buffer},
+        binding_types::{storage_buffer_read_only, texture_2d, texture_storage_2d, uniform_buffer},
         *,
     },
-    renderer::RenderDevice,
+    renderer::{RenderDevice, RenderQueue},
     texture::TextureCache,
 };
 
-use super::{shaders, FftRoots, FftSettings, FftTextures};
+use super::{shaders, FftRoots, FftSettings, FftTextures, C32};
 
 #[derive(Resource)]
 pub(crate) struct FftBindGroupLayouts {
@@ -33,18 +34,15 @@ impl FromWorld for FftBindGroupLayouts {
                 ShaderStages::COMPUTE,
                 (
                     (0, uniform_buffer::<FftSettings>(true)),
-                    (1, uniform_buffer::<FftRoots>(true)),
+                    (1, storage_buffer_read_only::<FftRoots>(false)),
                     (
                         2,
-                        texture_storage_2d(
-                            TextureFormat::R32Float,
-                            StorageTextureAccess::ReadWrite,
-                        ),
+                        texture_2d(TextureSampleType::Float { filterable: false }),
                     ),
                     (
                         3,
                         texture_storage_2d(
-                            TextureFormat::R32Float,
+                            TextureFormat::Rgba32Uint,
                             StorageTextureAccess::ReadWrite,
                         ),
                     ),
@@ -67,7 +65,7 @@ impl FromWorld for FftPipelines {
         let pipeline_cache = world.resource::<PipelineCache>();
         let layouts = world.resource::<FftBindGroupLayouts>();
 
-        let shader_defs = vec![ShaderDefVal::Int("CHANNELS".into(), 4)];
+        let shader_defs = vec![ShaderDefVal::UInt("CHANNELS".into(), 4)];
 
         let fft = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("fft_pipeline".into()),
@@ -97,10 +95,10 @@ pub(crate) fn prepare_fft_textures(
     mut commands: Commands,
     mut texture_cache: ResMut<TextureCache>,
     render_device: Res<RenderDevice>,
-    views: Query<(Entity, &FftSettings)>,
+    matches: Query<(Entity, &FftSettings)>,
 ) {
     log::info!("Preparing FFT textures");
-    for (entity, settings) in &views {
+    for (entity, settings) in &matches {
         log::info!("Preparing FFT textures for {:?}", settings.size);
         let input = texture_cache.get(
             &render_device,
@@ -114,8 +112,8 @@ pub(crate) fn prepare_fft_textures(
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: TextureDimension::D2,
-                format: TextureFormat::R32Float,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+                format: TextureFormat::Rgba32Float,
+                usage: TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             },
         );
@@ -132,35 +130,15 @@ pub(crate) fn prepare_fft_textures(
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: TextureDimension::D2,
-                format: TextureFormat::R32Float,
+                format: TextureFormat::Rgba32Uint,
                 usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             },
         );
 
-        let temp = texture_cache.get(
-            &render_device,
-            TextureDescriptor {
-                label: Some("fft_temp"),
-                size: Extent3d {
-                    width: settings.size.x,
-                    height: settings.size.y,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: TextureFormat::R32Float,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-        );
-
-        commands.entity(entity).insert(FftTextures {
-            input,
-            output,
-            temp,
-        });
+        commands
+            .entity(entity)
+            .insert(FftTextures { input, output });
     }
 }
 
@@ -173,19 +151,67 @@ pub(crate) fn prepare_fft_bind_groups(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
     layouts: Res<FftBindGroupLayouts>,
-    views: Query<(Entity, &FftTextures), With<FftSettings>>,
+    fft_uniforms: Res<ComponentUniforms<FftSettings>>,
+    fft_roots_buffer: Res<FftRootsBuffer>,
+    matches: Query<(Entity, &FftTextures), With<FftSettings>>,
 ) {
-    for (entity, textures) in &views {
+    let settings_binding = fft_uniforms
+        .binding()
+        .expect("Failed to prepare FFT bind groups. FftSettings uniform buffer missing");
+    let roots_binding = fft_roots_buffer
+        .buffer
+        .binding()
+        .expect("Failed to prepare FFT bind groups. FftRootsBuffer buffer missing");
+    for (entity, textures) in &matches {
         let compute = render_device.create_bind_group(
             "fft_compute_bind_group",
             &layouts.compute,
             &BindGroupEntries::with_indices((
-                (0, &textures.input.default_view),
-                (1, &textures.output.default_view),
-                (2, &textures.temp.default_view),
+                (0, settings_binding.clone()),
+                (1, roots_binding.clone()),
+                (2, &textures.input.default_view),
+                (3, &textures.output.default_view),
             )),
         );
 
         commands.entity(entity).insert(FftBindGroups { compute });
     }
+}
+
+#[derive(Resource)]
+pub struct FftRootsBuffer {
+    pub buffer: StorageBuffer<FftRoots>,
+}
+
+impl FromWorld for FftRootsBuffer {
+    fn from_world(world: &mut World) -> Self {
+        let data = world
+            .query_filtered::<&FftRoots, With<FftSettings>>()
+            .iter(world)
+            .next()
+            .map_or_else(
+                || FftRoots {
+                    roots: [C32::default(); 8192],
+                },
+                |roots| *roots,
+            );
+
+        Self {
+            buffer: StorageBuffer::from(data),
+        }
+    }
+}
+
+pub(crate) fn prepare_fft_roots_buffer(
+    device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
+    fft_entity: Query<(&FftRoots, &FftSettings), With<FftSettings>>,
+    mut fft_roots_buffer: ResMut<FftRootsBuffer>,
+) {
+    let Ok((roots, _)) = fft_entity.get_single() else {
+        return;
+    };
+
+    fft_roots_buffer.buffer.set(*roots);
+    fft_roots_buffer.buffer.write_buffer(&device, &queue);
 }
