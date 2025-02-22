@@ -67,7 +67,7 @@ impl FromWorld for FftPipelines {
         let pipeline_cache = world.resource::<PipelineCache>();
         let layouts = world.resource::<FftBindGroupLayouts>();
 
-        let shader_defs = vec![ShaderDefVal::Int("CHANNELS".into(), 32)];
+        let shader_defs = vec![ShaderDefVal::Int("CHANNELS".into(), 4)];
 
         let fft = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("fft_pipeline".into()),
