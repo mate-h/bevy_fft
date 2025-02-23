@@ -1,3 +1,5 @@
+use std::num::NonZero;
+
 use bevy::log;
 use bevy_ecs::{
     component::Component,
@@ -10,14 +12,16 @@ use bevy_ecs::{
 use bevy_render::{
     extract_component::ComponentUniforms,
     render_resource::{
-        binding_types::{storage_buffer_read_only, texture_2d, texture_storage_2d, uniform_buffer},
+        binding_types::{storage_buffer_sized, texture_2d, texture_storage_2d, uniform_buffer},
         *,
     },
     renderer::{RenderDevice, RenderQueue},
     texture::TextureCache,
 };
 
-use super::{shaders, FftRoots, FftSettings, FftTextures, C32};
+use crate::complex::c32;
+
+use super::{shaders, FftRoots, FftSettings, FftTextures};
 
 #[derive(Resource)]
 pub(crate) struct FftBindGroupLayouts {
@@ -33,8 +37,17 @@ impl FromWorld for FftBindGroupLayouts {
             &BindGroupLayoutEntries::with_indices(
                 ShaderStages::COMPUTE,
                 (
-                    (0, uniform_buffer::<FftSettings>(true)),
-                    (1, storage_buffer_read_only::<FftRoots>(false)),
+                    (0, uniform_buffer::<FftSettings>(false)),
+                    (
+                        1,
+                        storage_buffer_sized(
+                            false,
+                            Some(
+                                NonZero::<u64>::new(std::mem::size_of::<FftRoots>() as u64)
+                                    .unwrap(),
+                            ),
+                        ),
+                    ),
                     (
                         2,
                         texture_2d(TextureSampleType::Float { filterable: false }),
@@ -64,9 +77,10 @@ impl FromWorld for FftPipelines {
     fn from_world(world: &mut World) -> Self {
         let pipeline_cache = world.resource::<PipelineCache>();
         let layouts = world.resource::<FftBindGroupLayouts>();
-
-        let shader_defs = vec![ShaderDefVal::UInt("CHANNELS".into(), 4)];
-
+        let shader_defs = vec![
+            // number of channels in the input and output textures
+            ShaderDefVal::UInt("CHANNELS".into(), 4),
+        ];
         let fft = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("fft_pipeline".into()),
             layout: vec![layouts.compute.clone()],
@@ -97,9 +111,7 @@ pub(crate) fn prepare_fft_textures(
     render_device: Res<RenderDevice>,
     matches: Query<(Entity, &FftSettings)>,
 ) {
-    log::info!("Preparing FFT textures");
     for (entity, settings) in &matches {
-        log::info!("Preparing FFT textures for {:?}", settings.size);
         let input = texture_cache.get(
             &render_device,
             TextureDescriptor {
@@ -191,7 +203,7 @@ impl FromWorld for FftRootsBuffer {
             .next()
             .map_or_else(
                 || FftRoots {
-                    roots: [C32::default(); 8192],
+                    roots: [c32::new(0.0, 0.0); 8192],
                 },
                 |roots| *roots,
             );

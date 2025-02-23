@@ -4,12 +4,14 @@ use std::{
 };
 
 use bevy_math::ops;
+use bevy_reflect::Reflect;
 use bevy_render::render_resource::ShaderType;
 
 pub mod image;
 
 #[allow(non_camel_case_types)]
-#[derive(Copy, Clone, PartialEq, Debug, ShaderType)]
+#[derive(Copy, Clone, Reflect, PartialEq, Debug, ShaderType)]
+#[repr(C)]
 pub struct c32 {
     pub re: f32,
     pub im: f32,

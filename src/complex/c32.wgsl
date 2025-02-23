@@ -1,4 +1,4 @@
-#define_import_path bevy_fft::c32
+#define_import_path bevy_fft::complex
 
 // TYPES
 
@@ -38,25 +38,21 @@ struct packed_c32_4 {
     value: vec4<u32>,
 }
 
-// #ifdef CHANNELS
-// #if CHANNELS == 1 
-//     alias c32_n = c32;
-//     alias packed_c32_n = packed_c32;
-// #else if CHANNELS == 2;
-//     alias c32_n = c32_2;
-//     alias packed_c32_n = packed_c32_2;
-// #else if CHANNELS == 3;
-//     alias c32_n = c32_3;
-//     alias packed_c32_n = packed_c32_3;
-// #else if CHANNELS == 4;
-//     alias c32_n = c32_4;
-//     alias packed_c32_n = packed_c32_4;
-// #endif
-// #endif
-
-// without conditional compilation
-alias c32_n = c32_4;
-alias packed_c32_n = packed_c32_4;
+#ifdef CHANNELS
+#if CHANNELS == 1 
+    alias c32_n = c32;
+    alias packed_c32_n = packed_c32;
+#else if CHANNELS == 2;
+    alias c32_n = c32_2;
+    alias packed_c32_n = packed_c32_2;
+#else if CHANNELS == 3;
+    alias c32_n = c32_3;
+    alias packed_c32_n = packed_c32_3;
+#else if CHANNELS == 4;
+    alias c32_n = c32_4;
+    alias packed_c32_n = packed_c32_4;
+#endif
+#endif
 
 // UNPACKING
 
@@ -154,136 +150,6 @@ fn pack_c32_n(unpacked: c32_n) -> packed_c32_n {
 #endif
 }
 #endif
-
-// LOADING
-
-#ifdef CHANNELS
-#if CHANNELS == 1 
-fn load_c32_n(tex: texture_storage_2d<r32uint, read_write>, pos: vec2<u32>) -> c32 {
-    let packed = textureLoad(tex, pos).x;
-    // create u32_data from packed
-    var data = packed_c32(packed);
-    return unpack_c32(data);
-}
-#else if CHANNELS == 2
-fn load_c32_n(tex: texture_storage_2d<rg32uint, read_write>, pos: vec2<u32>) -> c32_2 {
-    let packed = textureLoad(tex, pos).xy;
-    var data = packed_c32_2(packed);
-    return unpack_c32_2(data);
-}
-#else if CHANNELS == 3
-fn load_c32_n(tex: texture_storage_2d<rgba32uint, read_write>, pos: vec2<u32>) -> c32_3 {
-    let packed = textureLoad(tex, pos).xyz;
-    var data = packed_c32_3(packed);
-    return unpack_c32_3(data);
-}
-#else if CHANNELS == 4
-fn load_c32_n(tex: texture_storage_2d<rgba32uint, read_write>, pos: vec2<u32>) -> c32_4 {
-    let packed = textureLoad(tex, pos).xyzw;
-    var data = packed_c32_4(packed);
-    return unpack_c32_4(data);
-}
-#endif
-#endif
-
-fn load_real_c32(tex: texture_2d<f32>, pos: vec2<u32>) -> c32 {
-    let real = textureLoad(tex, pos, 0).x;
-    return c32(real, 0.0);
-}
-
-fn load_real_c32_2(tex: texture_2d<f32>, pos: vec2<u32>) -> c32_2 {
-    let real = textureLoad(tex, pos, 0).xy;
-    return c32_2(real, vec2(0.0));
-}
-
-fn load_real_c32_3(tex: texture_2d<f32>, pos: vec2<u32>) -> c32_3 {
-    let real = textureLoad(tex, pos, 0).xyz;
-    return c32_3(real, vec3(0.0));
-}
-
-fn load_real_c32_4(tex: texture_2d<f32>, pos: vec2<u32>) -> c32_4 {
-    let real = textureLoad(tex, pos, 0).xyzw;
-    return c32_4(real, vec4(0.0));
-}
-
-#ifdef CHANNELS
-fn load_real_c32_n(tex: texture_2d<f32>, pos: vec2<u32>) -> c32_n {
-#if CHANNELS == 1 
-    return load_real_c32(tex, pos);
-#else if CHANNELS == 2
-    return load_real_c32_2(tex, pos);
-#else if CHANNELS == 3
-    return load_real_c32_3(tex, pos);
-#else if CHANNELS == 4
-    return load_real_c32_4(tex, pos);
-#endif
-}
-#endif
-
-/*
-// Broken because storage textures can't be arguments to functions
-
-// STORING
-#ifdef CHANNELS
-#if CHANNELS == 1 
-fn store_c32(tex: texture_storage_2d<r32uint, read_write>, pos: vec2<u32>, c: c32) {
-    let packed = pack_c32(c);
-    textureStore(tex, pos, vec4(packed.value, 0u, 0u, 0u));
-}
-#else if CHANNELS == 2
-fn store_c32_2(tex: texture_storage_2d<rg32uint, read_write>, pos: vec2<u32>, c: c32_2) {
-    let packed = pack_c32_2(c);
-    textureStore(tex, pos, vec4(packed.value, 0u, 0u));
-}
-#else if CHANNELS == 3
-fn store_c32_3(tex: texture_storage_2d<rgba32uint, read_write>, pos: vec2<u32>, c: c32_3) {
-    let packed = pack_c32_3(c);
-    textureStore(tex, pos, vec4(packed.value, 0u));
-}
-#else if CHANNELS == 4
-fn store_c32_4(tex: texture_storage_2d<rgba32uint, read_write>, pos: vec2<u32>, c: c32_4) {
-    let packed = pack_c32_4(c);
-    textureStore(tex, pos, vec4(packed.value));
-}
-#endif
-#endif
- */
-
-//TODO: these are borked bc texel format
-/*
-
-fn store_real_c32(tex: texture_storage_2d<f32>, pos: vec2<u32>, c: c32) {
-    textureStore(tex, pos, vec4(c.re, 0.0, 0.0, 0.0));
-}
-
-fn store_real_c32_2(tex: texture_storage_2d<f32>, pos: vec2<u32>, c: c32_3) {
-    textureStore(tex, pos, vec4(c.re, 0.0, 0.0));
-}
-
-fn store_real_c32_3(tex: texture_storage_2d<f32>, pos: vec2<u32>, c: c32_3) {
-    textureStore(tex, pos, vec4(c.re, 0.0));
-}
-
-fn store_real_c32_4(tex: texture_storage_2d<f32>, pos: vec2<u32>, c: c32_4) {
-    textureStore(tex, pos, vec4(c.re));
-}
-
-#ifdef CHANNELS
-fn store_real_c32_n(tex: texture_storage_2d<f32>, pos: vec2<u32>, c: c32_n) {
-#if CHANNELS == 1
-    return store_real_c32(tex, pos, c);
-#else if CHANNELS == 2
-    return store_real_c32_2(tex, pos, c);
-#else if CHANNELS == 3
-    return store_real_c32_3(tex, pos, c);
-#else if CHANNELS == 4
-    return store_real_c32_4(tex, pos, c);
-#endif
-}
-#endif
-
-*/
-
 
 // SPLATTING
 

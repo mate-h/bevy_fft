@@ -22,12 +22,16 @@ use resources::{
     FftPipelines, FftRootsBuffer,
 };
 
+use crate::complex::c32;
+
 mod shaders {
     use bevy_asset::{weak_handle, Handle};
     use bevy_render::render_resource::Shader;
 
     pub const FFT: Handle<Shader> = weak_handle!("7f7dd4fd-50bd-40fb-9dd2-d69dc6d5dd40");
     pub const C32: Handle<Shader> = weak_handle!("f9123e70-23a6-4dc3-a9fb-4a02ea636cfb");
+    pub const TEXEL: Handle<Shader> = weak_handle!("33f1ccb3-7d87-48d3-8984-51892e6652d0");
+    pub const BINDINGS: Handle<Shader> = weak_handle!("1900debb-855d-489b-a973-2559249c3945");
 }
 
 /// Component that configures FFT computation parameters
@@ -42,17 +46,10 @@ pub struct FftSettings {
     pub padding: UVec2,
 }
 
-#[derive(Clone, Default, Copy, Reflect, ShaderType)]
-#[repr(C)]
-pub struct C32 {
-    pub re: f32,
-    pub im: f32,
-}
-
 #[derive(Component, Clone, Copy, Reflect, ShaderType, ExtractComponent)]
 #[repr(C)]
 pub struct FftRoots {
-    pub roots: [C32; 8192],
+    pub roots: [c32; 8192],
 }
 
 impl Default for FftSettings {
@@ -83,6 +80,8 @@ impl Plugin for FftPlugin {
     fn build(&self, app: &mut App) {
         // Load shaders
         load_internal_asset!(app, shaders::FFT, "fft.wgsl", Shader::from_wgsl);
+        load_internal_asset!(app, shaders::TEXEL, "texel.wgsl", Shader::from_wgsl);
+        load_internal_asset!(app, shaders::BINDINGS, "bindings.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::C32, "../complex/c32.wgsl", Shader::from_wgsl);
         // load_internal_asset!(app, shaders::IFFT, "ifft.wgsl", Shader::from_wgsl);
 
