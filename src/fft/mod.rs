@@ -1,10 +1,17 @@
+use bevy::core_pipeline::core_2d::graph::Core2d;
 use bevy::core_pipeline::core_3d::graph::Core3d;
-use bevy_app::{App, Plugin};
-use bevy_asset::load_internal_asset;
+use bevy_app::{App, Plugin, Startup};
+use bevy_asset::{load_internal_asset, Handle};
+use bevy_ecs::query::QueryItem;
 use bevy_ecs::schedule::IntoSystemConfigs;
+use bevy_ecs::system::lifetimeless::Read;
+use bevy_ecs::system::{Commands, Query};
+use bevy_ecs::world::{FromWorld, World};
 use bevy_ecs::{component::Component, resource::Resource};
+use bevy_image::Image;
 use bevy_math::UVec2;
 use bevy_reflect::Reflect;
+use bevy_render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy_render::{
     extract_component::{ExtractComponent, ExtractComponentPlugin, UniformComponentPlugin},
     render_graph::RenderGraphApp,
@@ -34,43 +41,82 @@ mod shaders {
     pub const BINDINGS: Handle<Shader> = weak_handle!("1900debb-855d-489b-a973-2559249c3945");
 }
 
-/// Component that configures FFT computation parameters
-#[derive(Component, Clone, Copy, Reflect, ShaderType)]
-#[repr(C)]
-pub struct FftSettings {
+// Public-facing component
+#[derive(Component, Clone, Reflect)]
+pub struct FftSource {
+    /// The complex image to transform
+    pub image: Handle<Image>,
     /// Size of the FFT texture
     pub size: UVec2,
     /// Number of FFT steps (log2 of size)
     pub orders: u32,
     /// Padding around the source texture
     pub padding: UVec2,
+    /// Roots of the FFT
+    pub roots: [c32; 8192],
 }
 
-#[derive(Component, Clone, Copy, Reflect, ShaderType, ExtractComponent)]
+impl Default for FftSource {
+    fn default() -> Self {
+        Self {
+            image: Handle::default(),
+            size: UVec2::new(256, 256),
+            orders: 8,
+            padding: UVec2::ZERO,
+            roots: [c32::new(0.0, 0.0); 8192],
+        }
+    }
+}
+
+// Internal render-world component
+#[derive(Component, Clone, Copy, Reflect, ShaderType)]
+#[repr(C)]
+pub struct FftSettings {
+    pub size: UVec2,
+    pub orders: u32,
+    pub padding: UVec2,
+}
+
+impl ExtractComponent for FftSettings {
+    type QueryData = Read<FftSource>;
+    type QueryFilter = ();
+    type Out = FftSettings;
+
+    fn extract_component(item: QueryItem<'_, Self::QueryData>) -> Option<Self::Out> {
+        Some(FftSettings {
+            size: item.size,
+            orders: item.orders,
+            padding: item.padding,
+        })
+    }
+}
+
+#[derive(Component, Clone, Copy, Reflect, ShaderType)]
 #[repr(C)]
 pub struct FftRoots {
     pub roots: [c32; 8192],
 }
 
-impl Default for FftSettings {
-    fn default() -> Self {
-        Self {
-            size: UVec2::new(256, 256),
-            orders: 8,
-            padding: UVec2::ZERO,
-        }
+impl ExtractComponent for FftRoots {
+    type QueryData = Read<FftSource>;
+    type QueryFilter = ();
+    type Out = FftRoots;
+
+    fn extract_component(item: QueryItem<'_, Self::QueryData>) -> Option<Self::Out> {
+        Some(FftRoots { roots: item.roots })
     }
 }
 
-impl ExtractComponent for FftSettings {
-    type QueryData = &'static FftSettings;
-    type QueryFilter = ();
-    type Out = FftSettings;
+#[derive(Component, Clone)]
+pub struct FftSourceImage(pub Handle<Image>);
 
-    fn extract_component(
-        item: bevy_ecs::query::QueryItem<'_, Self::QueryData>,
-    ) -> Option<Self::Out> {
-        Some(*item)
+impl ExtractComponent for FftSourceImage {
+    type QueryData = Read<FftSource>;
+    type QueryFilter = ();
+    type Out = FftSourceImage;
+
+    fn extract_component(item: QueryItem<'_, Self::QueryData>) -> Option<Self::Out> {
+        Some(FftSourceImage(item.image.clone()))
     }
 }
 
@@ -85,12 +131,13 @@ impl Plugin for FftPlugin {
         load_internal_asset!(app, shaders::C32, "../complex/c32.wgsl", Shader::from_wgsl);
         // load_internal_asset!(app, shaders::IFFT, "ifft.wgsl", Shader::from_wgsl);
 
-        app.register_type::<FftSettings>()
+        app.register_type::<FftSource>()
             .register_type::<FftRoots>()
             .add_plugins((
                 ExtractComponentPlugin::<FftSettings>::default(),
                 UniformComponentPlugin::<FftSettings>::default(),
                 ExtractComponentPlugin::<FftRoots>::default(),
+                ExtractComponentPlugin::<FftSourceImage>::default(),
             ));
     }
 
@@ -113,7 +160,7 @@ impl Plugin for FftPlugin {
                         .before(RenderSet::PrepareBindGroups),
                 ),
             )
-            .add_render_graph_node::<FftComputeNode>(Core3d, FftNode::ComputeFFT);
+            .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeFFT);
     }
 }
 
@@ -126,9 +173,4 @@ pub struct FftTextures {
 #[derive(Component)]
 pub struct FftBindGroups {
     pub compute: BindGroup,
-}
-
-#[derive(Resource)]
-pub struct FftBuffer {
-    pub buffer: StorageBuffer<FftSettings>,
 }

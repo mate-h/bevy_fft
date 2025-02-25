@@ -4,15 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bevy = { path = "/Users/mateh/github/lab/bevy" }
-bevy_app = { path = "/Users/mateh/github/lab/bevy/crates/bevy_app" }
-bevy_asset = { path = "/Users/mateh/github/lab/bevy/crates/bevy_asset" }
-bevy_ecs = { path = "/Users/mateh/github/lab/bevy/crates/bevy_ecs" }
-bevy_image = { path = "/Users/mateh/github/lab/bevy/crates/bevy_image" }
-bevy_math = { path = "/Users/mateh/github/lab/bevy/crates/bevy_math" }
-bevy_reflect = { path = "/Users/mateh/github/lab/bevy/crates/bevy_reflect" }
-bevy_render = { path = "/Users/mateh/github/lab/bevy/crates/bevy_render" }
-bevy_utils = { path = "/Users/mateh/github/lab/bevy/crates/bevy_utils" }
+bevy = { path = "./bevy" }
+bevy_app = { path = "./bevy/crates/bevy_app" }
+bevy_asset = { path = "./bevy/crates/bevy_asset" }
+bevy_ecs = { path = "./bevy/crates/bevy_ecs" }
+bevy_image = { path = "./bevy/crates/bevy_image" }
+bevy_math = { path = "./bevy/crates/bevy_math" }
+bevy_reflect = { path = "./bevy/crates/bevy_reflect" }
+bevy_render = { path = "./bevy/crates/bevy_render" }
+bevy_utils = { path = "./bevy/crates/bevy_utils" }
 gigs = "0.1.1"
 half = "2.4.1"
 

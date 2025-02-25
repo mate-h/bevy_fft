@@ -11,17 +11,19 @@ use bevy_ecs::{
 };
 use bevy_render::{
     extract_component::ComponentUniforms,
+    render_asset::RenderAssets,
     render_resource::{
         binding_types::{storage_buffer_sized, texture_2d, texture_storage_2d, uniform_buffer},
         *,
     },
     renderer::{RenderDevice, RenderQueue},
-    texture::TextureCache,
+    texture::{GpuImage, TextureCache},
 };
+use bevy_utils::once;
 
 use crate::complex::c32;
 
-use super::{shaders, FftRoots, FftSettings, FftTextures};
+use super::{shaders, FftRoots, FftSettings, FftSourceImage, FftTextures};
 
 #[derive(Resource)]
 pub(crate) struct FftBindGroupLayouts {
@@ -91,16 +93,6 @@ impl FromWorld for FftPipelines {
             zero_initialize_workgroup_memory: false,
         });
 
-        // let ifft = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        //     label: Some("ifft_pipeline".into()),
-        //     layout: vec![layouts.compute.clone()],
-        //     push_constant_ranges: vec![],
-        //     shader: shaders::IFFT,
-        //     shader_defs: vec![],
-        //     entry_point: "ifft".into(),
-        //     zero_initialize_workgroup_memory: false,
-        // });
-
         Self { fft }
     }
 }
@@ -109,9 +101,9 @@ pub(crate) fn prepare_fft_textures(
     mut commands: Commands,
     mut texture_cache: ResMut<TextureCache>,
     render_device: Res<RenderDevice>,
-    matches: Query<(Entity, &FftSettings)>,
+    query: Query<(Entity, &FftSettings)>,
 ) {
-    for (entity, settings) in &matches {
+    for (entity, settings) in &query {
         let input = texture_cache.get(
             &render_device,
             TextureDescriptor {
@@ -148,6 +140,8 @@ pub(crate) fn prepare_fft_textures(
             },
         );
 
+        once!(log::info!("Prepared FFT textures"));
+
         commands
             .entity(entity)
             .insert(FftTextures { input, output });
@@ -165,7 +159,8 @@ pub(crate) fn prepare_fft_bind_groups(
     layouts: Res<FftBindGroupLayouts>,
     fft_uniforms: Res<ComponentUniforms<FftSettings>>,
     fft_roots_buffer: Res<FftRootsBuffer>,
-    matches: Query<(Entity, &FftTextures), With<FftSettings>>,
+    gpu_images: Res<RenderAssets<GpuImage>>,
+    query: Query<(Entity, &FftTextures, &FftSourceImage), With<FftSettings>>,
 ) {
     let settings_binding = fft_uniforms
         .binding()
@@ -174,17 +169,24 @@ pub(crate) fn prepare_fft_bind_groups(
         .buffer
         .binding()
         .expect("Failed to prepare FFT bind groups. FftRootsBuffer buffer missing");
-    for (entity, textures) in &matches {
+
+    for (entity, textures, img) in &query {
+        let source_image = gpu_images
+            .get(&img.0)
+            .expect("Failed to prepare FFT bind groups. Source image not found");
+
         let compute = render_device.create_bind_group(
             "fft_compute_bind_group",
             &layouts.compute,
             &BindGroupEntries::with_indices((
                 (0, settings_binding.clone()),
                 (1, roots_binding.clone()),
-                (2, &textures.input.default_view),
+                (2, &source_image.texture_view),
                 (3, &textures.output.default_view),
             )),
         );
+
+        once!(log::info!("Prepared FFT bind groups"));
 
         commands.entity(entity).insert(FftBindGroups { compute });
     }
@@ -217,12 +219,14 @@ impl FromWorld for FftRootsBuffer {
 pub(crate) fn prepare_fft_roots_buffer(
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
-    fft_entity: Query<(&FftRoots, &FftSettings), With<FftSettings>>,
+    query: Query<(&FftRoots, &FftSettings), With<FftSettings>>,
     mut fft_roots_buffer: ResMut<FftRootsBuffer>,
 ) {
-    let Ok((roots, _)) = fft_entity.get_single() else {
+    let Ok((roots, _)) = query.get_single() else {
         return;
     };
+
+    once!(log::info!("Prepared FFT roots buffer"));
 
     fft_roots_buffer.buffer.set(*roots);
     fft_roots_buffer.buffer.write_buffer(&device, &queue);

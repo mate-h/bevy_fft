@@ -1556,8 +1556,11 @@ version = "0.16.0-dev"
 dependencies = [
  "bevy_app 0.16.0-dev",
  "bevy_ecs 0.16.0-dev",
+ "bevy_log",
  "bevy_math 0.16.0-dev",
  "bevy_reflect 0.16.0-dev",
+ "bevy_tasks 0.16.0-dev",
+ "bevy_utils 0.16.0-dev",
  "derive_more",
  "serde",
  "thiserror 2.0.11",

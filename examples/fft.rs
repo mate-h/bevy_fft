@@ -1,7 +1,7 @@
-use bevy::{log, prelude::*};
+use bevy::prelude::*;
 use bevy_fft::{
-    complex::{c32, image::ComplexImage},
-    fft::{FftPlugin, FftRoots, FftSettings},
+    complex::c32,
+    fft::{FftPlugin, FftSource},
 };
 
 fn main() {
@@ -11,11 +11,6 @@ fn main() {
         .run();
 }
 
-#[derive(Resource)]
-struct ComplexImages {
-    images: Vec<ComplexImage>,
-}
-
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     // Camera
     commands.spawn(Camera2d::default());
@@ -23,23 +18,21 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     // Load source image
     let image_handle = asset_server.load("tiles.png");
 
-    // Create complex image from source
-    let complex_image = ComplexImage {
-        source: image_handle.clone(),
-    };
+    // Calculate FFT roots
+    let mut roots = [c32::new(0.0, 0.0); 8192];
+    for i in 0..8192 {
+        let theta = -2.0 * std::f32::consts::PI * (i as f32) / 8192.0;
+        roots[i] = c32::new(theta.cos(), theta.sin());
+    }
 
-    commands.insert_resource(ComplexImages {
-        images: vec![complex_image],
-    });
-
+    // Spawn entity with FFT components
     commands.spawn((
-        FftSettings {
+        FftSource {
+            image: image_handle.clone(),
             size: UVec2::new(256, 256),
             orders: 8,
             padding: UVec2::ZERO,
-        },
-        FftRoots {
-            roots: [c32::new(0.0, 0.0); 8192],
+            roots,
         },
         Sprite {
             custom_size: Some(Vec2::new(256.0, 256.0)),

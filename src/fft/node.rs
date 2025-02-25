@@ -13,6 +13,7 @@ use bevy_render::{
     render_resource::{ComputePassDescriptor, PipelineCache},
     renderer::RenderContext,
 };
+use bevy_utils::once;
 
 use super::{
     resources::{FftBindGroups, FftPipelines},
@@ -26,33 +27,38 @@ pub enum FftNode {
 }
 
 pub(super) struct FftComputeNode {
-    query: QueryState<(Read<FftBindGroups>, Read<FftSettings>)>,
+    query: QueryState<(&'static FftBindGroups, &'static FftSettings)>,
 }
 
 impl FromWorld for FftComputeNode {
     fn from_world(world: &mut World) -> Self {
         Self {
-            query: QueryState::new(world),
+            query: world.query(),
         }
     }
 }
 
 impl Node for FftComputeNode {
+    fn update(&mut self, world: &mut World) {
+        self.query.update_archetypes(world);
+    }
+
     fn run(
         &self,
         graph: &mut RenderGraphContext,
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
-        log::info!("Running FFT");
         let pipelines = world.resource::<FftPipelines>();
         let pipeline_cache = world.resource::<PipelineCache>();
         let Some(fft_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.fft) else {
             log::error!("Failed to get FFT pipeline");
             return Ok(());
         };
+
+        once!(log::info!("Running FFT"));
         for (bind_groups, settings) in self.query.iter_manual(world) {
-            log::info!("Processing FFT for {:?}", settings.size);
+            once!(log::info!("Processing FFT for {:?}", settings.size));
             let command_encoder = render_context.command_encoder();
 
             let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -68,6 +74,8 @@ impl Node for FftComputeNode {
             let workgroup_size = 256; // Must match shader workgroup size
             let num_workgroups_x = settings.size.x.div_ceil(workgroup_size);
             let num_workgroups_y = settings.size.y;
+
+            once!(log::info!("Dispatching FFT for {:?}", settings.size));
 
             compute_pass.dispatch_workgroups(num_workgroups_x, num_workgroups_y, 1);
         }
