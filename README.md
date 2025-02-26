@@ -1,10 +1,6 @@
 # FFT Compute Shader in Bevy
 
-This project extends the Bevy FFT implementation to demonstrate two advanced GPU-based techniques:
-
-0. **Core FFT Component**
-1. **Ocean Surface Simulation using FFT**
-2. **Physically Based Bloom using Convolution Kernels**
+This project implements GPU based Fast Fourier Transform (FFT) using compute shaders in Bevy engine.
 
 ## Project Goals
 
