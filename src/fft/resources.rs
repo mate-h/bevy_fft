@@ -1,14 +1,16 @@
 use std::num::NonZero;
 
 use bevy::log;
+use bevy_asset::{Assets, RenderAssetUsages};
 use bevy_ecs::{
     component::Component,
     entity::Entity,
-    query::With,
+    query::{With, Without},
     resource::Resource,
     system::{Commands, Query, Res, ResMut},
     world::{FromWorld, World},
 };
+use bevy_image::Image;
 use bevy_render::{
     extract_component::ComponentUniforms,
     render_asset::RenderAssets,
@@ -17,13 +19,13 @@ use bevy_render::{
         *,
     },
     renderer::{RenderDevice, RenderQueue},
-    texture::{GpuImage, TextureCache},
+    texture::GpuImage,
 };
 use bevy_utils::once;
 
 use crate::complex::c32;
 
-use super::{shaders, FftRoots, FftSettings, FftSourceImage, FftTextures};
+use super::{shaders, FftRoots, FftSettings, FftSource, FftSourceImage, FftTextures};
 
 #[derive(Resource)]
 pub(crate) struct FftBindGroupLayouts {
@@ -58,6 +60,20 @@ impl FromWorld for FftBindGroupLayouts {
                         3,
                         texture_storage_2d(
                             TextureFormat::Rgba32Uint,
+                            StorageTextureAccess::ReadWrite,
+                        ),
+                    ),
+                    (
+                        4,
+                        texture_storage_2d(
+                            TextureFormat::Rgba32Float,
+                            StorageTextureAccess::ReadWrite,
+                        ),
+                    ),
+                    (
+                        5,
+                        texture_storage_2d(
+                            TextureFormat::Rgba32Float,
                             StorageTextureAccess::ReadWrite,
                         ),
                     ),
@@ -99,52 +115,63 @@ impl FromWorld for FftPipelines {
 
 pub(crate) fn prepare_fft_textures(
     mut commands: Commands,
-    mut texture_cache: ResMut<TextureCache>,
-    render_device: Res<RenderDevice>,
-    query: Query<(Entity, &FftSettings)>,
+    mut images: ResMut<Assets<Image>>,
+    query: Query<(Entity, &FftSource), Without<FftTextures>>,
 ) {
-    for (entity, settings) in &query {
-        let input = texture_cache.get(
-            &render_device,
-            TextureDescriptor {
-                label: Some("fft_input"),
-                size: Extent3d {
-                    width: settings.size.x,
-                    height: settings.size.y,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: TextureFormat::Rgba32Float,
-                usage: TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
+    for (entity, source) in &query {
+        // if the entity has a FftTextures component, skip
+
+        // Create a new image that can be used as a render target
+        let mut image = Image::new_fill(
+            Extent3d {
+                width: source.size.x,
+                height: source.size.y,
+                depth_or_array_layers: 1,
             },
+            TextureDimension::D2,
+            &[0; 16],
+            TextureFormat::Rgba32Uint,
+            RenderAssetUsages::default(),
         );
 
-        let output = texture_cache.get(
-            &render_device,
-            TextureDescriptor {
-                label: Some("fft_output"),
-                size: Extent3d {
-                    width: settings.size.x,
-                    height: settings.size.y,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: TextureFormat::Rgba32Uint,
-                usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
+        // Set the texture usage flags needed for FFT computation and display
+        image.texture_descriptor.usage = TextureUsages::STORAGE_BINDING
+            | TextureUsages::TEXTURE_BINDING
+            | TextureUsages::COPY_DST
+            | TextureUsages::RENDER_ATTACHMENT;
+
+        // Add the image to the asset system and get its handle
+        let image_handle = images.add(image);
+
+        let mut re_image = Image::new_fill(
+            Extent3d {
+                width: source.size.x,
+                height: source.size.y,
+                depth_or_array_layers: 1,
             },
+            TextureDimension::D2,
+            &[0; 16],
+            TextureFormat::Rgba32Float,
+            RenderAssetUsages::default(),
         );
 
-        once!(log::info!("Prepared FFT textures"));
+        re_image.texture_descriptor.usage = TextureUsages::STORAGE_BINDING
+            | TextureUsages::TEXTURE_BINDING
+            | TextureUsages::COPY_DST
+            | TextureUsages::RENDER_ATTACHMENT;
 
-        commands
-            .entity(entity)
-            .insert(FftTextures { input, output });
+        let im_image = re_image.clone();
+
+        let re_image_handle = images.add(re_image);
+        let im_image_handle = images.add(im_image);
+
+        log::info!("Prepared FFT textures");
+
+        commands.entity(entity).insert(FftTextures {
+            output: image_handle,
+            re: re_image_handle,
+            im: im_image_handle,
+        });
     }
 }
 
@@ -160,7 +187,10 @@ pub(crate) fn prepare_fft_bind_groups(
     fft_uniforms: Res<ComponentUniforms<FftSettings>>,
     fft_roots_buffer: Res<FftRootsBuffer>,
     gpu_images: Res<RenderAssets<GpuImage>>,
-    query: Query<(Entity, &FftTextures, &FftSourceImage), With<FftSettings>>,
+    query: Query<
+        (Entity, &FftTextures, &FftSourceImage),
+        (With<FftSettings>, Without<FftBindGroups>),
+    >,
 ) {
     let settings_binding = fft_uniforms
         .binding()
@@ -175,6 +205,18 @@ pub(crate) fn prepare_fft_bind_groups(
             .get(&img.0)
             .expect("Failed to prepare FFT bind groups. Source image not found");
 
+        let output_image = gpu_images
+            .get(&textures.output)
+            .expect("Failed to prepare FFT bind groups. Output image not found");
+
+        let re_image = gpu_images
+            .get(&textures.re)
+            .expect("Failed to prepare FFT bind groups. Re image not found");
+
+        let im_image = gpu_images
+            .get(&textures.im)
+            .expect("Failed to prepare FFT bind groups. Im image not found");
+
         let compute = render_device.create_bind_group(
             "fft_compute_bind_group",
             &layouts.compute,
@@ -182,7 +224,9 @@ pub(crate) fn prepare_fft_bind_groups(
                 (0, settings_binding.clone()),
                 (1, roots_binding.clone()),
                 (2, &source_image.texture_view),
-                (3, &textures.output.default_view),
+                (3, &output_image.texture_view),
+                (4, &re_image.texture_view),
+                (5, &im_image.texture_view),
             )),
         );
 

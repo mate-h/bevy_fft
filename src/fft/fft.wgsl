@@ -15,11 +15,15 @@
         roots_buffer,
         src_tex,
         dst_tex,
+        re_tex,
+        im_tex,
     },
     texel::{
         load_c32_n,
         store_c32_n,
-        load_real_c32_n,
+        load_re_c32_n,
+        store_re_c32_n,
+        store_im_c32_n,
     }
 };
 
@@ -50,7 +54,7 @@ fn fft(
     let in_bounds = all(pos < uniforms.src_size + uniforms.src_padding) && all(pos >= uniforms.src_padding);
     let swizzled_index = swizzle(8u, i);
     if (in_bounds) {
-        temp[swizzled_index] = load_real_c32_n(src_tex, pos - uniforms.src_padding);
+        temp[swizzled_index] = load_re_c32_n(src_tex, pos - uniforms.src_padding);
     } else {
         temp[swizzled_index] = splat_c32_n(c32(0.0, 0.0));
     }
@@ -73,7 +77,8 @@ fn fft(
     }
 
     store_c32_n(vec2(i, j), temp[i]);
-
+    store_re_c32_n(vec2(i, j), temp[i]);
+    store_im_c32_n(vec2(i, j), temp[i]);
     storageBarrier();
 
     for (var order = 8u; order < uniforms.orders; order++) {
@@ -92,7 +97,8 @@ fn fft(
         let c_o = fma_c32_n(c_1, root, c_2);
 
         store_c32_n(vec2(i, j), c_o);
-
+        store_re_c32_n(vec2(i, j), c_o);
+        store_im_c32_n(vec2(i, j), c_o);
         storageBarrier();
     }
 }

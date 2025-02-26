@@ -24,6 +24,8 @@
     bindings::{
         src_tex,
         dst_tex,
+        re_tex,
+        im_tex,
     },
 };
 
@@ -74,36 +76,36 @@ fn load_c32_n(pos: vec2<u32>) -> c32_4 {
 #endif
 #endif
 
-fn load_real_c32(tex: texture_2d<f32>, pos: vec2<u32>) -> c32 {
+fn load_re_c32(tex: texture_2d<f32>, pos: vec2<u32>) -> c32 {
     let real = textureLoad(tex, pos, 0).x;
     return c32(real, 0.0);
 }
 
-fn load_real_c32_2(tex: texture_2d<f32>, pos: vec2<u32>) -> c32_2 {
+fn load_re_c32_2(tex: texture_2d<f32>, pos: vec2<u32>) -> c32_2 {
     let real = textureLoad(tex, pos, 0).xy;
     return c32_2(real, vec2(0.0));
 }
 
-fn load_real_c32_3(tex: texture_2d<f32>, pos: vec2<u32>) -> c32_3 {
+fn load_re_c32_3(tex: texture_2d<f32>, pos: vec2<u32>) -> c32_3 {
     let real = textureLoad(tex, pos, 0).xyz;
     return c32_3(real, vec3(0.0));
 }
 
-fn load_real_c32_4(tex: texture_2d<f32>, pos: vec2<u32>) -> c32_4 {
+fn load_re_c32_4(tex: texture_2d<f32>, pos: vec2<u32>) -> c32_4 {
     let real = textureLoad(tex, pos, 0).xyzw;
     return c32_4(real, vec4(0.0));
 }
 
 #ifdef CHANNELS
-fn load_real_c32_n(tex: texture_2d<f32>, pos: vec2<u32>) -> c32_n {
+fn load_re_c32_n(tex: texture_2d<f32>, pos: vec2<u32>) -> c32_n {
 #if CHANNELS == 1 
-    return load_real_c32(tex, pos);
+    return load_re_c32(tex, pos);
 #else if CHANNELS == 2
-    return load_real_c32_2(tex, pos);
+    return load_re_c32_2(tex, pos);
 #else if CHANNELS == 3
-    return load_real_c32_3(tex, pos);
+    return load_re_c32_3(tex, pos);
 #else if CHANNELS == 4
-    return load_real_c32_4(tex, pos);
+    return load_re_c32_4(tex, pos);
 #endif
 }
 #endif
@@ -135,20 +137,41 @@ fn store_c32_n(pos: vec2<u32>, c: c32_4) {
 
 #ifdef CHANNELS
 #if CHANNELS == 1 
-fn store_real_c32_n(pos: vec2<u32>, c: c32) {
-    textureStore(dst_tex, pos, vec4(c.re, 0.0, 0.0, 0.0));
+fn store_re_c32_n(pos: vec2<u32>, c: c32) {
+    textureStore(re_tex, pos, vec4(c.re, 0.0, 0.0, 0.0));
 }
 #else if CHANNELS == 2
-fn store_real_c32_n(tex: texture_storage_2d<rgb32uint, read_write>, pos: vec2<u32>, c: c32_3) {
-    textureStore(dst_tex, pos, vec4(c.re, 0.0, 0.0));
+fn store_re_c32_n(pos: vec2<u32>, c: c32_3) {
+    textureStore(re_tex, pos, vec4(c.re, 0.0, 0.0));
 }
 #else if CHANNELS == 3
-fn store_real_c32_n(tex: texture_storage_2d<rgba32uint, read_write>, pos: vec2<u32>, c: c32_3) {
-    textureStore(dst_tex, pos, vec4(c.re, 0.0));
+fn store_re_c32_n(pos: vec2<u32>, c: c32_3) {
+    textureStore(re_tex, pos, vec4(c.re, 0.0));
 }
 #else if CHANNELS == 4
-fn store_real_c32_n(tex: texture_storage_2d<rgba32uint, read_write>, pos: vec2<u32>, c: c32_4) {
-    textureStore(dst_tex, pos, vec4(c.re));
+fn store_re_c32_n(pos: vec2<u32>, c: c32_4) {
+    textureStore(re_tex, pos, vec4(c.re));
 }
 #endif
 #endif
+
+#ifdef CHANNELS
+#if CHANNELS == 1
+fn store_im_c32_n(pos: vec2<u32>, c: c32) {
+    textureStore(im_tex, pos, vec4(c.im));
+}
+#else if CHANNELS == 2
+fn store_im_c32_n(pos: vec2<u32>, c: c32_2) {
+    textureStore(im_tex, pos, vec4(c.im, 0.0));
+}
+#else if CHANNELS == 3
+fn store_im_c32_n(pos: vec2<u32>, c: c32_3) {
+    textureStore(im_tex, pos, vec4(c.im, 0.0));
+}
+#else
+fn store_im_c32_n(pos: vec2<u32>, c: c32_4) {
+    textureStore(im_tex, pos, vec4(c.im));
+}
+#endif
+#endif
+

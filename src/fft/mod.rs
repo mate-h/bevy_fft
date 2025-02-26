@@ -1,22 +1,17 @@
 use bevy::core_pipeline::core_2d::graph::Core2d;
-use bevy::core_pipeline::core_3d::graph::Core3d;
-use bevy_app::{App, Plugin, Startup};
+use bevy_app::{App, Plugin, Update};
 use bevy_asset::{load_internal_asset, Handle};
+use bevy_ecs::component::Component;
 use bevy_ecs::query::QueryItem;
 use bevy_ecs::schedule::IntoSystemConfigs;
 use bevy_ecs::system::lifetimeless::Read;
-use bevy_ecs::system::{Commands, Query};
-use bevy_ecs::world::{FromWorld, World};
-use bevy_ecs::{component::Component, resource::Resource};
 use bevy_image::Image;
 use bevy_math::UVec2;
 use bevy_reflect::Reflect;
-use bevy_render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy_render::{
     extract_component::{ExtractComponent, ExtractComponentPlugin, UniformComponentPlugin},
     render_graph::RenderGraphApp,
     render_resource::*,
-    texture::CachedTexture,
     Render, RenderApp, RenderSet,
 };
 
@@ -133,11 +128,13 @@ impl Plugin for FftPlugin {
 
         app.register_type::<FftSource>()
             .register_type::<FftRoots>()
+            .add_systems(Update, prepare_fft_textures)
             .add_plugins((
                 ExtractComponentPlugin::<FftSettings>::default(),
                 UniformComponentPlugin::<FftSettings>::default(),
                 ExtractComponentPlugin::<FftRoots>::default(),
                 ExtractComponentPlugin::<FftSourceImage>::default(),
+                ExtractComponentPlugin::<FftTextures>::default(),
             ));
     }
 
@@ -153,7 +150,6 @@ impl Plugin for FftPlugin {
             .add_systems(
                 Render,
                 (
-                    prepare_fft_textures.in_set(RenderSet::PrepareResources),
                     prepare_fft_bind_groups.in_set(RenderSet::PrepareBindGroups),
                     prepare_fft_roots_buffer
                         .in_set(RenderSet::PrepareResources)
@@ -164,10 +160,11 @@ impl Plugin for FftPlugin {
     }
 }
 
-#[derive(Component)]
+#[derive(Component, ExtractComponent, Clone)]
 pub struct FftTextures {
-    pub input: CachedTexture,
-    pub output: CachedTexture,
+    pub output: Handle<Image>,
+    pub re: Handle<Image>,
+    pub im: Handle<Image>,
 }
 
 #[derive(Component)]
