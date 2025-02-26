@@ -1,6 +1,5 @@
 use std::num::NonZero;
 
-use bevy::log;
 use bevy_asset::{Assets, RenderAssetUsages};
 use bevy_ecs::{
     component::Component,
@@ -11,6 +10,7 @@ use bevy_ecs::{
     world::{FromWorld, World},
 };
 use bevy_image::Image;
+use bevy_log::info;
 use bevy_render::{
     extract_component::ComponentUniforms,
     render_asset::RenderAssets,
@@ -88,7 +88,7 @@ impl FromWorld for FftBindGroupLayouts {
 #[derive(Resource)]
 pub(crate) struct FftPipelines {
     pub fft: CachedComputePipelineId,
-    // pub ifft: CachedComputePipelineId,
+    pub ifft: CachedComputePipelineId,
 }
 
 impl FromWorld for FftPipelines {
@@ -104,12 +104,22 @@ impl FromWorld for FftPipelines {
             layout: vec![layouts.compute.clone()],
             push_constant_ranges: vec![],
             shader: shaders::FFT,
-            shader_defs,
+            shader_defs: shader_defs.clone(),
             entry_point: "fft".into(),
             zero_initialize_workgroup_memory: false,
         });
 
-        Self { fft }
+        let ifft = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("ifft_pipeline".into()),
+            layout: vec![layouts.compute.clone()],
+            push_constant_ranges: vec![],
+            shader: shaders::IFFT,
+            shader_defs,
+            entry_point: "ifft".into(),
+            zero_initialize_workgroup_memory: false,
+        });
+
+        Self { fft, ifft }
     }
 }
 
@@ -165,7 +175,7 @@ pub(crate) fn prepare_fft_textures(
         let re_image_handle = images.add(re_image);
         let im_image_handle = images.add(im_image);
 
-        log::info!("Prepared FFT textures");
+        info!("Prepared FFT textures");
 
         commands.entity(entity).insert(FftTextures {
             output: image_handle,
@@ -192,30 +202,48 @@ pub(crate) fn prepare_fft_bind_groups(
         (With<FftSettings>, Without<FftBindGroups>),
     >,
 ) {
-    let settings_binding = fft_uniforms
-        .binding()
-        .expect("Failed to prepare FFT bind groups. FftSettings uniform buffer missing");
-    let roots_binding = fft_roots_buffer
-        .buffer
-        .binding()
-        .expect("Failed to prepare FFT bind groups. FftRootsBuffer buffer missing");
+    let Some(settings_binding) = fft_uniforms.binding() else {
+        info!("FftSettings uniform buffer missing, skipping bind group creation");
+        return;
+    };
+
+    let Some(roots_binding) = fft_roots_buffer.buffer.binding() else {
+        info!("FftRootsBuffer buffer missing, skipping bind group creation");
+        return;
+    };
 
     for (entity, textures, img) in &query {
-        let source_image = gpu_images
-            .get(&img.0)
-            .expect("Failed to prepare FFT bind groups. Source image not found");
+        let Some(source_image) = gpu_images.get(&img.0) else {
+            info!(
+                "Source image not found, skipping bind group creation for entity {:?}",
+                entity
+            );
+            continue;
+        };
 
-        let output_image = gpu_images
-            .get(&textures.output)
-            .expect("Failed to prepare FFT bind groups. Output image not found");
+        let Some(output_image) = gpu_images.get(&textures.output) else {
+            info!(
+                "Output image not found, skipping bind group creation for entity {:?}",
+                entity
+            );
+            continue;
+        };
 
-        let re_image = gpu_images
-            .get(&textures.re)
-            .expect("Failed to prepare FFT bind groups. Re image not found");
+        let Some(re_image) = gpu_images.get(&textures.re) else {
+            info!(
+                "Re image not found, skipping bind group creation for entity {:?}",
+                entity
+            );
+            continue;
+        };
 
-        let im_image = gpu_images
-            .get(&textures.im)
-            .expect("Failed to prepare FFT bind groups. Im image not found");
+        let Some(im_image) = gpu_images.get(&textures.im) else {
+            info!(
+                "Im image not found, skipping bind group creation for entity {:?}",
+                entity
+            );
+            continue;
+        };
 
         let compute = render_device.create_bind_group(
             "fft_compute_bind_group",
@@ -230,7 +258,7 @@ pub(crate) fn prepare_fft_bind_groups(
             )),
         );
 
-        once!(log::info!("Prepared FFT bind groups"));
+        once!(info!("Prepared FFT bind groups"));
 
         commands.entity(entity).insert(FftBindGroups { compute });
     }
@@ -270,7 +298,7 @@ pub(crate) fn prepare_fft_roots_buffer(
         return;
     };
 
-    once!(log::info!("Prepared FFT roots buffer"));
+    once!(info!("Prepared FFT roots buffer"));
 
     fft_roots_buffer.buffer.set(*roots);
     fft_roots_buffer.buffer.write_buffer(&device, &queue);

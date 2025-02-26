@@ -23,13 +23,25 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn(Camera2d::default());
 
     // Load source image
-    let image_handle = asset_server.load("tiles.png");
+    let image_handle = asset_server.load("circles_pattern.png");
 
-    // Calculate FFT roots
+    // Calculate FFT roots properly organized for the butterfly algorithm
     let mut roots = [c32::new(0.0, 0.0); 8192];
-    for i in 0..8192 {
-        let theta = -2.0 * std::f32::consts::PI * (i as f32) / 8192.0;
-        roots[i] = c32::new(theta.cos(), theta.sin());
+
+    // For each FFT stage (order)
+    for order in 0..13 {
+        // 13 orders for up to 8192-point FFT
+        let base = 1 << order;
+        let count = base >> 1;
+
+        // Calculate roots for this stage
+        for k in 0..count {
+            let theta = -2.0 * std::f32::consts::PI * (k as f32) / (base as f32);
+            let root = c32::new(theta.cos(), theta.sin());
+
+            // Store in the correct location expected by the shader
+            roots[base + k] = root;
+        }
     }
 
     // Spawn source image entity with FFT components
@@ -40,6 +52,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
             orders: 8,
             padding: UVec2::ZERO,
             roots,
+            inverse: false,
         },
         Sprite {
             custom_size: Some(Vec2::new(256.0, 256.0)),
@@ -64,7 +77,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
             custom_size: Some(Vec2::new(256.0, 256.0)),
             ..default()
         },
-        Transform::from_xyz(150.0, 0.0, 0.0),
+        Transform::from_xyz(300.0, 0.0, 0.0),
         FftOutputIm,
     ));
 }

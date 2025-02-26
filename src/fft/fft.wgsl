@@ -4,6 +4,7 @@
     complex::{
         splat_c32_n,
         fma_c32_n,
+        add_c32_n,
         // channel specific imports (aliasing doesn't work cross-modules)
         c32,
         c32_2,
@@ -76,9 +77,14 @@ fn fft(
         workgroupBarrier();
     }
 
+    // for debugging
+    let t_o = c32_n(vec4(.5), vec4(.5));
+
     store_c32_n(vec2(i, j), temp[i]);
-    store_re_c32_n(vec2(i, j), temp[i]);
-    store_im_c32_n(vec2(i, j), temp[i]);
+    // store the magnitude in re_tex
+    var mag = sqrt(temp[i].re * temp[i].re + temp[i].im * temp[i].im);
+    textureStore(re_tex, vec2(i, j), temp[i].re);
+    textureStore(im_tex, vec2(i, j), temp[i].im);
     storageBarrier();
 
     for (var order = 8u; order < uniforms.orders; order++) {
@@ -97,8 +103,9 @@ fn fft(
         let c_o = fma_c32_n(c_1, root, c_2);
 
         store_c32_n(vec2(i, j), c_o);
-        store_re_c32_n(vec2(i, j), c_o);
-        store_im_c32_n(vec2(i, j), c_o);
+        mag = sqrt(c_o.re * c_o.re + c_o.im * c_o.im);
+        textureStore(re_tex, vec2(i, j), c_o.re);
+        textureStore(im_tex, vec2(i, j), c_o.im);
         storageBarrier();
     }
 }

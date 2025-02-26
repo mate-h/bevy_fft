@@ -234,7 +234,7 @@ fn neg_c32_4(c: c32_4) -> c32_4 {
 #ifdef CHANNELS
 fn neg_c32_n(c: c32_n) -> c32_n {
 #if CHANNELS == 1
-    return negj_c32(c);
+    return neg_c32(c);
 #else if CHANNELS == 2
     return neg_c32_2(c);
 #else if CHANNELS == 3
@@ -355,3 +355,33 @@ fn fma_c32_n(c1: c32_n, c2: c32, c3: c32_n) -> c32_n {
 fn cis_c32(theta: f32) -> c32 {
     return c32(cos(theta), sin(theta));
 }
+
+fn conj_c32(c: c32) -> c32 {
+    return c32(c.re, -c.im);
+}
+
+fn conj_c32_2(c: c32_2) -> c32_2 {
+    return c32_2(c.re, -c.im);
+}
+
+fn conj_c32_3(c: c32_3) -> c32_3 {
+    return c32_3(c.re, -c.im);
+}
+
+fn conj_c32_4(c: c32_4) -> c32_4 {
+    return c32_4(c.re, -c.im);
+}
+
+#ifdef CHANNELS
+fn conj_c32_n(c: c32_n) -> c32_n {
+#if CHANNELS == 1
+    return conj_c32(c);
+#else if CHANNELS == 2
+    return conj_c32_2(c);
+#else if CHANNELS == 3
+    return conj_c32_3(c);
+#else if CHANNELS == 4
+    return conj_c32_4(c);
+#endif
+}
+#endif

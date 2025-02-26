@@ -1,6 +1,6 @@
-use bevy::core_pipeline::core_2d::graph::Core2d;
 use bevy_app::{App, Plugin, Update};
 use bevy_asset::{load_internal_asset, Handle};
+use bevy_core_pipeline::core_2d::graph::Core2d;
 use bevy_ecs::component::Component;
 use bevy_ecs::query::QueryItem;
 use bevy_ecs::schedule::IntoSystemConfigs;
@@ -34,6 +34,7 @@ mod shaders {
     pub const C32: Handle<Shader> = weak_handle!("f9123e70-23a6-4dc3-a9fb-4a02ea636cfb");
     pub const TEXEL: Handle<Shader> = weak_handle!("33f1ccb3-7d87-48d3-8984-51892e6652d0");
     pub const BINDINGS: Handle<Shader> = weak_handle!("1900debb-855d-489b-a973-2559249c3945");
+    pub const IFFT: Handle<Shader> = weak_handle!("1cdd1e33-58d6-4a57-a183-c1eaa6ddf4e1");
 }
 
 // Public-facing component
@@ -49,6 +50,8 @@ pub struct FftSource {
     pub padding: UVec2,
     /// Roots of the FFT
     pub roots: [c32; 8192],
+    /// Inverse flag
+    pub inverse: bool,
 }
 
 impl Default for FftSource {
@@ -59,6 +62,7 @@ impl Default for FftSource {
             orders: 8,
             padding: UVec2::ZERO,
             roots: [c32::new(0.0, 0.0); 8192],
+            inverse: false,
         }
     }
 }
@@ -70,6 +74,7 @@ pub struct FftSettings {
     pub size: UVec2,
     pub orders: u32,
     pub padding: UVec2,
+    pub inverse: u32,
 }
 
 impl ExtractComponent for FftSettings {
@@ -82,6 +87,7 @@ impl ExtractComponent for FftSettings {
             size: item.size,
             orders: item.orders,
             padding: item.padding,
+            inverse: item.inverse as u32,
         })
     }
 }
@@ -124,7 +130,7 @@ impl Plugin for FftPlugin {
         load_internal_asset!(app, shaders::TEXEL, "texel.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::BINDINGS, "bindings.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::C32, "../complex/c32.wgsl", Shader::from_wgsl);
-        // load_internal_asset!(app, shaders::IFFT, "ifft.wgsl", Shader::from_wgsl);
+        load_internal_asset!(app, shaders::IFFT, "ifft.wgsl", Shader::from_wgsl);
 
         app.register_type::<FftSource>()
             .register_type::<FftRoots>()
@@ -156,7 +162,8 @@ impl Plugin for FftPlugin {
                         .before(RenderSet::PrepareBindGroups),
                 ),
             )
-            .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeFFT);
+            .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeFFT)
+            .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeIFFT);
     }
 }
 
