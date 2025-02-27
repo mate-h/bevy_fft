@@ -17,6 +17,7 @@ use bevy_render::{
 
 mod node;
 pub mod resources;
+pub use resources::FftTextures;
 
 use node::{FftComputeNode, FftNode};
 use resources::{
@@ -32,7 +33,7 @@ mod shaders {
 
     pub const FFT: Handle<Shader> = weak_handle!("7f7dd4fd-50bd-40fb-9dd2-d69dc6d5dd40");
     pub const C32: Handle<Shader> = weak_handle!("f9123e70-23a6-4dc3-a9fb-4a02ea636cfb");
-    pub const TEXEL: Handle<Shader> = weak_handle!("33f1ccb3-7d87-48d3-8984-51892e6652d0");
+    pub const BUFFER: Handle<Shader> = weak_handle!("33f1ccb3-7d87-48d3-8984-51892e6652d0");
     pub const BINDINGS: Handle<Shader> = weak_handle!("1900debb-855d-489b-a973-2559249c3945");
     pub const IFFT: Handle<Shader> = weak_handle!("1cdd1e33-58d6-4a57-a183-c1eaa6ddf4e1");
 }
@@ -127,7 +128,7 @@ impl Plugin for FftPlugin {
     fn build(&self, app: &mut App) {
         // Load shaders
         load_internal_asset!(app, shaders::FFT, "fft.wgsl", Shader::from_wgsl);
-        load_internal_asset!(app, shaders::TEXEL, "texel.wgsl", Shader::from_wgsl);
+        load_internal_asset!(app, shaders::BUFFER, "buffer.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::BINDINGS, "bindings.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::C32, "../complex/c32.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::IFFT, "ifft.wgsl", Shader::from_wgsl);
@@ -162,19 +163,7 @@ impl Plugin for FftPlugin {
                         .before(RenderSet::PrepareBindGroups),
                 ),
             )
-            .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeFFT)
-            .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeIFFT);
+            .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeFFT);
+        // .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeIFFT);
     }
-}
-
-#[derive(Component, ExtractComponent, Clone)]
-pub struct FftTextures {
-    pub output: Handle<Image>,
-    pub re: Handle<Image>,
-    pub im: Handle<Image>,
-}
-
-#[derive(Component)]
-pub struct FftBindGroups {
-    pub compute: BindGroup,
 }

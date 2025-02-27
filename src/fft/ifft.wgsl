@@ -4,7 +4,6 @@
     complex::{
         splat_c32_n,
         fma_c32_n,
-        conj_c32_n,
         mul_c32_n,
         add_c32_n,
         // channel specific imports (aliasing doesn't work cross-modules)
@@ -14,20 +13,14 @@
         c32_4,
     }, 
     bindings::{
-        uniforms,
+        settings,
         roots_buffer,
-        src_tex,
-        dst_tex,
-        re_tex,
-        im_tex,
     },
-    texel::{
-        load_c32_n,
-        store_c32_n,
-        load_re_c32_n,
-        store_re_c32_n,
-        store_im_c32_n,
-    }
+    buffer::{
+        read_buffer,
+        write_buffer,
+        write_output,
+    },
 };
 
 #ifdef CHANNELS
@@ -43,6 +36,7 @@
 #endif
 
 var<workgroup> temp: array<c32_n, 256>;
+var<push_constant> iteration_override: u32;
 
 @compute
 @workgroup_size(256, 1, 1)
@@ -50,17 +44,32 @@ fn ifft(
     @builtin(global_invocation_id) global_index: vec3<u32>,
     @builtin(local_invocation_index) wg_index: u32,
 ) {
-    let i = global_index.x;
-    let j = global_index.y;
+    #ifdef VERTICAL
+        // swap x and y
+        let i = global_index.y;
+        let j = global_index.x;
+    #else
+        let i = global_index.x;
+        let j = global_index.y; 
+    #endif
 
     let pos = vec2(i, j);
-    let in_bounds = all(pos < uniforms.src_size + uniforms.src_padding) && all(pos >= uniforms.src_padding);
+    let in_bounds = all(pos < settings.src_size + settings.src_padding) && all(pos >= settings.src_padding);
     let swizzled_index = swizzle(8u, i);
-    if (in_bounds) {
-        // Take conjugate of input for IFFT
-        temp[swizzled_index] = conj_c32_n(load_c32_n(pos));
+
+    // Initial load - special case for first iteration
+    if (iteration_override == 0u) {
+        // First pass: load from input texture
+        if (in_bounds) {
+            let n = read_buffer(pos, 0u);
+            // Conjugate for IFFT
+            temp[swizzled_index] = c32_n(n.re, -n.im);
+        } else {
+            temp[swizzled_index] = splat_c32_n(c32(0.0, 0.0));
+        }
     } else {
-        temp[swizzled_index] = splat_c32_n(c32(0.0, 0.0));
+        // Subsequent passes: load from ping-pong buffer
+        temp[swizzled_index] = read_buffer(pos, iteration_override);
     }
     workgroupBarrier();
 
@@ -76,24 +85,17 @@ fn ifft(
         }
 
         // Use conjugate of root for IFFT
-        let root = conj_c32(get_root(uniforms.orders, i_subsection * (uniforms.orders - order)));
+        let root = conj_c32(get_root(settings.orders, i_subsection * (settings.orders - order)));
         temp[i] = fma_c32_n(temp[i], root, temp[u32(i32(i) + offset)]);
         workgroupBarrier();
     }
 
-    // For IFFT, we need to scale by 1/N
-    let scale_factor = 1.0 / f32(1u << uniforms.orders);
-    let scaled_temp = mul_c32_n(temp[i], splat_c32_n(c32(scale_factor, 0.0)));
-
-    // for debugging
-    let t_o = c32_n(vec4(.5), vec4(.5));
-    
-    store_c32_n(vec2(i, j), scaled_temp);
-    store_re_c32_n(vec2(i, j), add_c32_n(scaled_temp, t_o));
-    store_im_c32_n(vec2(i, j), add_c32_n(scaled_temp, t_o));
+    // Store intermediate results to the appropriate buffer
+    let result = temp[i];
+    write_buffer(vec2(i, j), result, iteration_override);
     storageBarrier();
 
-    for (var order = 8u; order < uniforms.orders; order++) {
+    for (var order = 8u; order < settings.orders; order++) {
         let subsection_count = 1u << order;
         let i_subsection = i % subsection_count;
         var offset: i32;
@@ -104,20 +106,34 @@ fn ifft(
         }
 
         // Use conjugate of root for IFFT
-        let root = conj_c32(get_root(uniforms.orders, i_subsection * (uniforms.orders - order)));
-        let c_1 = load_c32_n(vec2(i, j));
-        let c_2 = load_c32_n(vec2(u32(i32(i) + offset), j));
+        let root = conj_c32(get_root(settings.orders, i_subsection * (settings.orders - order)));
+        let o_1 = vec2(i, j);
+        let o_2 = vec2(u32(i32(i) + offset), j);
+        
+        // Calculate the current iteration based on the order
+        let current_iteration = iteration_override + (order - 8u);
+        
+        // Read from current buffer
+        let c_1 = read_buffer(o_1, current_iteration);
+        let c_2 = read_buffer(o_2, current_iteration);
+        
         let c_o = fma_c32_n(c_1, root, c_2);
-
-        // Scale by 1/N for the final result
-        var scaled_c_o = c_o;
-        if (order == uniforms.orders - 1u) {
-            scaled_c_o = mul_c32_n(c_o, splat_c32_n(c32(scale_factor, 0.0)));
+        
+        // For the final iteration, apply scaling and write to output
+        if (order == settings.orders - 1u) {
+            // For IFFT, we need to scale by 1/N
+            let scale_factor = 1.0 / f32(1u << settings.orders);
+            let scaled_c_o = mul_c32_n(c_o, splat_c32_n(c32(scale_factor, 0.0)));
+            
+            // Write to final output textures
+            if (in_bounds) {
+                write_output(pos - settings.src_padding, scaled_c_o);
+            }
+        } else {
+            // Write to ping-pong buffer for intermediate results
+            write_buffer(vec2(i, j), c_o, current_iteration);
         }
-
-        store_c32_n(vec2(i, j), scaled_c_o);
-        store_re_c32_n(vec2(i, j), add_c32_n(scaled_c_o, t_o));
-        store_im_c32_n(vec2(i, j), add_c32_n(scaled_c_o, t_o));
+        
         storageBarrier();
     }
 }

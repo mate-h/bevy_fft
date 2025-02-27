@@ -17,6 +17,7 @@ bevy_render = { path = "../bevy_render", version = "0.16.0-dev" }
 bevy_utils = { path = "../bevy_utils", version = "0.16.0-dev" }
 gigs = "0.1.1"
 half = "2.4.1"
+bytemuck = "1"
 
 [[example]]
 name = "fft"

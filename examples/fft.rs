@@ -90,10 +90,10 @@ fn update_output_sprites(
 ) {
     if let Ok(fft_textures) = fft_query.get_single() {
         if let Ok(mut re_sprite) = re_query.get_single_mut() {
-            re_sprite.image = fft_textures.re.clone();
+            re_sprite.image = fft_textures.buffer_b_re.clone();
         }
         if let Ok(mut im_sprite) = im_query.get_single_mut() {
-            im_sprite.image = fft_textures.im.clone();
+            im_sprite.image = fft_textures.buffer_b_im.clone();
         }
     }
 }

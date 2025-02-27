@@ -1,6 +1,6 @@
 use std::num::NonZero;
 
-use bevy_asset::{Assets, RenderAssetUsages};
+use bevy_asset::{Assets, Handle, RenderAssetUsages};
 use bevy_ecs::{
     component::Component,
     entity::Entity,
@@ -12,7 +12,7 @@ use bevy_ecs::{
 use bevy_image::Image;
 use bevy_log::info;
 use bevy_render::{
-    extract_component::ComponentUniforms,
+    extract_component::{ComponentUniforms, ExtractComponent},
     render_asset::RenderAssets,
     render_resource::{
         binding_types::{storage_buffer_sized, texture_2d, texture_storage_2d, uniform_buffer},
@@ -25,135 +25,172 @@ use bevy_utils::once;
 
 use crate::complex::c32;
 
-use super::{shaders, FftRoots, FftSettings, FftSource, FftSourceImage, FftTextures};
+use super::{shaders, FftRoots, FftSettings, FftSource, FftSourceImage};
 
 #[derive(Resource)]
 pub(crate) struct FftBindGroupLayouts {
-    pub compute: BindGroupLayout,
+    pub common: BindGroupLayout,
+    pub horizontal_io: BindGroupLayout,
+    pub vertical_io: BindGroupLayout,
 }
 
 impl FromWorld for FftBindGroupLayouts {
     fn from_world(world: &mut World) -> Self {
         let render_device = world.resource::<RenderDevice>();
 
-        let compute = render_device.create_bind_group_layout(
-            "fft_compute_bind_group_layout",
-            &BindGroupLayoutEntries::with_indices(
+        // Common bind group layout (group 0)
+        let common = render_device.create_bind_group_layout(
+            "fft_common_bind_group_layout",
+            &BindGroupLayoutEntries::sequential(
                 ShaderStages::COMPUTE,
                 (
-                    (0, uniform_buffer::<FftSettings>(false)),
-                    (
-                        1,
-                        storage_buffer_sized(
-                            false,
-                            Some(
-                                NonZero::<u64>::new(std::mem::size_of::<FftRoots>() as u64)
-                                    .unwrap(),
-                            ),
-                        ),
+                    uniform_buffer::<FftSettings>(false),
+                    storage_buffer_sized(
+                        false,
+                        Some(NonZero::<u64>::new(std::mem::size_of::<FftRoots>() as u64).unwrap()),
                     ),
-                    (
-                        2,
-                        texture_2d(TextureSampleType::Float { filterable: false }),
-                    ),
-                    (
-                        3,
-                        texture_storage_2d(
-                            TextureFormat::Rgba32Uint,
-                            StorageTextureAccess::ReadWrite,
-                        ),
-                    ),
-                    (
-                        4,
-                        texture_storage_2d(
-                            TextureFormat::Rgba32Float,
-                            StorageTextureAccess::ReadWrite,
-                        ),
-                    ),
-                    (
-                        5,
-                        texture_storage_2d(
-                            TextureFormat::Rgba32Float,
-                            StorageTextureAccess::ReadWrite,
-                        ),
-                    ),
+                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
+                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
+                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
+                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
                 ),
             ),
         );
 
-        Self { compute }
+        // Horizontal I/O bind group layout (group 1)
+        let horizontal_io = render_device.create_bind_group_layout(
+            "fft_horizontal_io_bind_group_layout",
+            &BindGroupLayoutEntries::sequential(
+                ShaderStages::COMPUTE,
+                (
+                    texture_2d(TextureSampleType::Float { filterable: false }),
+                    texture_2d(TextureSampleType::Float { filterable: false }),
+                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
+                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
+                ),
+            ),
+        );
+
+        // Vertical I/O bind group layout (group 1)
+        let vertical_io = render_device.create_bind_group_layout(
+            "fft_vertical_io_bind_group_layout",
+            &BindGroupLayoutEntries::sequential(
+                ShaderStages::COMPUTE,
+                (
+                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
+                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
+                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
+                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
+                ),
+            ),
+        );
+
+        Self {
+            common,
+            horizontal_io,
+            vertical_io,
+        }
     }
 }
 
 #[derive(Resource)]
 pub(crate) struct FftPipelines {
-    pub fft: CachedComputePipelineId,
-    pub ifft: CachedComputePipelineId,
+    pub fft_horizontal: CachedComputePipelineId,
+    pub fft_vertical: CachedComputePipelineId,
+    pub ifft_horizontal: CachedComputePipelineId,
+    pub ifft_vertical: CachedComputePipelineId,
 }
 
 impl FromWorld for FftPipelines {
     fn from_world(world: &mut World) -> Self {
         let pipeline_cache = world.resource::<PipelineCache>();
         let layouts = world.resource::<FftBindGroupLayouts>();
-        let shader_defs = vec![
-            // number of channels in the input and output textures
-            ShaderDefVal::UInt("CHANNELS".into(), 4),
-        ];
-        let fft = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("fft_pipeline".into()),
-            layout: vec![layouts.compute.clone()],
-            push_constant_ranges: vec![],
+
+        // shader definitions
+        let base_shader_defs = vec![ShaderDefVal::UInt("CHANNELS".into(), 4)];
+        let mut horizontal_shader_defs = base_shader_defs.clone();
+        horizontal_shader_defs.push(ShaderDefVal::Bool("HORIZONTAL".into(), true));
+        let mut vertical_shader_defs = base_shader_defs.clone();
+        vertical_shader_defs.push(ShaderDefVal::Bool("VERTICAL".into(), true));
+
+        let push_constant_range = PushConstantRange {
+            stages: ShaderStages::COMPUTE,
+            range: 0..4,
+        };
+
+        let fft_horizontal = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("fft_horizontal_pipeline".into()),
+            layout: vec![layouts.common.clone(), layouts.horizontal_io.clone()],
+            push_constant_ranges: vec![push_constant_range.clone()],
             shader: shaders::FFT,
-            shader_defs: shader_defs.clone(),
+            shader_defs: horizontal_shader_defs.clone(),
             entry_point: "fft".into(),
             zero_initialize_workgroup_memory: false,
         });
 
-        let ifft = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("ifft_pipeline".into()),
-            layout: vec![layouts.compute.clone()],
-            push_constant_ranges: vec![],
+        let fft_vertical = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("fft_vertical_pipeline".into()),
+            layout: vec![layouts.common.clone(), layouts.vertical_io.clone()],
+            push_constant_ranges: vec![push_constant_range.clone()],
+            shader: shaders::FFT,
+            shader_defs: vertical_shader_defs.clone(),
+            entry_point: "fft".into(),
+            zero_initialize_workgroup_memory: false,
+        });
+
+        let ifft_horizontal = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("ifft_horizontal_pipeline".into()),
+            layout: vec![layouts.common.clone(), layouts.horizontal_io.clone()],
+            push_constant_ranges: vec![push_constant_range.clone()],
             shader: shaders::IFFT,
-            shader_defs,
+            shader_defs: horizontal_shader_defs,
             entry_point: "ifft".into(),
             zero_initialize_workgroup_memory: false,
         });
 
-        Self { fft, ifft }
+        let ifft_vertical = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("ifft_vertical_pipeline".into()),
+            layout: vec![layouts.common.clone(), layouts.vertical_io.clone()],
+            push_constant_ranges: vec![push_constant_range],
+            shader: shaders::IFFT,
+            shader_defs: vertical_shader_defs,
+            entry_point: "ifft".into(),
+            zero_initialize_workgroup_memory: false,
+        });
+
+        Self {
+            fft_horizontal,
+            fft_vertical,
+            ifft_horizontal,
+            ifft_vertical,
+        }
     }
 }
 
-pub(crate) fn prepare_fft_textures(
+#[derive(Component, ExtractComponent, Clone)]
+pub struct FftTextures {
+    // Input textures (for first pass)
+    pub re_in: Handle<Image>,
+    pub im_in: Handle<Image>,
+
+    // Ping-pong buffers (both read/write)
+    pub buffer_a_re: Handle<Image>,
+    pub buffer_a_im: Handle<Image>,
+    pub buffer_b_re: Handle<Image>,
+    pub buffer_b_im: Handle<Image>,
+
+    // Final output handles (for display)
+    pub re_out: Handle<Image>,
+    pub im_out: Handle<Image>,
+}
+
+pub fn prepare_fft_textures(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     query: Query<(Entity, &FftSource), Without<FftTextures>>,
 ) {
     for (entity, source) in &query {
-        // if the entity has a FftTextures component, skip
-
-        // Create a new image that can be used as a render target
         let mut image = Image::new_fill(
-            Extent3d {
-                width: source.size.x,
-                height: source.size.y,
-                depth_or_array_layers: 1,
-            },
-            TextureDimension::D2,
-            &[0; 16],
-            TextureFormat::Rgba32Uint,
-            RenderAssetUsages::default(),
-        );
-
-        // Set the texture usage flags needed for FFT computation and display
-        image.texture_descriptor.usage = TextureUsages::STORAGE_BINDING
-            | TextureUsages::TEXTURE_BINDING
-            | TextureUsages::COPY_DST
-            | TextureUsages::RENDER_ATTACHMENT;
-
-        // Add the image to the asset system and get its handle
-        let image_handle = images.add(image);
-
-        let mut re_image = Image::new_fill(
             Extent3d {
                 width: source.size.x,
                 height: source.size.y,
@@ -165,29 +202,40 @@ pub(crate) fn prepare_fft_textures(
             RenderAssetUsages::default(),
         );
 
-        re_image.texture_descriptor.usage = TextureUsages::STORAGE_BINDING
+        image.texture_descriptor.usage = TextureUsages::STORAGE_BINDING
             | TextureUsages::TEXTURE_BINDING
             | TextureUsages::COPY_DST
             | TextureUsages::RENDER_ATTACHMENT;
 
-        let im_image = re_image.clone();
-
-        let re_image_handle = images.add(re_image);
-        let im_image_handle = images.add(im_image);
+        let re_in = images.add(image.clone());
+        let im_in = images.add(image.clone());
+        let re_out = images.add(image.clone());
+        let im_out = images.add(image.clone());
+        let buffer_a_re = images.add(image.clone());
+        let buffer_a_im = images.add(image.clone());
+        let buffer_b_re = images.add(image.clone());
+        let buffer_b_im = images.add(image.clone());
 
         info!("Prepared FFT textures");
 
         commands.entity(entity).insert(FftTextures {
-            output: image_handle,
-            re: re_image_handle,
-            im: im_image_handle,
+            re_in,
+            im_in,
+            re_out,
+            im_out,
+            buffer_a_re,
+            buffer_a_im,
+            buffer_b_re,
+            buffer_b_im,
         });
     }
 }
 
 #[derive(Component)]
 pub struct FftBindGroups {
-    pub compute: BindGroup,
+    pub common: BindGroup,
+    pub horizontal_io: BindGroup,
+    pub vertical_io: BindGroup,
 }
 
 pub(crate) fn prepare_fft_bind_groups(
@@ -214,53 +262,77 @@ pub(crate) fn prepare_fft_bind_groups(
 
     for (entity, textures, img) in &query {
         let Some(source_image) = gpu_images.get(&img.0) else {
-            info!(
-                "Source image not found, skipping bind group creation for entity {:?}",
-                entity
-            );
+            continue;
+        };
+        let Some(re_in) = gpu_images.get(&textures.re_in) else {
+            continue;
+        };
+        let Some(im_in) = gpu_images.get(&textures.im_in) else {
+            continue;
+        };
+        let Some(re_out) = gpu_images.get(&textures.re_out) else {
+            continue;
+        };
+        let Some(im_out) = gpu_images.get(&textures.im_out) else {
+            continue;
+        };
+        let Some(buffer_a_re) = gpu_images.get(&textures.buffer_a_re) else {
+            continue;
+        };
+        let Some(buffer_a_im) = gpu_images.get(&textures.buffer_a_im) else {
+            continue;
+        };
+        let Some(buffer_b_re) = gpu_images.get(&textures.buffer_b_re) else {
+            continue;
+        };
+        let Some(buffer_b_im) = gpu_images.get(&textures.buffer_b_im) else {
             continue;
         };
 
-        let Some(output_image) = gpu_images.get(&textures.output) else {
-            info!(
-                "Output image not found, skipping bind group creation for entity {:?}",
-                entity
-            );
-            continue;
-        };
-
-        let Some(re_image) = gpu_images.get(&textures.re) else {
-            info!(
-                "Re image not found, skipping bind group creation for entity {:?}",
-                entity
-            );
-            continue;
-        };
-
-        let Some(im_image) = gpu_images.get(&textures.im) else {
-            info!(
-                "Im image not found, skipping bind group creation for entity {:?}",
-                entity
-            );
-            continue;
-        };
-
-        let compute = render_device.create_bind_group(
-            "fft_compute_bind_group",
-            &layouts.compute,
+        // Common bind group (group 0)
+        let common = render_device.create_bind_group(
+            "fft_common_bind_group",
+            &layouts.common,
             &BindGroupEntries::with_indices((
                 (0, settings_binding.clone()),
                 (1, roots_binding.clone()),
-                (2, &source_image.texture_view),
-                (3, &output_image.texture_view),
-                (4, &re_image.texture_view),
-                (5, &im_image.texture_view),
+                (2, &buffer_a_re.texture_view),
+                (3, &buffer_a_im.texture_view),
+                (4, &buffer_b_re.texture_view),
+                (5, &buffer_b_im.texture_view),
             )),
         );
 
-        once!(info!("Prepared FFT bind groups"));
+        // Horizontal I/O bind group (group 1)
+        let horizontal_io = render_device.create_bind_group(
+            "fft_horizontal_io_bind_group",
+            &layouts.horizontal_io,
+            &BindGroupEntries::with_indices((
+                (0, &source_image.texture_view),
+                (1, &im_in.texture_view),
+                (2, &re_out.texture_view), // dummy output, not actually used
+                (3, &im_out.texture_view),
+            )),
+        );
 
-        commands.entity(entity).insert(FftBindGroups { compute });
+        // Vertical I/O bind group (group 1)
+        let vertical_io = render_device.create_bind_group(
+            "fft_vertical_io_bind_group",
+            &layouts.vertical_io,
+            &BindGroupEntries::with_indices((
+                // use the ping-pong buffers as input to the vertical pass
+                (0, &buffer_a_re.texture_view),
+                (1, &buffer_a_im.texture_view),
+                (2, &re_out.texture_view),
+                (3, &im_out.texture_view),
+            )),
+        );
+
+        commands.entity(entity).insert(FftBindGroups {
+            common,
+            horizontal_io,
+            vertical_io,
+        });
     }
 }
 
