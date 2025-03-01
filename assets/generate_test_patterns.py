@@ -1,6 +1,10 @@
 import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
+import os
+
+out_dir = "assets/test_patterns"
+os.makedirs(out_dir, exist_ok=True)
 
 def save_image(data, filename, normalize=True):
     """Save a numpy array as an image file."""
@@ -15,7 +19,7 @@ def save_image(data, filename, normalize=True):
     
     # Create and save image
     img = Image.fromarray(img_data)
-    img.save(filename)
+    img.save(f"{out_dir}/{filename}")
     print(f"Saved {filename}")
 
 def create_sine_pattern(size=(256, 256), frequency=(10, 10)):
@@ -211,7 +215,97 @@ def visualize_fft(image_data):
     real_normalized = normalize(real_part)
     imag_normalized = normalize(imag_part)
     
-    return magnitude_h, magnitude_full, real_normalized, imag_normalized
+    return magnitude_h, magnitude_full, real_normalized, imag_normalized, f_shift
+
+def test_ifft(image_data):
+    """Test the round-trip FFT → IFFT process and visualize the results."""
+    # Convert to grayscale if RGB
+    if len(image_data.shape) == 3:
+        gray_data = np.mean(image_data, axis=2)
+    else:
+        gray_data = image_data
+    
+    # Compute FFT
+    f_transform = np.fft.fft2(gray_data)
+    f_shift = np.fft.fftshift(f_transform)
+    
+    # Apply IFFT to get back the original image
+    f_ishift = np.fft.ifftshift(f_shift)
+    img_back = np.fft.ifft2(f_ishift)
+    img_back = np.abs(img_back)
+    
+    # Calculate error between original and reconstructed image
+    error = np.abs(gray_data - img_back)
+    max_error = np.max(error)
+    mean_error = np.mean(error)
+    
+    # Create test cases with modified frequency domain
+    test_cases = {}
+    
+    # 1. Low-pass filter (remove high frequencies)
+    low_pass = f_shift.copy()
+    center_y, center_x = low_pass.shape[0] // 2, low_pass.shape[1] // 2
+    radius = min(center_y, center_x) // 4
+    y, x = np.ogrid[:low_pass.shape[0], :low_pass.shape[1]]
+    mask = (x - center_x)**2 + (y - center_y)**2 > radius**2
+    low_pass[mask] = 0
+    
+    low_pass_ishift = np.fft.ifftshift(low_pass)
+    low_pass_result = np.fft.ifft2(low_pass_ishift)
+    low_pass_result = np.abs(low_pass_result)
+    test_cases["low_pass"] = low_pass_result
+    
+    # 2. High-pass filter (remove low frequencies)
+    high_pass = f_shift.copy()
+    radius = min(center_y, center_x) // 4
+    y, x = np.ogrid[:high_pass.shape[0], :high_pass.shape[1]]
+    mask = (x - center_x)**2 + (y - center_y)**2 <= radius**2
+    high_pass[mask] = 0
+    
+    high_pass_ishift = np.fft.ifftshift(high_pass)
+    high_pass_result = np.fft.ifft2(high_pass_ishift)
+    high_pass_result = np.abs(high_pass_result)
+    test_cases["high_pass"] = high_pass_result
+    
+    # 3. Band-pass filter
+    band_pass = f_shift.copy()
+    inner_radius = min(center_y, center_x) // 8
+    outer_radius = min(center_y, center_x) // 2
+    y, x = np.ogrid[:band_pass.shape[0], :band_pass.shape[1]]
+    mask = ((x - center_x)**2 + (y - center_y)**2 <= inner_radius**2) | ((x - center_x)**2 + (y - center_y)**2 > outer_radius**2)
+    band_pass[mask] = 0
+    
+    band_pass_ishift = np.fft.ifftshift(band_pass)
+    band_pass_result = np.fft.ifft2(band_pass_ishift)
+    band_pass_result = np.abs(band_pass_result)
+    test_cases["band_pass"] = band_pass_result
+    
+    # 4. Phase shift (rotate the image)
+    phase_shift = f_shift.copy()
+    phase = np.angle(phase_shift)
+    magnitude = np.abs(phase_shift)
+    phase_rotated = phase + np.pi/4  # 45-degree rotation
+    phase_shift_result = magnitude * np.exp(1j * phase_rotated)
+    
+    phase_shift_ishift = np.fft.ifftshift(phase_shift_result)
+    phase_shift_result = np.fft.ifft2(phase_shift_ishift)
+    phase_shift_result = np.abs(phase_shift_result)
+    test_cases["phase_shift"] = phase_shift_result
+    
+    # 5. Edge enhancement (high-frequency boost)
+    edge_enhance = f_shift.copy()
+    y, x = np.ogrid[:edge_enhance.shape[0], :edge_enhance.shape[1]]
+    dist_from_center = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+    max_dist = np.sqrt(center_x**2 + center_y**2)
+    boost_factor = 1 + 2 * (dist_from_center / max_dist)
+    edge_enhance = edge_enhance * boost_factor
+    
+    edge_enhance_ishift = np.fft.ifftshift(edge_enhance)
+    edge_enhance_result = np.fft.ifft2(edge_enhance_ishift)
+    edge_enhance_result = np.abs(edge_enhance_result)
+    test_cases["edge_enhance"] = edge_enhance_result
+    
+    return img_back, error, max_error, mean_error, test_cases
 
 def compare_roots():
     # Our implementation
@@ -252,9 +346,9 @@ def main():
         save_image(pattern, f"{name}_pattern.png", normalize=False)
         
         # Compute and visualize FFT
-        magnitude_h, magnitude_full, real, imag = visualize_fft(pattern)
+        magnitude_h, magnitude_full, real, imag, f_shift = visualize_fft(pattern)
         
-        # Create a combined visualization
+        # Create a combined visualization for FFT
         fig, axes = plt.subplots(1, 5, figsize=(25, 5))
         axes[0].imshow(pattern)
         axes[0].set_title("Original Pattern")
@@ -272,8 +366,49 @@ def main():
         
         plt.tight_layout()
         plt.subplots_adjust(top=0.95)
-        plt.savefig(f"{name}_fft_visualization.png")
+        plt.savefig(f"{out_dir}/{name}_fft_visualization.png")
         plt.close()
+        
+        # Test IFFT and create visualization
+        reconstructed, error, max_error, mean_error, test_cases = test_ifft(pattern)
+        
+        # Create a combined visualization for IFFT
+        fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+        
+        # Original and reconstructed
+        axes[0, 0].imshow(pattern)
+        axes[0, 0].set_title("Original Pattern")
+        axes[0, 1].imshow(reconstructed.astype(np.uint8))
+        axes[0, 1].set_title(f"Reconstructed (IFFT)\nMax Error: {max_error:.4f}")
+        axes[0, 2].imshow(error, cmap='hot')
+        axes[0, 2].set_title(f"Error Map\nMean Error: {mean_error:.4f}")
+        
+        # FFT magnitude for reference
+        axes[0, 3].imshow(magnitude_full, cmap='viridis')
+        axes[0, 3].set_title("FFT Magnitude")
+        
+        # Test cases
+        axes[1, 0].imshow(test_cases["low_pass"].astype(np.uint8))
+        axes[1, 0].set_title("Low-Pass Filter")
+        axes[1, 1].imshow(test_cases["high_pass"].astype(np.uint8))
+        axes[1, 1].set_title("High-Pass Filter")
+        axes[1, 2].imshow(test_cases["band_pass"].astype(np.uint8))
+        axes[1, 2].set_title("Band-Pass Filter")
+        axes[1, 3].imshow(test_cases["edge_enhance"].astype(np.uint8))
+        axes[1, 3].set_title("Edge Enhancement")
+        
+        for ax_row in axes:
+            for ax in ax_row:
+                ax.axis('off')
+        
+        plt.tight_layout()
+        plt.subplots_adjust(top=0.95)
+        plt.savefig(f"{out_dir}/{name}_ifft_visualization.png")
+        plt.close()
+        
+        # Save individual test case images
+        for case_name, case_img in test_cases.items():
+            save_image(case_img, f"{name}_{case_name}.png")
 
     compare_roots()
 

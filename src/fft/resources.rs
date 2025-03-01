@@ -76,7 +76,8 @@ impl FromWorld for FftPipelines {
         let pipeline_cache = world.resource::<PipelineCache>();
         let layouts = world.resource::<FftBindGroupLayouts>();
         let asset_server = world.resource::<AssetServer>();
-        let shader = asset_server.load("fft.wgsl");
+        let fft = asset_server.load("fft.wgsl");
+        let ifft = asset_server.load("ifft.wgsl");
 
         // shader definitions
         let base_shader_defs = vec![ShaderDefVal::UInt("CHANNELS".into(), 4)];
@@ -94,7 +95,7 @@ impl FromWorld for FftPipelines {
             label: Some("fft_horizontal_pipeline".into()),
             layout: vec![layouts.common.clone()],
             push_constant_ranges: vec![push_constant_range.clone()],
-            shader: shader.clone(),
+            shader: fft.clone(),
             shader_defs: horizontal_shader_defs.clone(),
             entry_point: "fft".into(),
             zero_initialize_workgroup_memory: false,
@@ -104,7 +105,7 @@ impl FromWorld for FftPipelines {
             label: Some("fft_vertical_pipeline".into()),
             layout: vec![layouts.common.clone()],
             push_constant_ranges: vec![push_constant_range.clone()],
-            shader: shader.clone(),
+            shader: fft.clone(),
             shader_defs: vertical_shader_defs.clone(),
             entry_point: "fft".into(),
             zero_initialize_workgroup_memory: false,
@@ -114,7 +115,7 @@ impl FromWorld for FftPipelines {
             label: Some("ifft_horizontal_pipeline".into()),
             layout: vec![layouts.common.clone()],
             push_constant_ranges: vec![push_constant_range.clone()],
-            shader: shaders::IFFT,
+            shader: ifft.clone(),
             shader_defs: horizontal_shader_defs,
             entry_point: "ifft".into(),
             zero_initialize_workgroup_memory: false,
@@ -124,7 +125,7 @@ impl FromWorld for FftPipelines {
             label: Some("ifft_vertical_pipeline".into()),
             layout: vec![layouts.common.clone()],
             push_constant_ranges: vec![push_constant_range],
-            shader: shaders::IFFT,
+            shader: ifft.clone(),
             shader_defs: vertical_shader_defs,
             entry_point: "ifft".into(),
             zero_initialize_workgroup_memory: false,
@@ -206,21 +207,32 @@ pub fn copy_source_to_input(
     query: Query<(&FftTextures, &FftSourceImage)>,
 ) {
     for (textures, source_image) in &query {
-        if let (Some(source), Some(input)) = (
-            gpu_images.get(&source_image.0),
+        if let (Some(src_re), Some(src_im), Some(buf_c_re), Some(buf_c_im)) = (
+            gpu_images.get(&source_image.image),
+            gpu_images.get(&source_image.image_im),
             gpu_images.get(&textures.buffer_c_re),
+            gpu_images.get(&textures.buffer_c_im),
         ) {
             let mut encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
                 label: Some("copy_source_to_input"),
             });
 
-            // Copy source image to input texture
             encoder.copy_texture_to_texture(
-                source.texture.as_image_copy(),
-                input.texture.as_image_copy(),
+                src_re.texture.as_image_copy(),
+                buf_c_re.texture.as_image_copy(),
                 Extent3d {
-                    width: source.texture.size().width,
-                    height: source.texture.size().height,
+                    width: src_re.texture.size().width,
+                    height: src_re.texture.size().height,
+                    depth_or_array_layers: 1,
+                },
+            );
+
+            encoder.copy_texture_to_texture(
+                src_im.texture.as_image_copy(),
+                buf_c_im.texture.as_image_copy(),
+                Extent3d {
+                    width: src_im.texture.size().width,
+                    height: src_im.texture.size().height,
                     depth_or_array_layers: 1,
                 },
             );

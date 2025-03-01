@@ -31,11 +31,10 @@ mod shaders {
     use bevy_asset::{weak_handle, Handle};
     use bevy_render::render_resource::Shader;
 
-    pub const FFT: Handle<Shader> = weak_handle!("7f7dd4fd-50bd-40fb-9dd2-d69dc6d5dd40");
     pub const C32: Handle<Shader> = weak_handle!("f9123e70-23a6-4dc3-a9fb-4a02ea636cfb");
     pub const BUFFER: Handle<Shader> = weak_handle!("33f1ccb3-7d87-48d3-8984-51892e6652d0");
     pub const BINDINGS: Handle<Shader> = weak_handle!("1900debb-855d-489b-a973-2559249c3945");
-    pub const IFFT: Handle<Shader> = weak_handle!("1cdd1e33-58d6-4a57-a183-c1eaa6ddf4e1");
+    pub const PLOT: Handle<Shader> = weak_handle!("a021a614-a32b-4b4b-9604-00005bce1436");
 }
 
 // Public-facing component
@@ -43,6 +42,7 @@ mod shaders {
 pub struct FftSource {
     /// The complex image to transform
     pub image: Handle<Image>,
+    pub image_im: Handle<Image>,
     /// Size of the FFT texture
     pub size: UVec2,
     /// Number of FFT steps (log2 of size)
@@ -59,6 +59,7 @@ impl Default for FftSource {
     fn default() -> Self {
         Self {
             image: Handle::default(),
+            image_im: Handle::default(),
             size: UVec2::new(256, 256),
             orders: 8,
             padding: UVec2::ZERO,
@@ -118,7 +119,10 @@ impl ExtractComponent for FftRoots {
 }
 
 #[derive(Component, Clone)]
-pub struct FftSourceImage(pub Handle<Image>);
+pub struct FftSourceImage {
+    pub image: Handle<Image>,
+    pub image_im: Handle<Image>,
+}
 
 impl ExtractComponent for FftSourceImage {
     type QueryData = Read<FftSource>;
@@ -126,7 +130,10 @@ impl ExtractComponent for FftSourceImage {
     type Out = FftSourceImage;
 
     fn extract_component(item: QueryItem<'_, Self::QueryData>) -> Option<Self::Out> {
-        Some(FftSourceImage(item.image.clone()))
+        Some(FftSourceImage {
+            image: item.image.clone(),
+            image_im: item.image_im.clone(),
+        })
     }
 }
 
@@ -135,11 +142,11 @@ pub struct FftPlugin;
 impl Plugin for FftPlugin {
     fn build(&self, app: &mut App) {
         // Load shaders
-        load_internal_asset!(app, shaders::FFT, "fft.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::BUFFER, "buffer.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::BINDINGS, "bindings.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::C32, "../complex/c32.wgsl", Shader::from_wgsl);
-        load_internal_asset!(app, shaders::IFFT, "ifft.wgsl", Shader::from_wgsl);
+        load_internal_asset!(app, shaders::PLOT, "plot.wgsl", Shader::from_wgsl);
+        // TODO: Add FFT and IFFT shaders as internal assets
 
         app.register_type::<FftSource>()
             .register_type::<FftRoots>()
