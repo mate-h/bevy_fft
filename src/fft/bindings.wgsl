@@ -3,8 +3,8 @@
 #import bevy_fft::complex::c32;
 
 struct FftSettings {
-    src_size: vec2<u32>,
-    src_padding: vec2<u32>,
+    size: vec2<u32>,
+    padding: vec2<u32>,
     orders: u32,
     inverse: u32,
 }
@@ -21,3 +21,7 @@ struct FftRoots {
 @group(0) @binding(3) var buffer_a_im: texture_storage_2d<rgba32float, read_write>;
 @group(0) @binding(4) var buffer_b_re: texture_storage_2d<rgba32float, read_write>;
 @group(0) @binding(5) var buffer_b_im: texture_storage_2d<rgba32float, read_write>;
+@group(0) @binding(6) var buffer_c_re: texture_storage_2d<rgba32float, read_write>;
+@group(0) @binding(7) var buffer_c_im: texture_storage_2d<rgba32float, read_write>;
+@group(0) @binding(8) var buffer_d_re: texture_storage_2d<rgba32float, read_write>;
+@group(0) @binding(9) var buffer_d_im: texture_storage_2d<rgba32float, read_write>;

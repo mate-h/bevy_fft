@@ -21,8 +21,8 @@ pub use resources::FftTextures;
 
 use node::{FftComputeNode, FftNode};
 use resources::{
-    prepare_fft_bind_groups, prepare_fft_roots_buffer, prepare_fft_textures, FftBindGroupLayouts,
-    FftPipelines, FftRootsBuffer,
+    copy_source_to_input, prepare_fft_bind_groups, prepare_fft_roots_buffer, prepare_fft_textures,
+    FftBindGroupLayouts, FftPipelines, FftRootsBuffer,
 };
 
 use crate::complex::c32;
@@ -161,6 +161,7 @@ impl Plugin for FftPlugin {
                     prepare_fft_roots_buffer
                         .in_set(RenderSet::PrepareResources)
                         .before(RenderSet::PrepareBindGroups),
+                    copy_source_to_input.in_set(RenderSet::Queue),
                 ),
             )
             .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeFFT);

@@ -75,8 +75,9 @@ impl Node for FftComputeNode {
 
             let command_encoder = render_context.command_encoder();
 
-            // Calculate number of iterations for horizontal pass
-            let horizontal_iterations = settings.orders - 8;
+            let workgroup_size = 256;
+            let num_workgroups_x = settings.size.x.div_ceil(workgroup_size);
+            let num_workgroups_y = settings.size.y;
 
             // First pass: Horizontal FFT
             {
@@ -86,28 +87,17 @@ impl Node for FftComputeNode {
                 });
 
                 compute_pass.set_pipeline(horizontal_pipeline);
-                compute_pass.set_bind_group(0, &bind_groups.common, &[]);
-                compute_pass.set_bind_group(1, &bind_groups.horizontal_io, &[]);
+                compute_pass.set_bind_group(0, &bind_groups.horizontal_io, &[]);
 
                 // Set initial iteration to 0 using push constants
                 compute_pass.set_push_constants(0, bytemuck::cast_slice(&[0u32]));
-
-                let workgroup_size = 256;
-                let num_workgroups_x = settings.size.x.div_ceil(workgroup_size);
-                let num_workgroups_y = settings.size.y;
-
                 compute_pass.dispatch_workgroups(num_workgroups_x, num_workgroups_y, 1);
             } // compute_pass is dropped here, ensuring the first pass completes
 
             // Second pass: Vertical FFT
             {
-                // Calculate starting iteration for vertical pass based on horizontal iterations
-                // If horizontal_iterations is odd, we need to start from the opposite buffer
-                let vertical_start = if horizontal_iterations % 2 == 1 {
-                    1u32
-                } else {
-                    0u32
-                };
+                // This calculation needs to consider the full orders
+                let vertical_start = settings.orders - 8; // Start from where horizontal left off
 
                 let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
                     label: Some(&*format!("{}_vertical_pass", prefix)),
@@ -115,16 +105,9 @@ impl Node for FftComputeNode {
                 });
 
                 compute_pass.set_pipeline(vertical_pipeline);
-                compute_pass.set_bind_group(0, &bind_groups.common, &[]);
-                compute_pass.set_bind_group(1, &bind_groups.vertical_io, &[]);
+                compute_pass.set_bind_group(0, &bind_groups.vertical_io, &[]);
 
-                // Set initial iteration for vertical pass using push constants
                 compute_pass.set_push_constants(0, bytemuck::cast_slice(&[vertical_start]));
-
-                let workgroup_size = 256;
-                let num_workgroups_x = settings.size.y.div_ceil(workgroup_size); // Swap x and y
-                let num_workgroups_y = settings.size.x;
-
                 compute_pass.dispatch_workgroups(num_workgroups_x, num_workgroups_y, 1);
             }
         }
