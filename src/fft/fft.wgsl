@@ -5,6 +5,7 @@
         splat_c32_n,
         fma_c32_n,
         add_c32_n,
+        mul_c32_n,
         // channel specific imports (aliasing doesn't work cross-modules)
         c32,
         c32_2,
@@ -59,14 +60,22 @@ fn fft(
     let in_bounds = all(pos < vec2(256u)) && all(pos >= vec2(0u));
     let c_zero = splat_c32_n(c32(0.0, 0.0));
     var c_o: c32_n;
+    var input_value: c32_n;
 
     // First phase: Bit reversal permutation
     if (in_bounds) {
         #ifdef VERTICAL
-            temp[bit_reversed] = read_buffer_b(pos);
+            input_value = read_buffer_b(pos);
         #else
-            temp[bit_reversed] = read_buffer_c(pos);
+            input_value = read_buffer_c(pos);
         #endif
+        
+        // Apply window function
+        let window_type = 0u;
+        let window_strength = 1.0;
+        var window = apply_window(pos, vec2(256u), window_type, window_strength);
+        input_value = mul_c32_n(input_value, splat_c32_n(c32(window, 0.0)));
+        temp[bit_reversed] = input_value;
     } else {
         temp[bit_reversed] = c_zero;
     }
@@ -91,9 +100,9 @@ fn fft(
         let value_2 = temp[pair_index];
         
         if (is_second_half) {
-            c_o = add_c32_n(value_2, fma_c32_n(value_1, root_conj, c_zero));
+            c_o = fma_c32_n(value_1, root_conj, value_2);
         } else {
-            c_o = add_c32_n(value_1, fma_c32_n(value_2, root, c_zero));
+            c_o = fma_c32_n(value_2, root, value_1);
         };
 
         workgroupBarrier();
@@ -113,13 +122,14 @@ fn fft(
 
     if (in_bounds) {
         let mag = c_o.re * c_o.re + c_o.im * c_o.im;
-        let mag_normalized = log(1.0 + mag) * 0.1;
+        let mag_normalized = log(1.0 + abs(mag)) * 0.1;
         let color = viridis_quintic(mag_normalized.x);
-        let centered_pos = (pos - vec2(128u, 128u)) % vec2(256u);
+        
+        // Ensure proper FFT shift by using modulo arithmetic
         #ifdef VERTICAL
-            write_shifted_d_im(centered_pos, vec4(color.xyz, 1.0));
+            write_shifted_d_im(pos, vec4(color.xyz, 1.0));
         #else
-            write_shifted_d_re(centered_pos, vec4(color.xyz, 1.0));
+            write_shifted_d_re(pos, vec4(color.xyz, 1.0));
         #endif
     }
 }
@@ -140,7 +150,6 @@ fn viridis_quintic(x: f32) -> vec3<f32> {
     );
 }
 
-
 fn swizzle(order: u32, index: u32) -> u32 {
     return reverseBits(index) >> (32u - order);
 }
@@ -154,4 +163,67 @@ fn get_root(order: u32, index: u32) -> c32 {
         return c32(-root.re, -root.im);
     }
     return root;
+}
+
+// Unified window function with multiple options
+fn apply_window(pos: vec2<u32>, size: vec2<u32>, window_type: u32, strength: f32) -> f32 {
+    // Normalize coordinates
+    let x_norm = f32(pos.x) / f32(size.x - 1u);
+    let y_norm = f32(pos.y) / f32(size.y - 1u);
+    
+    var window_value = 1.0;
+    
+    // No window
+    if (window_type == 0u) {
+        window_value = 1.0;
+    }
+    // Tukey window (good for ocean waves - minimal edge effects with flat center)
+    else if (window_type == 1u) {
+        let alpha = 0.1; // Small alpha preserves most of the pattern
+        let x_window = tukey_1d(x_norm, alpha);
+        let y_window = tukey_1d(y_norm, alpha);
+        window_value = x_window * y_window;
+    }
+    // Blackman window (good for bloom - smooth falloff)
+    else if (window_type == 2u) {
+        let a0 = 0.42;
+        let a1 = 0.5;
+        let a2 = 0.08;
+        
+        let x_window = a0 - a1 * cos(2.0 * 3.14159265359 * x_norm) + a2 * cos(4.0 * 3.14159265359 * x_norm);
+        let y_window = a0 - a1 * cos(2.0 * 3.14159265359 * y_norm) + a2 * cos(4.0 * 3.14159265359 * y_norm);
+        
+        window_value = x_window * y_window;
+    }
+    // Kaiser window (good for precise frequency control)
+    else if (window_type == 3u) {
+        let beta = 2.0;
+        let x_centered = 2.0 * x_norm - 1.0;
+        let y_centered = 2.0 * y_norm - 1.0;
+        let r_squared = x_centered * x_centered + y_centered * y_centered;
+        
+        if (r_squared < 1.0) {
+            let term = 1.0 - r_squared;
+            window_value = exp(beta * (sqrt(term) - 1.0));
+        } else {
+            window_value = 0.0;
+        }
+    }
+    
+    // Apply window strength (blend between no window and full window)
+    return (1.0 - strength) + strength * window_value;
+}
+
+fn tukey_1d(x: f32, alpha: f32) -> f32 {
+    let safe_alpha = max(0.0001, min(1.0, alpha));
+    
+    if (x < 0.0 || x > 1.0) {
+        return 0.0;
+    } else if (x < safe_alpha/2.0) {
+        return 0.5 * (1.0 + cos(2.0 * 3.14159265359 * (x / safe_alpha - 0.5)));
+    } else if (x > (1.0 - safe_alpha/2.0)) {
+        return 0.5 * (1.0 + cos(2.0 * 3.14159265359 * (x / safe_alpha - 1.0/safe_alpha + 0.5)));
+    } else {
+        return 1.0;
+    }
 }

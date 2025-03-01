@@ -76,6 +76,10 @@ pub struct FftSettings {
     pub orders: u32,
     pub padding: UVec2,
     pub inverse: u32,
+    pub window_type: u32,
+    pub window_strength: f32,
+    pub radial_falloff: f32,
+    pub normalization: f32,
 }
 
 impl ExtractComponent for FftSettings {
@@ -89,6 +93,10 @@ impl ExtractComponent for FftSettings {
             orders: item.orders,
             padding: item.padding,
             inverse: item.inverse as u32,
+            window_type: 0,
+            window_strength: 0.0,
+            radial_falloff: 0.0,
+            normalization: 1.0,
         })
     }
 }

@@ -31,7 +31,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn(Camera2d::default());
 
     // Load source image and store the handle
-    let image_handle = asset_server.load("circles_pattern.png");
+    let image_handle = asset_server.load("rainbow_spiral_pattern.png");
     commands.insert_resource(LoadingImage {
         handle: image_handle,
     });

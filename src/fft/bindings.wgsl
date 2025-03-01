@@ -7,6 +7,10 @@ struct FftSettings {
     padding: vec2<u32>,
     orders: u32,
     inverse: u32,
+    window_type: u32,      // 0=None, 1=Tukey, 2=Blackman, 3=Kaiser
+    window_strength: f32,  // 0.0-1.0 how strongly to apply the window
+    radial_falloff: f32,   // For visualization only
+    normalization: f32,    // For visualization only
 }
 
 struct FftRoots {

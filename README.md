@@ -2,6 +2,8 @@
 
 This project implements GPU based Fast Fourier Transform (FFT) using compute shaders in Bevy engine.
 
+<img src="./assets/showcase.png" alt="showcase" width="600"/>
+
 ## Project Goals
 
 ## Core FFT Component
