@@ -12,12 +12,7 @@
         c32_4,
     }, 
     bindings::{
-        settings,
-        roots_buffer,
-        buffer_a_re,
-        buffer_a_im,
-        buffer_b_re,
-        buffer_b_im,
+        roots_buffer
     },
     buffer::{
         read_buffer_a,
@@ -66,18 +61,35 @@ fn ifft(
     let in_bounds = all(pos < vec2(256u)) && all(pos >= vec2(0u));
     let c_zero = splat_c32_n(c32(0.0, 0.0));
     var c_o: c32_n;
+    var input_value: c32_n;
 
     // Load initial data
     if (in_bounds) {
-        // Read from buffer A initially and conjugate for IFFT
-        let n = read_buffer_c(pos);
-        temp[bit_reversed] = c32_n(n.re, -n.im);
+        #ifdef VERTICAL
+            // For vertical pass, read from buffer A (output of horizontal pass)
+            let shifted_pos = (pos + vec2(128u)) % vec2(256u);
+            input_value = read_buffer_a(pos);
+            // No need to conjugate again in vertical pass
+            temp[bit_reversed] = input_value;
+        #else
+            // For horizontal pass, read from buffer C with proper FFT shift
+            // FFT shift: (x,y) -> ((x+N/2)%N, (y+N/2)%N)
+            let shifted_pos = (pos + vec2(128u)) % vec2(256u);
+            input_value = read_buffer_c(pos);
+            
+            // denormalize (scale to -1000 - 1000)
+            input_value.re = input_value.re * 2000.0 - 1000.0;
+            input_value.im = input_value.im * 2000.0 - 1000.0;
+            
+            // For IFFT, we need to conjugate the input values
+            temp[bit_reversed] = c32_n(input_value.re, -input_value.im);
+        #endif
     } else {
         temp[bit_reversed] = c_zero;
     }
     workgroupBarrier();
 
-    // First phase: Butterfly operations in sequential order (similar to FFT)
+    // Second phase: Butterfly operations in sequential order
     for (var order = 0u; order < 8u; order++) {
         let subsection_count = 1u << order;
         let half_subsection = subsection_count >> 1u;
@@ -89,7 +101,6 @@ fn ifft(
         
         let pair_index = sequential ^ half_subsection;
         
-        // Use conjugate of root for IFFT
         let root = conj_c32(get_root(order, offset_in_pair));
         let root_conj = c32(-root.re, -root.im);
         
@@ -107,106 +118,39 @@ fn ifft(
         workgroupBarrier();
     }
 
-    // Write results to buffer B
+    // Write results
     c_o = temp[sequential];
     if (in_bounds) {
-        write_buffer_b(pos, c_o);
+        #ifdef VERTICAL
+            // For vertical pass, write to buffer B
+            write_buffer_b(pos, c_o);
+        #else
+            // For horizontal pass, just write to buffer A for the vertical pass's input
+            write_buffer_a(pos, c_o);
+        #endif
     }
-    
-    storageBarrier();
 
-    // Global memory iterations
-    var using_buffer_a = true;
-    for (var order = 8u; order < settings.orders; order++) {
-        let subsection_count = 1u << order;
-        let half_subsection = subsection_count >> 1u;
-        
-        #ifdef VERTICAL
-            let i_subsection = sequential % subsection_count;
-        #else
-            let i_subsection = sequential % subsection_count;
-        #endif
-        
-        let offset_in_pair = i_subsection & (half_subsection - 1u);
-        let is_second_half = (i_subsection & half_subsection) != 0u;
-        
-        // Use conjugate of root for IFFT
-        let root = conj_c32(get_root(order, offset_in_pair));
-        let root_conj = c32(-root.re, -root.im);
-        
-        let o_1 = pos;
-        
-        var o_2: vec2<u32>;
-        #ifdef VERTICAL
-            if (is_second_half) {
-                o_2 = vec2(pos.x, pos.y - half_subsection);
-            } else {
-                o_2 = vec2(pos.x, pos.y + half_subsection);
-            }
-        #else
-            if (is_second_half) {
-                o_2 = vec2(pos.x - half_subsection, pos.y);
-            } else {
-                o_2 = vec2(pos.x + half_subsection, pos.y);
-            }
-        #endif
-        
-        var c_1: c32_n;
-        var c_2: c32_n;
-        if (using_buffer_a) {
-            c_1 = read_buffer_a(o_1);
-            c_2 = read_buffer_a(o_2);
-        } else {
-            c_1 = read_buffer_b(o_1);
-            c_2 = read_buffer_b(o_2);
-        }
-        
-        if (is_second_half) {
-            c_o = fma_c32_n(c_1, root_conj, c_2);
-        } else {
-            c_o = fma_c32_n(c_2, root, c_1);
-        }
-        
-        storageBarrier();
-        
-        if (in_bounds) {
-            if (using_buffer_a) {
-                write_buffer_b(o_1, c_o);
-            } else {
-                write_buffer_a(o_1, c_o);
-            }
-        }
-        
-        storageBarrier();
-        using_buffer_a = !using_buffer_a;
-    }
-    
-    // Final output with scaling and visualization
     if (in_bounds) {
-        // Scale by 1/N for IFFT
-        let scale_factor = 1.0 / f32(1u << settings.orders);
+        // Scale by 1/N² for 2D IFFT (N×N points)
+        let scale_factor = 1.0 / f32(1u << 16u);  // 1/(256*256)
         let scaled_c_o = mul_c32_n(c_o, splat_c32_n(c32(scale_factor, 0.0)));
         
         // Apply window function
         let window_type = 0u;
         let window_strength = 1.0;
-        var window = apply_window(pos, settings.size + settings.padding, window_type, window_strength);
+        var window = apply_window(pos, vec2(256u), window_type, window_strength);
         let windowed_result = mul_c32_n(scaled_c_o, splat_c32_n(c32(window, 0.0)));
         
         // Visualize the result
-        let mag = windowed_result.re * windowed_result.re + windowed_result.im * windowed_result.im;
-        let mag_normalized = log(1.0 + abs(mag)) * 0.1;
-        let color = viridis_quintic(mag_normalized.x);
-        
-        // Calculate centered position for visualization
-        let center = settings.size / 2u;
-        let centered_pos = (pos - center) % settings.size;
+        let value = windowed_result.re;
+        let normalized_value = log(1.0 + abs(value)) * 5.0;
+        let color = viridis_quintic(normalized_value.x);
         
         // Write visualization output
         #ifdef VERTICAL
-            write_shifted_d_im(centered_pos, vec4(color.xyz, 1.0));
+            write_shifted_d_im(pos, vec4(color.xyz, 1.0));
         #else
-            write_shifted_d_re(centered_pos, vec4(color.xyz, 1.0));
+            write_shifted_d_re(pos, vec4(color.xyz, 1.0));
         #endif
     }
 }

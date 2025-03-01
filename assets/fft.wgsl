@@ -13,7 +13,6 @@
         c32_4,
     }, 
     bindings::{
-        settings,
         roots_buffer
     },
     buffer::{
@@ -73,6 +72,9 @@ fn fft(
         #else
             input_value = read_buffer_c(pos);
         #endif
+
+        // null out imaginary part
+        // input_value.im = 0.0;
         
         // Apply window function
         let window_type = 0u;

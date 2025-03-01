@@ -23,8 +23,9 @@ struct FftOutputIm;
 // Resource to track the loading state
 #[derive(Resource)]
 struct LoadingImage {
-    handle: Handle<Image>,
-    handle_im: Handle<Image>,
+    fft_re: Handle<Image>,
+    fft_im: Handle<Image>,
+    source: Handle<Image>,
 }
 
 fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
@@ -32,11 +33,14 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.spawn(Camera2d::default());
 
     // Load source image and store the handle
-    let image_handle = asset_server.load("fft_re.ktx2");
-    let image_handle_im = asset_server.load("fft_im.ktx2");
+    let fft_re = asset_server.load("fft_re.ktx2");
+    let fft_im = asset_server.load("fft_im.ktx2");
+    let source = asset_server.load("circles_pattern.png");
+
     commands.insert_resource(LoadingImage {
-        handle: image_handle,
-        handle_im: image_handle_im,
+        fft_re,
+        fft_im,
+        source,
     });
 }
 
@@ -73,15 +77,19 @@ fn handle_image_load(
     let Some(loading) = loading else { return };
 
     // Check if the image has finished loading
-    if let (Some(image), Some(image_im)) =
-        (images.get(&loading.handle), images.get(&loading.handle_im))
-    {
+    if let (Some(fft_re), Some(fft_im), Some(source)) = (
+        images.get(&loading.fft_re),
+        images.get(&loading.fft_im),
+        images.get(&loading.source),
+    ) {
         // Clone the images to release the immutable borrow on 'images'
-        let image_clone = image.clone();
-        let image_im_clone = image_im.clone();
-        let size = Vec2::splat(image_clone.texture_descriptor.size.width as f32);
-        let float_image_handle = images.add(convert_to_float_image(&image_clone));
-        let float_image_handle_im = images.add(convert_to_float_image(&image_im_clone));
+        let size = Vec2::splat(fft_re.clone().texture_descriptor.size.width as f32);
+        let fft_re_clone = fft_re.clone();
+        let fft_im_clone = fft_im.clone();
+        let source_clone = source.clone();
+        let fft_re_handle = images.add(convert_to_float_image(&fft_re_clone));
+        let fft_im_handle = images.add(convert_to_float_image(&fft_im_clone));
+        let source_handle = images.add(convert_to_float_image(&source_clone));
 
         // Calculate FFT roots
         let mut roots = [c32::new(0.0, 0.0); 8192];
@@ -98,17 +106,26 @@ fn handle_image_load(
         // Spawn FFT entity with the new float image
         commands.spawn((
             FftSource {
-                image: float_image_handle.clone(),
-                image_im: float_image_handle_im.clone(),
+                image: fft_re_handle.clone(),
+                image_im: fft_im_handle.clone(),
                 size: size.as_uvec2(),
                 orders: 8,
                 padding: UVec2::ZERO,
                 roots,
                 inverse: true,
             },
+            // FftSource {
+            //     image: source_handle.clone(),
+            //     image_im: source_handle.clone(),
+            //     size: size.as_uvec2(),
+            //     orders: 8,
+            //     padding: UVec2::ZERO,
+            //     roots,
+            //     inverse: false,
+            // },
             Sprite {
                 custom_size: Some(size),
-                image: loading.handle.clone(), // Keep original image for display
+                image: source_handle.clone(), // Keep original image for display
                 ..default()
             },
             Transform::from_xyz(-300.0, 0.0, 0.0),
