@@ -1,11 +1,10 @@
 use bevy_app::{App, Plugin, Update};
-use bevy_asset::{load_internal_asset, Handle};
+use bevy_asset::load_internal_asset;
 use bevy_core_pipeline::core_2d::graph::Core2d;
 use bevy_ecs::component::Component;
 use bevy_ecs::query::QueryItem;
 use bevy_ecs::schedule::IntoSystemConfigs;
 use bevy_ecs::system::lifetimeless::Read;
-use bevy_image::Image;
 use bevy_math::UVec2;
 use bevy_reflect::Reflect;
 use bevy_render::{
@@ -19,10 +18,10 @@ mod node;
 pub mod resources;
 pub use resources::FftTextures;
 
-use node::{FftComputeNode, FftNode};
+use node::{FftComputeNode, FftNode, PatternGenerationNode};
 use resources::{
-    copy_source_to_input, prepare_fft_bind_groups, prepare_fft_roots_buffer, prepare_fft_textures,
-    FftBindGroupLayouts, FftPipelines, FftRootsBuffer,
+    prepare_fft_bind_groups, prepare_fft_roots_buffer, prepare_fft_textures, FftBindGroupLayouts,
+    FftPipelines, FftRootsBuffer,
 };
 
 use crate::complex::c32;
@@ -40,9 +39,6 @@ mod shaders {
 // Public-facing component
 #[derive(Component, Clone, Reflect)]
 pub struct FftSource {
-    /// The complex image to transform
-    pub image: Handle<Image>,
-    pub image_im: Handle<Image>,
     /// Size of the FFT texture
     pub size: UVec2,
     /// Number of FFT steps (log2 of size)
@@ -58,8 +54,6 @@ pub struct FftSource {
 impl Default for FftSource {
     fn default() -> Self {
         Self {
-            image: Handle::default(),
-            image_im: Handle::default(),
             size: UVec2::new(256, 256),
             orders: 8,
             padding: UVec2::ZERO,
@@ -118,25 +112,6 @@ impl ExtractComponent for FftRoots {
     }
 }
 
-#[derive(Component, Clone)]
-pub struct FftSourceImage {
-    pub image: Handle<Image>,
-    pub image_im: Handle<Image>,
-}
-
-impl ExtractComponent for FftSourceImage {
-    type QueryData = Read<FftSource>;
-    type QueryFilter = ();
-    type Out = FftSourceImage;
-
-    fn extract_component(item: QueryItem<'_, Self::QueryData>) -> Option<Self::Out> {
-        Some(FftSourceImage {
-            image: item.image.clone(),
-            image_im: item.image_im.clone(),
-        })
-    }
-}
-
 pub struct FftPlugin;
 
 impl Plugin for FftPlugin {
@@ -155,7 +130,6 @@ impl Plugin for FftPlugin {
                 ExtractComponentPlugin::<FftSettings>::default(),
                 UniformComponentPlugin::<FftSettings>::default(),
                 ExtractComponentPlugin::<FftRoots>::default(),
-                ExtractComponentPlugin::<FftSourceImage>::default(),
                 ExtractComponentPlugin::<FftTextures>::default(),
             ));
     }
@@ -172,14 +146,17 @@ impl Plugin for FftPlugin {
             .add_systems(
                 Render,
                 (
-                    prepare_fft_bind_groups.in_set(RenderSet::PrepareBindGroups),
                     prepare_fft_roots_buffer
-                        .in_set(RenderSet::PrepareResources)
+                        .in_set(RenderSet::Prepare)
                         .before(RenderSet::PrepareBindGroups),
-                    copy_source_to_input.in_set(RenderSet::Queue),
+                    prepare_fft_bind_groups.in_set(RenderSet::PrepareBindGroups),
+                    // copy_source_to_input.in_set(RenderSet::Queue),
                 ),
             )
-            .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeFFT);
-        // .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeIFFT);
+            .add_render_graph_node::<PatternGenerationNode>(Core2d, FftNode::GeneratePattern)
+            .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeFFT)
+            .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeIFFT)
+            .add_render_graph_edge(Core2d, FftNode::GeneratePattern, FftNode::ComputeFFT)
+            .add_render_graph_edge(Core2d, FftNode::ComputeFFT, FftNode::ComputeIFFT);
     }
 }

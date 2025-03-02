@@ -407,8 +407,8 @@ def main():
         plt.close()
         
         # Save individual test case images
-        for case_name, case_img in test_cases.items():
-            save_image(case_img, f"{name}_{case_name}.png")
+        # for case_name, case_img in test_cases.items():
+        #     save_image(case_img, f"{name}_{case_name}.png")
 
     compare_roots()
 

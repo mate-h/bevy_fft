@@ -66,24 +66,11 @@ fn ifft(
     // Load initial data
     if (in_bounds) {
         #ifdef VERTICAL
-            // For vertical pass, read from buffer A (output of horizontal pass)
-            let shifted_pos = (pos + vec2(128u)) % vec2(256u);
             input_value = read_buffer_a(pos);
-            // No need to conjugate again in vertical pass
-            temp[bit_reversed] = input_value;
         #else
-            // For horizontal pass, read from buffer C with proper FFT shift
-            // FFT shift: (x,y) -> ((x+N/2)%N, (y+N/2)%N)
-            let shifted_pos = (pos + vec2(128u)) % vec2(256u);
             input_value = read_buffer_c(pos);
-            
-            // denormalize (scale to -1000 - 1000)
-            input_value.re = input_value.re * 2000.0 - 1000.0;
-            input_value.im = input_value.im * 2000.0 - 1000.0;
-            
-            // For IFFT, we need to conjugate the input values
-            temp[bit_reversed] = c32_n(input_value.re, -input_value.im);
         #endif
+        temp[bit_reversed] = c32_n(input_value.re, -input_value.im);
     } else {
         temp[bit_reversed] = c_zero;
     }
@@ -102,13 +89,13 @@ fn ifft(
         let pair_index = sequential ^ half_subsection;
         
         let root = conj_c32(get_root(order, offset_in_pair));
-        let root_conj = c32(-root.re, -root.im);
+        let root_inverted = c32(-root.re, -root.im);
         
         let value_1 = temp[sequential];
         let value_2 = temp[pair_index];
         
         if (is_second_half) {
-            c_o = fma_c32_n(value_1, root_conj, value_2);
+            c_o = fma_c32_n(value_1, root_inverted, value_2);
         } else {
             c_o = fma_c32_n(value_2, root, value_1);
         };
@@ -120,13 +107,16 @@ fn ifft(
 
     // Write results
     c_o = temp[sequential];
+    c_o.re.w = 1.0;
+    c_o.im.w = 1.0;
+    let center = (pos - 128u) % 256u;
     if (in_bounds) {
         #ifdef VERTICAL
             // For vertical pass, write to buffer B
-            write_buffer_b(pos, c_o);
+            write_buffer_b(center, c_o);
         #else
             // For horizontal pass, just write to buffer A for the vertical pass's input
-            write_buffer_a(pos, c_o);
+            write_buffer_a(center, c_o);
         #endif
     }
 
@@ -142,10 +132,10 @@ fn ifft(
         let windowed_result = mul_c32_n(scaled_c_o, splat_c32_n(c32(window, 0.0)));
         
         // Visualize the result
-        let value = windowed_result.re;
-        let normalized_value = log(1.0 + abs(value)) * 5.0;
-        let color = viridis_quintic(normalized_value.x);
-        
+        // let value = windowed_result.re;
+        let normalized_value = log(1.0 + abs(windowed_result.re.x)) * 10.0;
+        let color = viridis_quintic(normalized_value);
+
         // Write visualization output
         #ifdef VERTICAL
             write_shifted_d_im(pos, vec4(color.xyz, 1.0));
@@ -164,9 +154,6 @@ fn get_root(order: u32, index: u32) -> c32 {
     let count = base >> 1u;
     let i = base + index % count;
     let root = roots_buffer.roots[i];
-    if (index >= count) {
-        return c32(-root.re, -root.im);
-    }
     return root;
 }
 

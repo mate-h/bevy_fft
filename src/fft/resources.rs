@@ -13,6 +13,7 @@ use bevy_image::Image;
 use bevy_log::info;
 use bevy_render::{
     extract_component::{ComponentUniforms, ExtractComponent},
+    globals::{GlobalsBuffer, GlobalsUniform},
     render_asset::RenderAssets,
     render_resource::{
         binding_types::{storage_buffer_sized, texture_2d, texture_storage_2d, uniform_buffer},
@@ -25,7 +26,7 @@ use bevy_utils::once;
 
 use crate::complex::c32;
 
-use super::{shaders, FftRoots, FftSettings, FftSource, FftSourceImage};
+use super::{shaders, FftRoots, FftSettings, FftSource};
 
 #[derive(Resource)]
 pub(crate) struct FftBindGroupLayouts {
@@ -42,6 +43,7 @@ impl FromWorld for FftBindGroupLayouts {
             &BindGroupLayoutEntries::sequential(
                 ShaderStages::COMPUTE,
                 (
+                    uniform_buffer::<GlobalsUniform>(false),
                     uniform_buffer::<FftSettings>(false),
                     storage_buffer_sized(
                         false,
@@ -69,6 +71,7 @@ pub(crate) struct FftPipelines {
     pub fft_vertical: CachedComputePipelineId,
     pub ifft_horizontal: CachedComputePipelineId,
     pub ifft_vertical: CachedComputePipelineId,
+    pub pattern_generation: CachedComputePipelineId,
 }
 
 impl FromWorld for FftPipelines {
@@ -78,6 +81,7 @@ impl FromWorld for FftPipelines {
         let asset_server = world.resource::<AssetServer>();
         let fft = asset_server.load("fft.wgsl");
         let ifft = asset_server.load("ifft.wgsl");
+        let pattern = asset_server.load("pattern.wgsl");
 
         // shader definitions
         let base_shader_defs = vec![ShaderDefVal::UInt("CHANNELS".into(), 4)];
@@ -131,11 +135,22 @@ impl FromWorld for FftPipelines {
             zero_initialize_workgroup_memory: false,
         });
 
+        let pattern_generation = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("pattern_generation_pipeline".into()),
+            layout: vec![layouts.common.clone()],
+            push_constant_ranges: vec![],
+            shader: pattern.clone(),
+            shader_defs: base_shader_defs.clone(),
+            entry_point: "generate_concentric_circles".into(),
+            zero_initialize_workgroup_memory: false,
+        });
+
         Self {
             fft_horizontal,
             fft_vertical,
             ifft_horizontal,
             ifft_vertical,
+            pattern_generation,
         }
     }
 }
@@ -199,53 +214,9 @@ pub fn prepare_fft_textures(
     }
 }
 
-pub fn copy_source_to_input(
-    mut commands: Commands,
-    render_device: Res<RenderDevice>,
-    queue: Res<RenderQueue>,
-    gpu_images: Res<RenderAssets<GpuImage>>,
-    query: Query<(&FftTextures, &FftSourceImage)>,
-) {
-    for (textures, source_image) in &query {
-        if let (Some(src_re), Some(src_im), Some(buf_c_re), Some(buf_c_im)) = (
-            gpu_images.get(&source_image.image),
-            gpu_images.get(&source_image.image_im),
-            gpu_images.get(&textures.buffer_c_re),
-            gpu_images.get(&textures.buffer_c_im),
-        ) {
-            let mut encoder = render_device.create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("copy_source_to_input"),
-            });
-
-            encoder.copy_texture_to_texture(
-                src_re.texture.as_image_copy(),
-                buf_c_re.texture.as_image_copy(),
-                Extent3d {
-                    width: src_re.texture.size().width,
-                    height: src_re.texture.size().height,
-                    depth_or_array_layers: 1,
-                },
-            );
-
-            encoder.copy_texture_to_texture(
-                src_im.texture.as_image_copy(),
-                buf_c_im.texture.as_image_copy(),
-                Extent3d {
-                    width: src_im.texture.size().width,
-                    height: src_im.texture.size().height,
-                    depth_or_array_layers: 1,
-                },
-            );
-
-            queue.submit([encoder.finish()]);
-        }
-    }
-}
-
 #[derive(Component)]
 pub struct FftBindGroups {
-    pub horizontal_io: BindGroup,
-    pub vertical_io: BindGroup,
+    pub common: BindGroup,
 }
 
 pub(crate) fn prepare_fft_bind_groups(
@@ -254,6 +225,7 @@ pub(crate) fn prepare_fft_bind_groups(
     layouts: Res<FftBindGroupLayouts>,
     fft_uniforms: Res<ComponentUniforms<FftSettings>>,
     fft_roots_buffer: Res<FftRootsBuffer>,
+    globals_buffer: Res<GlobalsBuffer>,
     gpu_images: Res<RenderAssets<GpuImage>>,
     query: Query<(Entity, &FftTextures, &FftSettings), Without<FftBindGroups>>,
 ) {
@@ -264,6 +236,11 @@ pub(crate) fn prepare_fft_bind_groups(
 
     let Some(roots_binding) = fft_roots_buffer.buffer.binding() else {
         info!("FftRootsBuffer buffer missing, skipping bind group creation");
+        return;
+    };
+
+    let Some(globals_binding) = globals_buffer.buffer.binding() else {
+        info!("GlobalsBuffer buffer missing, skipping bind group creation");
         return;
     };
 
@@ -293,11 +270,11 @@ pub(crate) fn prepare_fft_bind_groups(
             continue;
         };
 
-        // Horizontal I/O bind group (group 1)
-        let horizontal_io = render_device.create_bind_group(
-            "fft_horizontal_io_bind_group",
+        let common = render_device.create_bind_group(
+            "fft_bind_group",
             &layouts.common,
             &BindGroupEntries::sequential((
+                globals_binding.clone(),
                 settings_binding.clone(),
                 roots_binding.clone(),
                 &buffer_a_re.texture_view,
@@ -311,28 +288,7 @@ pub(crate) fn prepare_fft_bind_groups(
             )),
         );
 
-        // Vertical I/O bind group (group 1)
-        let vertical_io = render_device.create_bind_group(
-            "fft_vertical_io_bind_group",
-            &layouts.common,
-            &BindGroupEntries::sequential((
-                settings_binding.clone(),
-                roots_binding.clone(),
-                &buffer_a_re.texture_view,
-                &buffer_a_im.texture_view,
-                &buffer_b_re.texture_view,
-                &buffer_b_im.texture_view,
-                &buffer_c_re.texture_view,
-                &buffer_c_im.texture_view,
-                &buffer_d_re.texture_view,
-                &buffer_d_im.texture_view,
-            )),
-        );
-
-        commands.entity(entity).insert(FftBindGroups {
-            horizontal_io,
-            vertical_io,
-        });
+        commands.entity(entity).insert(FftBindGroups { common });
     }
 }
 

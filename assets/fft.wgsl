@@ -70,17 +70,15 @@ fn fft(
         #ifdef VERTICAL
             input_value = read_buffer_b(pos);
         #else
-            input_value = read_buffer_c(pos);
+            input_value = read_buffer_a(pos);
         #endif
-
-        // null out imaginary part
-        // input_value.im = 0.0;
         
         // Apply window function
         let window_type = 0u;
         let window_strength = 1.0;
         var window = apply_window(pos, vec2(256u), window_type, window_strength);
         input_value = mul_c32_n(input_value, splat_c32_n(c32(window, 0.0)));
+        
         temp[bit_reversed] = input_value;
     } else {
         temp[bit_reversed] = c_zero;
@@ -100,13 +98,13 @@ fn fft(
         let pair_index = sequential ^ half_subsection;
         
         let root = get_root(order, offset_in_pair);
-        let root_conj = c32(-root.re, -root.im);
+        let root_inverted = c32(-root.re, -root.im);
         
         let value_1 = temp[sequential];
         let value_2 = temp[pair_index];
         
         if (is_second_half) {
-            c_o = fma_c32_n(value_1, root_conj, value_2);
+            c_o = fma_c32_n(value_1, root_inverted, value_2);
         } else {
             c_o = fma_c32_n(value_2, root, value_1);
         };
@@ -118,24 +116,25 @@ fn fft(
 
     // Write results maintaining the bit-reversed ordering from the start
     c_o = temp[sequential];
+    c_o.re.w = 1.0;
+    c_o.im.w = 1.0;
+    let center = (pos - 128u) % 256u;
     if (in_bounds) {
         #ifdef VERTICAL
-            write_buffer_a(pos, c_o);
+            write_buffer_c(center, c_o);
         #else
-            write_buffer_b(pos, c_o);
+            write_buffer_b(center, c_o);
         #endif
     }
 
     if (in_bounds) {
         let mag = c_o.re * c_o.re + c_o.im * c_o.im;
-        let mag_normalized = log(1.0 + abs(mag)) * 0.1;
+        let mag_normalized = log(1.0 + abs(mag)) * 0.2;
         let color = viridis_quintic(mag_normalized.x);
-        let centered_pos = (pos - vec2(128u)) % vec2(256u);
-        // Ensure proper FFT shift by using modulo arithmetic
         #ifdef VERTICAL
-            write_shifted_d_im(centered_pos, vec4(color.xyz, 1.0));
+            write_shifted_d_im(center, vec4(color.xyz, 1.0));
         #else
-            write_shifted_d_re(centered_pos, vec4(color.xyz, 1.0));
+            write_shifted_d_re(center, vec4(color.xyz, 1.0));
         #endif
     }
 }
@@ -151,9 +150,6 @@ fn get_root(order: u32, index: u32) -> c32 {
     let count = base >> 1u;
     let i = base + index % count;
     let root = roots_buffer.roots[i];
-    if (index >= count) {
-        return c32(-root.re, -root.im);
-    }
     return root;
 }
 

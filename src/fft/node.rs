@@ -1,4 +1,5 @@
 use bevy_ecs::{
+    label::DynEq,
     query::QueryState,
     world::{FromWorld, World},
 };
@@ -21,6 +22,7 @@ use bytemuck;
 pub enum FftNode {
     ComputeFFT,
     ComputeIFFT,
+    GeneratePattern,
 }
 
 pub(super) struct FftComputeNode {
@@ -48,16 +50,22 @@ impl Node for FftComputeNode {
     ) -> Result<(), NodeRunError> {
         let pipelines = world.resource::<FftPipelines>();
         let pipeline_cache = world.resource::<PipelineCache>();
+        let node_label = graph.label();
 
         for (bind_groups, settings) in self.query.iter_manual(world) {
-            // Choose pipelines based on inverse flag
-            let (horizontal_pipeline_id, vertical_pipeline_id) = if settings.inverse == 1 {
-                (pipelines.ifft_horizontal, pipelines.ifft_vertical)
-            } else {
-                (pipelines.fft_horizontal, pipelines.fft_vertical)
-            };
-
-            let prefix = if settings.inverse == 1 { "ifft" } else { "fft" };
+            // Choose pipelines based on node label
+            let (horizontal_pipeline_id, vertical_pipeline_id, prefix) =
+                if node_label == FftNode::ComputeFFT.intern() {
+                    (pipelines.fft_horizontal, pipelines.fft_vertical, "fft")
+                } else if node_label == FftNode::ComputeIFFT.intern() {
+                    (pipelines.ifft_horizontal, pipelines.ifft_vertical, "ifft")
+                } else {
+                    once!(error!(
+                        "FftComputeNode used with invalid label: {:?}",
+                        node_label
+                    ));
+                    return Ok(());
+                };
 
             // Get pipelines
             let Some(horizontal_pipeline) =
@@ -87,7 +95,7 @@ impl Node for FftComputeNode {
                 });
 
                 compute_pass.set_pipeline(horizontal_pipeline);
-                compute_pass.set_bind_group(0, &bind_groups.horizontal_io, &[]);
+                compute_pass.set_bind_group(0, &bind_groups.common, &[]);
 
                 // Set initial iteration to 0 using push constants
                 compute_pass.set_push_constants(0, bytemuck::cast_slice(&[0u32]));
@@ -105,9 +113,67 @@ impl Node for FftComputeNode {
                 });
 
                 compute_pass.set_pipeline(vertical_pipeline);
-                compute_pass.set_bind_group(0, &bind_groups.vertical_io, &[]);
+                compute_pass.set_bind_group(0, &bind_groups.common, &[]);
 
                 compute_pass.set_push_constants(0, bytemuck::cast_slice(&[vertical_start]));
+                compute_pass.dispatch_workgroups(num_workgroups_x, num_workgroups_y, 1);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+pub(super) struct PatternGenerationNode {
+    query: QueryState<(&'static FftBindGroups, &'static FftSettings)>,
+}
+
+impl FromWorld for PatternGenerationNode {
+    fn from_world(world: &mut World) -> Self {
+        Self {
+            query: world.query(),
+        }
+    }
+}
+
+impl Node for PatternGenerationNode {
+    fn update(&mut self, world: &mut World) {
+        self.query.update_archetypes(world);
+    }
+
+    fn run(
+        &self,
+        graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let pipelines = world.resource::<FftPipelines>();
+        let pipeline_cache = world.resource::<PipelineCache>();
+
+        for (bind_groups, settings) in self.query.iter_manual(world) {
+            let Some(pattern_pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.pattern_generation)
+            else {
+                once!(error!("Failed to get pattern generation pipeline"));
+                return Ok(());
+            };
+
+            let command_encoder = render_context.command_encoder();
+
+            // Calculate workgroup counts
+            let workgroup_size = 16; // Match the workgroup size in the shader
+            let num_workgroups_x = settings.size.x.div_ceil(workgroup_size);
+            let num_workgroups_y = settings.size.y.div_ceil(workgroup_size);
+
+            // Execute pattern generation
+            {
+                let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("pattern_generation_pass"),
+                    timestamp_writes: None,
+                });
+
+                compute_pass.set_pipeline(pattern_pipeline);
+                compute_pass.set_bind_group(0, &bind_groups.common, &[]);
                 compute_pass.dispatch_workgroups(num_workgroups_x, num_workgroups_y, 1);
             }
         }

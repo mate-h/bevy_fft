@@ -20,6 +20,21 @@ This project implements GPU based Fast Fourier Transform (FFT) using compute sha
 - Memory barriers to prevent race conditions in compute shaders
 - Multi dimensional FFT, 1D (audio), 2D (image), 3D (volume)
 
+## Testing
+
+Generate the test patterns using the python script in the assets folder.
+
+```bash
+pip install numpy matplotlib pillow
+python assets/generate_test_patterns.py
+```
+Place the `bevy_fft` folder under the `cargo` directory of your local git clone of Bevy engine repository.
+Then run the bevy app to test the FFT and IFFT compute shaders, use the file watcher feature to automatically reload the shaders when they are modified.
+
+```bash
+cargo run --example fft --features file_watcher
+```
+
 ### Realistic Ocean Surface Simulation
 
 Create a real-time ocean surface simulation using the Fast Fourier Transform (FFT) to generate realistic wave patterns based on physical models.
