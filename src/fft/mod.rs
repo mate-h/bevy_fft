@@ -1,9 +1,8 @@
 use bevy_app::{App, Plugin, Update};
 use bevy_asset::load_internal_asset;
 use bevy_core_pipeline::core_2d::graph::Core2d;
-use bevy_ecs::component::Component;
+use bevy_ecs::{component::Component, schedule::IntoScheduleConfigs};
 use bevy_ecs::query::QueryItem;
-use bevy_ecs::schedule::IntoSystemConfigs;
 use bevy_ecs::system::lifetimeless::Read;
 use bevy_math::UVec2;
 use bevy_reflect::Reflect;

@@ -28,7 +28,7 @@ Generate the test patterns using the python script in the assets folder.
 pip install numpy matplotlib pillow
 python assets/generate_test_patterns.py
 ```
-Place the `bevy_fft` folder under the `cargo` directory of your local git clone of Bevy engine repository.
+Place the `bevy_fft` folder adjacent to the directory of your local git clone of Bevy engine repository.
 Then run the bevy app to test the FFT and IFFT compute shaders, use the file watcher feature to automatically reload the shaders when they are modified.
 
 ```bash
