@@ -1,19 +1,33 @@
-use bevy_ecs::{
-    label::DynEq,
-    query::QueryState,
-    world::{FromWorld, World},
+// use bevy_ecs::{
+//     label::DynEq,
+//     query::QueryState,
+//     world::{FromWorld, World},
+// };
+// use bevy_log::{error, info};
+// use bevy_render::{
+//     render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
+//     render_resource::{ComputePassDescriptor, PipelineCache},
+//     renderer::RenderContext,
+// };
+// use bevy_utils::once;
+
+use bevy::{
+    ecs::{
+        query::QueryState,
+        world::{FromWorld, World},
+    },
+    log::error,
+    render::{
+        render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
+        render_resource::{ComputePassDescriptor, PipelineCache},
+        renderer::RenderContext,
+    },
+    utils::once,
 };
-use bevy_log::{error, info};
-use bevy_render::{
-    render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
-    render_resource::{ComputePassDescriptor, PipelineCache},
-    renderer::RenderContext,
-};
-use bevy_utils::once;
 
 use super::{
-    resources::{FftBindGroups, FftPipelines},
     FftSettings,
+    resources::{FftBindGroups, FftPipelines},
 };
 
 use bytemuck;
@@ -143,7 +157,7 @@ impl Node for PatternGenerationNode {
 
     fn run(
         &self,
-        graph: &mut RenderGraphContext,
+        _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {

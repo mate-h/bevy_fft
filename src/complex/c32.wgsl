@@ -112,7 +112,7 @@ fn unpack_c32_n(packed: packed_c32_n) -> c32_n {
 // PACKING
 
 fn pack_c32(unpacked: c32) -> packed_c32 {
-    let packed = pack2x16float(unpacked.re, unpacked.im);
+    let packed = pack2x16float(vec2(unpacked.re, unpacked.im));
     return packed_c32(packed);
 }
 

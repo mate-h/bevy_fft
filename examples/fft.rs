@@ -78,7 +78,7 @@ fn update_output_sprites(
     fft_query: Query<&FftTextures>,
     mut outputs: Query<(&mut Sprite, &GridPosition), With<OutputImage>>,
 ) {
-    if let Ok(fft_textures) = fft_query.get_single() {
+    if let Ok(fft_textures) = fft_query.single() {
         for (mut sprite, grid_pos) in outputs.iter_mut() {
             match grid_pos.index {
                 0 => sprite.image = fft_textures.buffer_a_re.clone(),

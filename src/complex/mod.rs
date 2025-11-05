@@ -3,9 +3,9 @@ use std::{
     ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
-use bevy_math::ops;
-use bevy_reflect::Reflect;
-use bevy_render::render_resource::ShaderType;
+use bevy::math::ops;
+use bevy::reflect::Reflect;
+use bevy::render::render_resource::ShaderType;
 
 #[allow(non_camel_case_types)]
 #[derive(Copy, Clone, Reflect, PartialEq, Debug, ShaderType)]

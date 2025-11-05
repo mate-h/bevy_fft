@@ -1,16 +1,20 @@
-use bevy_app::{App, Plugin, Update};
-use bevy_asset::load_internal_asset;
-use bevy_core_pipeline::core_2d::graph::Core2d;
-use bevy_ecs::{component::Component, schedule::IntoScheduleConfigs};
-use bevy_ecs::query::QueryItem;
-use bevy_ecs::system::lifetimeless::Read;
-use bevy_math::UVec2;
-use bevy_reflect::Reflect;
-use bevy_render::{
-    extract_component::{ExtractComponent, ExtractComponentPlugin, UniformComponentPlugin},
-    render_graph::RenderGraphApp,
-    render_resource::*,
-    Render, RenderApp, RenderSet,
+use bevy::{
+    app::{App, Plugin, Update},
+    asset::load_internal_asset,
+    core_pipeline::core_2d::graph::Core2d,
+    ecs::{
+        component::Component, query::QueryItem, schedule::IntoScheduleConfigs,
+        system::lifetimeless::Read,
+    },
+    math::UVec2,
+    reflect::Reflect,
+    render::{
+        Render, RenderApp, RenderSystems,
+        extract_component::{ExtractComponent, ExtractComponentPlugin, UniformComponentPlugin},
+        render_graph::RenderGraphExt,
+        render_resource::*,
+    },
+    shader::Shader,
 };
 
 mod node;
@@ -19,20 +23,20 @@ pub use resources::FftTextures;
 
 use node::{FftComputeNode, FftNode, PatternGenerationNode};
 use resources::{
-    prepare_fft_bind_groups, prepare_fft_roots_buffer, prepare_fft_textures, FftBindGroupLayouts,
-    FftPipelines, FftRootsBuffer,
+    FftBindGroupLayouts, FftPipelines, FftRootsBuffer, prepare_fft_bind_groups,
+    prepare_fft_roots_buffer, prepare_fft_textures,
 };
 
 use crate::complex::c32;
 
 mod shaders {
-    use bevy_asset::{weak_handle, Handle};
-    use bevy_render::render_resource::Shader;
+    use bevy::asset::{Handle, uuid_handle};
+    use bevy::shader::Shader;
 
-    pub const C32: Handle<Shader> = weak_handle!("f9123e70-23a6-4dc3-a9fb-4a02ea636cfb");
-    pub const BUFFER: Handle<Shader> = weak_handle!("33f1ccb3-7d87-48d3-8984-51892e6652d0");
-    pub const BINDINGS: Handle<Shader> = weak_handle!("1900debb-855d-489b-a973-2559249c3945");
-    pub const PLOT: Handle<Shader> = weak_handle!("a021a614-a32b-4b4b-9604-00005bce1436");
+    pub const C32: Handle<Shader> = uuid_handle!("f9123e70-23a6-4dc3-a9fb-4a02ea636cfb");
+    pub const BUFFER: Handle<Shader> = uuid_handle!("33f1ccb3-7d87-48d3-8984-51892e6652d0");
+    pub const BINDINGS: Handle<Shader> = uuid_handle!("1900debb-855d-489b-a973-2559249c3945");
+    pub const PLOT: Handle<Shader> = uuid_handle!("a021a614-a32b-4b4b-9604-00005bce1436");
 }
 
 // Public-facing component
@@ -81,7 +85,7 @@ impl ExtractComponent for FftSettings {
     type QueryFilter = ();
     type Out = FftSettings;
 
-    fn extract_component(item: QueryItem<'_, Self::QueryData>) -> Option<Self::Out> {
+    fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
         Some(FftSettings {
             size: item.size,
             orders: item.orders,
@@ -106,7 +110,7 @@ impl ExtractComponent for FftRoots {
     type QueryFilter = ();
     type Out = FftRoots;
 
-    fn extract_component(item: QueryItem<'_, Self::QueryData>) -> Option<Self::Out> {
+    fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
         Some(FftRoots { roots: item.roots })
     }
 }
@@ -146,9 +150,9 @@ impl Plugin for FftPlugin {
                 Render,
                 (
                     prepare_fft_roots_buffer
-                        .in_set(RenderSet::Prepare)
-                        .before(RenderSet::PrepareBindGroups),
-                    prepare_fft_bind_groups.in_set(RenderSet::PrepareBindGroups),
+                        .in_set(RenderSystems::Prepare)
+                        .before(RenderSystems::PrepareBindGroups),
+                    prepare_fft_bind_groups.in_set(RenderSystems::PrepareBindGroups),
                     // copy_source_to_input.in_set(RenderSet::Queue),
                 ),
             )

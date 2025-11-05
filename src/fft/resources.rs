@@ -1,32 +1,25 @@
 use std::num::NonZero;
 
-use bevy_asset::{AssetServer, Assets, Handle, RenderAssetUsages};
-use bevy_ecs::{
-    component::Component,
-    entity::Entity,
-    query::{With, Without},
-    resource::Resource,
-    system::{Commands, Query, Res, ResMut},
-    world::{FromWorld, World},
-};
-use bevy_image::Image;
-use bevy_log::info;
-use bevy_render::{
-    extract_component::{ComponentUniforms, ExtractComponent},
-    globals::{GlobalsBuffer, GlobalsUniform},
-    render_asset::RenderAssets,
-    render_resource::{
-        binding_types::{storage_buffer_sized, texture_2d, texture_storage_2d, uniform_buffer},
-        *,
+use bevy::{
+    asset::{AssetServer, Assets, Handle, RenderAssetUsages},
+    image::Image,
+    log::info,
+    prelude::*,
+    render::{
+        extract_component::{ComponentUniforms, ExtractComponent},
+        globals::{GlobalsBuffer, GlobalsUniform},
+        render_asset::RenderAssets,
+        render_resource::{binding_types::*, *},
+        renderer::{RenderDevice, RenderQueue},
+        texture::GpuImage,
     },
-    renderer::{RenderDevice, RenderQueue},
-    texture::GpuImage,
+    shader::ShaderDefVal,
+    utils::once,
 };
-use bevy_utils::once;
 
 use crate::complex::c32;
 
-use super::{shaders, FftRoots, FftSettings, FftSource};
+use super::{FftRoots, FftSettings, FftSource};
 
 #[derive(Resource)]
 pub(crate) struct FftBindGroupLayouts {
@@ -101,7 +94,7 @@ impl FromWorld for FftPipelines {
             push_constant_ranges: vec![push_constant_range.clone()],
             shader: fft.clone(),
             shader_defs: horizontal_shader_defs.clone(),
-            entry_point: "fft".into(),
+            entry_point: Some("fft".into()),
             zero_initialize_workgroup_memory: false,
         });
 
@@ -111,7 +104,7 @@ impl FromWorld for FftPipelines {
             push_constant_ranges: vec![push_constant_range.clone()],
             shader: fft.clone(),
             shader_defs: vertical_shader_defs.clone(),
-            entry_point: "fft".into(),
+            entry_point: Some("fft".into()),
             zero_initialize_workgroup_memory: false,
         });
 
@@ -121,7 +114,7 @@ impl FromWorld for FftPipelines {
             push_constant_ranges: vec![push_constant_range.clone()],
             shader: ifft.clone(),
             shader_defs: horizontal_shader_defs,
-            entry_point: "ifft".into(),
+            entry_point: Some("ifft".into()),
             zero_initialize_workgroup_memory: false,
         });
 
@@ -131,7 +124,7 @@ impl FromWorld for FftPipelines {
             push_constant_ranges: vec![push_constant_range],
             shader: ifft.clone(),
             shader_defs: vertical_shader_defs,
-            entry_point: "ifft".into(),
+            entry_point: Some("ifft".into()),
             zero_initialize_workgroup_memory: false,
         });
 
@@ -141,7 +134,7 @@ impl FromWorld for FftPipelines {
             push_constant_ranges: vec![],
             shader: pattern.clone(),
             shader_defs: base_shader_defs.clone(),
-            entry_point: "generate_concentric_circles".into(),
+            entry_point: Some("generate_concentric_circles".into()),
             zero_initialize_workgroup_memory: false,
         });
 
@@ -244,7 +237,7 @@ pub(crate) fn prepare_fft_bind_groups(
         return;
     };
 
-    for (entity, textures, settings) in &query {
+    for (entity, textures, _settings) in &query {
         let Some(buffer_a_re) = gpu_images.get(&textures.buffer_a_re) else {
             continue;
         };
@@ -322,7 +315,7 @@ pub(crate) fn prepare_fft_roots_buffer(
     query: Query<(&FftRoots, &FftSettings), With<FftSettings>>,
     mut fft_roots_buffer: ResMut<FftRootsBuffer>,
 ) {
-    let Ok((roots, _)) = query.get_single() else {
+    let Ok((roots, _)) = query.single() else {
         return;
     };
 
