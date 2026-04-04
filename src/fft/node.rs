@@ -16,7 +16,7 @@ use bevy::{
         query::QueryState,
         world::{FromWorld, World},
     },
-    log::error,
+    log::{error, info},
     render::{
         render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
         render_resource::{ComputePassDescriptor, PipelineCache},
@@ -67,6 +67,20 @@ impl Node for FftComputeNode {
         let node_label = graph.label();
 
         for (bind_groups, settings) in self.query.iter_manual(world) {
+            let inverse = settings.inverse != 0;
+
+            if node_label == FftNode::ComputeFFT.intern() && inverse {
+                once!(info!(
+                    "Skipping forward FFT because inverse mode is enabled"
+                ));
+                continue;
+            }
+
+            if node_label == FftNode::ComputeIFFT.intern() && !inverse {
+                // Not in inverse mode, so skip the IFFT step
+                continue;
+            }
+
             // Choose pipelines based on node label
             let (horizontal_pipeline_id, vertical_pipeline_id, prefix) =
                 if node_label == FftNode::ComputeFFT.intern() {
@@ -130,64 +144,6 @@ impl Node for FftComputeNode {
                 compute_pass.set_bind_group(0, &bind_groups.common, &[]);
 
                 compute_pass.set_push_constants(0, bytemuck::cast_slice(&[vertical_start]));
-                compute_pass.dispatch_workgroups(num_workgroups_x, num_workgroups_y, 1);
-            }
-        }
-
-        Ok(())
-    }
-}
-
-pub(super) struct PatternGenerationNode {
-    query: QueryState<(&'static FftBindGroups, &'static FftSettings)>,
-}
-
-impl FromWorld for PatternGenerationNode {
-    fn from_world(world: &mut World) -> Self {
-        Self {
-            query: world.query(),
-        }
-    }
-}
-
-impl Node for PatternGenerationNode {
-    fn update(&mut self, world: &mut World) {
-        self.query.update_archetypes(world);
-    }
-
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        let pipelines = world.resource::<FftPipelines>();
-        let pipeline_cache = world.resource::<PipelineCache>();
-
-        for (bind_groups, settings) in self.query.iter_manual(world) {
-            let Some(pattern_pipeline) =
-                pipeline_cache.get_compute_pipeline(pipelines.pattern_generation)
-            else {
-                once!(error!("Failed to get pattern generation pipeline"));
-                return Ok(());
-            };
-
-            let command_encoder = render_context.command_encoder();
-
-            // Calculate workgroup counts
-            let workgroup_size = 16; // Match the workgroup size in the shader
-            let num_workgroups_x = settings.size.x.div_ceil(workgroup_size);
-            let num_workgroups_y = settings.size.y.div_ceil(workgroup_size);
-
-            // Execute pattern generation
-            {
-                let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("pattern_generation_pass"),
-                    timestamp_writes: None,
-                });
-
-                compute_pass.set_pipeline(pattern_pipeline);
-                compute_pass.set_bind_group(0, &bind_groups.common, &[]);
                 compute_pass.dispatch_workgroups(num_workgroups_x, num_workgroups_y, 1);
             }
         }

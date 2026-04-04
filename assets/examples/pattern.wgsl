@@ -22,17 +22,7 @@
     }
 };
 
-#ifdef CHANNELS
-#if CHANNELS == 1 
-    alias c32_n = c32;
-#else if CHANNELS == 2;
-    alias c32_n = c32_2;
-#else if CHANNELS == 3;
-    alias c32_n = c32_3;
-#else if CHANNELS == 4;
-    alias c32_n = c32_4;
-#endif
-#endif
+alias c32_n = c32_4;
 
 @compute
 @workgroup_size(16, 16, 1)
@@ -78,9 +68,16 @@ fn generate_concentric_circles(
     value_g_im = get_value(distance, phase_g);
     value_b_im = get_value(distance, phase_b);
     
-    // Store as complex value with RGB channels
-    textureStore(buffer_a_re, pos, vec4<f32>(value_r, value_g, value_b, 1.0));
-    textureStore(buffer_a_im, pos, vec4<f32>(value_r_im, value_g_im, value_b_im, 1.0));
+    // Store as complex value with RGB channels. When inverse mode is enabled
+    // we populate buffer C directly so the IFFT can consume it without
+    // running the forward FFT stage first.
+    if (settings.inverse != 0u) {
+        textureStore(buffer_c_re, pos, vec4<f32>(value_r, value_g, value_b, 1.0));
+        textureStore(buffer_c_im, pos, vec4<f32>(value_r_im, value_g_im, value_b_im, 1.0));
+    } else {
+        textureStore(buffer_a_re, pos, vec4<f32>(value_r, value_g, value_b, 1.0));
+        textureStore(buffer_a_im, pos, vec4<f32>(value_r_im, value_g_im, value_b_im, 1.0));
+    }
 }
 
 fn get_value(distance: f32, phase_shift: f32) -> f32 {

@@ -1,12 +1,13 @@
 use bevy::{
     app::{App, Plugin, Update},
-    asset::load_internal_asset,
-    core_pipeline::core_2d::graph::Core2d,
+    asset::{Handle, load_internal_asset},
+    core_pipeline::core_2d::graph::{Core2d, Node2d},
     ecs::{
         component::Component, query::QueryItem, schedule::IntoScheduleConfigs,
         system::lifetimeless::Read,
     },
     math::UVec2,
+    prelude::Image,
     reflect::Reflect,
     render::{
         Render, RenderApp, RenderSystems,
@@ -19,15 +20,29 @@ use bevy::{
 
 mod node;
 pub mod resources;
+pub use node::FftNode;
 pub use resources::FftTextures;
 
-use node::{FftComputeNode, FftNode, PatternGenerationNode};
+use node::FftComputeNode;
 use resources::{
-    FftBindGroupLayouts, FftPipelines, FftRootsBuffer, prepare_fft_bind_groups,
-    prepare_fft_roots_buffer, prepare_fft_textures,
+    FftBindGroupLayouts, FftPipelines, FftRootsBuffer, copy_input_textures_to_fft_buffers,
+    prepare_fft_bind_groups, prepare_fft_roots_buffer, prepare_fft_textures,
 };
 
 use crate::complex::c32;
+
+#[cfg(test)]
+mod layout_tests {
+    use super::FftSettings;
+    use bevy::render::render_resource::ShaderType;
+
+    #[test]
+    fn fft_settings_uniform_size_matches_wgsl() {
+        // WGSL uniform layout for `bindings.wgsl` must match `ShaderType` / encase.
+        let n = FftSettings::min_size().get() as usize;
+        assert_eq!(n, 48, "update bindings.wgsl FftSettings if this changes");
+    }
+}
 
 mod shaders {
     use bevy::asset::{Handle, uuid_handle};
@@ -63,6 +78,24 @@ impl Default for FftSource {
             roots: [c32::new(0.0, 0.0); 8192],
             inverse: false,
         }
+    }
+}
+
+/// Provide external textures to the FFT/IFFT pipelines. The real component is
+/// required; imag may be omitted to default to zero.
+#[derive(Component, Clone, Reflect)]
+pub struct FftInputTexture {
+    pub real: Handle<Image>,
+    pub imag: Option<Handle<Image>>,
+}
+
+impl ExtractComponent for FftInputTexture {
+    type QueryData = Read<FftInputTexture>;
+    type QueryFilter = ();
+    type Out = FftInputTexture;
+
+    fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
+        Some(item.clone())
     }
 }
 
@@ -128,12 +161,20 @@ impl Plugin for FftPlugin {
 
         app.register_type::<FftSource>()
             .register_type::<FftRoots>()
-            .add_systems(Update, prepare_fft_textures)
+            .register_type::<FftInputTexture>()
+            .add_systems(
+                Update,
+                (
+                    prepare_fft_textures,
+                    copy_input_textures_to_fft_buffers.after(prepare_fft_textures),
+                ),
+            )
             .add_plugins((
                 ExtractComponentPlugin::<FftSettings>::default(),
                 UniformComponentPlugin::<FftSettings>::default(),
                 ExtractComponentPlugin::<FftRoots>::default(),
                 ExtractComponentPlugin::<FftTextures>::default(),
+                ExtractComponentPlugin::<FftInputTexture>::default(),
             ));
     }
 
@@ -153,13 +194,13 @@ impl Plugin for FftPlugin {
                         .in_set(RenderSystems::Prepare)
                         .before(RenderSystems::PrepareBindGroups),
                     prepare_fft_bind_groups.in_set(RenderSystems::PrepareBindGroups),
-                    // copy_source_to_input.in_set(RenderSet::Queue),
                 ),
             )
-            .add_render_graph_node::<PatternGenerationNode>(Core2d, FftNode::GeneratePattern)
             .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeFFT)
             .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeIFFT)
-            .add_render_graph_edge(Core2d, FftNode::GeneratePattern, FftNode::ComputeFFT)
-            .add_render_graph_edge(Core2d, FftNode::ComputeFFT, FftNode::ComputeIFFT);
+            .add_render_graph_edge(Core2d, FftNode::ComputeFFT, FftNode::ComputeIFFT)
+            // Without this edge, the 2D pass can run before FFT/IFFT compute finishes, so sprites
+            // sample still-empty storage textures (appears blank).
+            .add_render_graph_edge(Core2d, FftNode::ComputeIFFT, Node2d::MainOpaquePass);
     }
 }

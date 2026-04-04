@@ -2,15 +2,17 @@
 
 #import bevy_fft::complex::c32;
 #import bevy_render::globals::Globals;
+// Must match `FftSettings` in `src/fft/mod.rs` (`ShaderType` uniform layout).
 struct FftSettings {
     size: vec2<u32>,
-    padding: vec2<u32>,
     orders: u32,
+    // `vec2<u32>` aligns to 8; `orders` ends at byte 12 → implicit pad 12..16
+    padding: vec2<u32>,
     inverse: u32,
-    window_type: u32,      // 0=None, 1=Tukey, 2=Blackman, 3=Kaiser
-    window_strength: f32,  // 0.0-1.0 how strongly to apply the window
-    radial_falloff: f32,   // For visualization only
-    normalization: f32,    // For visualization only
+    window_type: u32, // 0=None, 1=Tukey, 2=Blackman, 3=Kaiser
+    window_strength: f32,
+    radial_falloff: f32,
+    normalization: f32,
 }
 
 struct FftRoots {

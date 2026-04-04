@@ -3,7 +3,7 @@ use std::num::NonZero;
 use bevy::{
     asset::{AssetServer, Assets, Handle, RenderAssetUsages},
     image::Image,
-    log::info,
+    log::{info, warn},
     prelude::*,
     render::{
         extract_component::{ComponentUniforms, ExtractComponent},
@@ -17,44 +17,39 @@ use bevy::{
     utils::once,
 };
 
-use crate::complex::c32;
-
 use super::{FftRoots, FftSettings, FftSource};
+use crate::{complex::c32, fft::FftInputTexture};
 
 #[derive(Resource)]
-pub(crate) struct FftBindGroupLayouts {
-    pub common: BindGroupLayout,
+pub struct FftBindGroupLayouts {
+    pub common: BindGroupLayoutDescriptor,
 }
 
 impl FromWorld for FftBindGroupLayouts {
-    fn from_world(world: &mut World) -> Self {
-        let render_device = world.resource::<RenderDevice>();
-
-        // Common bind group layout (group 0)
-        let common = render_device.create_bind_group_layout(
-            "fft_common_bind_group_layout",
-            &BindGroupLayoutEntries::sequential(
-                ShaderStages::COMPUTE,
-                (
-                    uniform_buffer::<GlobalsUniform>(false),
-                    uniform_buffer::<FftSettings>(false),
-                    storage_buffer_sized(
-                        false,
-                        Some(NonZero::<u64>::new(std::mem::size_of::<FftRoots>() as u64).unwrap()),
-                    ),
-                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
-                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
-                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
-                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
-                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
-                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
-                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
-                    texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
+    fn from_world(_world: &mut World) -> Self {
+        let entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                uniform_buffer::<GlobalsUniform>(false),
+                uniform_buffer::<FftSettings>(false),
+                storage_buffer_sized(
+                    false,
+                    Some(NonZero::<u64>::new(std::mem::size_of::<FftRoots>() as u64).unwrap()),
                 ),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
             ),
         );
 
-        Self { common }
+        Self {
+            common: BindGroupLayoutDescriptor::new("fft_common_bind_group_layout", &entries),
+        }
     }
 }
 
@@ -64,7 +59,6 @@ pub(crate) struct FftPipelines {
     pub fft_vertical: CachedComputePipelineId,
     pub ifft_horizontal: CachedComputePipelineId,
     pub ifft_vertical: CachedComputePipelineId,
-    pub pattern_generation: CachedComputePipelineId,
 }
 
 impl FromWorld for FftPipelines {
@@ -74,7 +68,6 @@ impl FromWorld for FftPipelines {
         let asset_server = world.resource::<AssetServer>();
         let fft = asset_server.load("fft.wgsl");
         let ifft = asset_server.load("ifft.wgsl");
-        let pattern = asset_server.load("pattern.wgsl");
 
         // shader definitions
         let base_shader_defs = vec![ShaderDefVal::UInt("CHANNELS".into(), 4)];
@@ -128,22 +121,11 @@ impl FromWorld for FftPipelines {
             zero_initialize_workgroup_memory: false,
         });
 
-        let pattern_generation = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("pattern_generation_pipeline".into()),
-            layout: vec![layouts.common.clone()],
-            push_constant_ranges: vec![],
-            shader: pattern.clone(),
-            shader_defs: base_shader_defs.clone(),
-            entry_point: Some("generate_concentric_circles".into()),
-            zero_initialize_workgroup_memory: false,
-        });
-
         Self {
             fft_horizontal,
             fft_vertical,
             ifft_horizontal,
             ifft_vertical,
-            pattern_generation,
         }
     }
 }
@@ -212,9 +194,11 @@ pub struct FftBindGroups {
     pub common: BindGroup,
 }
 
+#[allow(clippy::too_many_arguments)] // Bevy system: many injected resources + query
 pub(crate) fn prepare_fft_bind_groups(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
+    pipeline_cache: Res<PipelineCache>,
     layouts: Res<FftBindGroupLayouts>,
     fft_uniforms: Res<ComponentUniforms<FftSettings>>,
     fft_roots_buffer: Res<FftRootsBuffer>,
@@ -263,9 +247,10 @@ pub(crate) fn prepare_fft_bind_groups(
             continue;
         };
 
+        let common_layout = pipeline_cache.get_bind_group_layout(&layouts.common);
         let common = render_device.create_bind_group(
             "fft_bind_group",
-            &layouts.common,
+            &common_layout,
             &BindGroupEntries::sequential((
                 globals_binding.clone(),
                 settings_binding.clone(),
@@ -323,4 +308,76 @@ pub(crate) fn prepare_fft_roots_buffer(
 
     fft_roots_buffer.buffer.set(*roots);
     fft_roots_buffer.buffer.write_buffer(&device, &queue);
+}
+
+/// Copy app-provided textures into the FFT working buffers on the CPU side.
+/// If an imaginary texture is not provided, the imaginary buffer is zeroed.
+pub(crate) fn copy_input_textures_to_fft_buffers(
+    mut images: ResMut<Assets<Image>>,
+    query: Query<(&FftTextures, &FftInputTexture, &FftSource)>,
+) {
+    for (textures, input, source) in &query {
+        let Some(src_re) = images.get(&input.real) else {
+            continue;
+        };
+        let src_re_data = src_re.data.clone();
+
+        let expected_extent = Extent3d {
+            width: source.size.x,
+            height: source.size.y,
+            depth_or_array_layers: 1,
+        };
+        if src_re.texture_descriptor.size != expected_extent {
+            warn!(
+                "Input real texture size {:?} does not match FFT size {:?}, skipping copy",
+                src_re.texture_descriptor.size, expected_extent
+            );
+            continue;
+        }
+
+        // Decide which buffers receive the copy based on direction.
+        let (dst_re_handle, dst_im_handle) = if source.inverse {
+            (&textures.buffer_c_re, &textures.buffer_c_im)
+        } else {
+            (&textures.buffer_a_re, &textures.buffer_a_im)
+        };
+
+        if let (Some(dst_re), Some(src_bytes)) =
+            (images.get_mut(dst_re_handle), src_re_data.as_ref())
+            && let Some(dst_bytes) = dst_re.data.as_mut()
+        {
+            if dst_bytes.len() == src_bytes.len() {
+                dst_bytes.clone_from_slice(src_bytes);
+            } else {
+                warn!(
+                    "Input real texture data length {} does not match destination {}",
+                    src_bytes.len(),
+                    dst_bytes.len()
+                );
+                continue;
+            }
+        }
+
+        if let Some(imag_handle) = &input.imag {
+            let src_im_data = images.get(imag_handle).and_then(|img| img.data.clone());
+            if let (Some(dst_im), Some(src_bytes)) =
+                (images.get_mut(dst_im_handle), src_im_data.as_ref())
+                && let Some(dst_bytes) = dst_im.data.as_mut()
+            {
+                if dst_bytes.len() == src_bytes.len() {
+                    dst_bytes.clone_from_slice(src_bytes);
+                } else {
+                    warn!(
+                        "Input imag texture data length {} does not match destination {}",
+                        src_bytes.len(),
+                        dst_bytes.len()
+                    );
+                }
+            }
+        } else if let Some(dst_im) = images.get_mut(dst_im_handle)
+            && let Some(dst_bytes) = dst_im.data.as_mut()
+        {
+            dst_bytes.fill(0);
+        }
+    }
 }
