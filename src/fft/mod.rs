@@ -23,16 +23,17 @@ pub mod resources;
 pub use node::FftNode;
 pub use resources::FftTextures;
 
-use node::FftComputeNode;
+use node::{FftComputeNode, FftResolveOutputsNode};
 use resources::{
     FftBindGroupLayouts, FftPipelines, FftRootsBuffer, copy_input_textures_to_fft_buffers,
-    prepare_fft_bind_groups, prepare_fft_roots_buffer, prepare_fft_textures,
+    prepare_fft_bind_groups, prepare_fft_resolve_bind_groups, prepare_fft_roots_buffer,
+    prepare_fft_textures,
 };
 
 use crate::complex::c32;
 
-/// Twiddle factors `exp(-i·2π·k / base)` stored at `roots[base + k]` for
-/// `base = 2^order`
+/// Twiddle factors `exp(-i·2π·k / base)` at `roots[base + k]` for `base = 2^order`,
+/// matching `get_root` in `assets/fft.wgsl` / `assets/ifft.wgsl`.
 pub fn fill_forward_fft_twiddles(roots: &mut [c32; 8192]) {
     roots.fill(c32::new(0.0, 0.0));
     for order in 0..13u32 {
@@ -88,7 +89,7 @@ mod layout_tests {
     }
 }
 
-mod shaders {
+pub(crate) mod shaders {
     use bevy::asset::{Handle, uuid_handle};
     use bevy::shader::Shader;
 
@@ -96,6 +97,8 @@ mod shaders {
     pub const BUFFER: Handle<Shader> = uuid_handle!("33f1ccb3-7d87-48d3-8984-51892e6652d0");
     pub const BINDINGS: Handle<Shader> = uuid_handle!("1900debb-855d-489b-a973-2559249c3945");
     pub const PLOT: Handle<Shader> = uuid_handle!("a021a614-a32b-4b4b-9604-00005bce1436");
+    pub const RESOLVE_OUTPUTS: Handle<Shader> =
+        uuid_handle!("c4d5e6f0-1111-4222-a333-444455556666");
 }
 
 // Public-facing component
@@ -209,6 +212,7 @@ impl Plugin for FftPlugin {
         load_internal_asset!(app, shaders::BINDINGS, "bindings.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::C32, "../complex/c32.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::PLOT, "plot.wgsl", Shader::from_wgsl);
+        load_internal_asset!(app, shaders::RESOLVE_OUTPUTS, "resolve_outputs.wgsl", Shader::from_wgsl);
         // TODO: Add FFT and IFFT shaders as internal assets
 
         app.register_type::<FftSource>()
@@ -246,13 +250,17 @@ impl Plugin for FftPlugin {
                         .in_set(RenderSystems::Prepare)
                         .before(RenderSystems::PrepareBindGroups),
                     prepare_fft_bind_groups.in_set(RenderSystems::PrepareBindGroups),
+                    prepare_fft_resolve_bind_groups
+                        .in_set(RenderSystems::PrepareBindGroups)
+                        .after(prepare_fft_bind_groups),
                 ),
             )
             .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeFFT)
             .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeIFFT)
+            .add_render_graph_node::<FftResolveOutputsNode>(Core2d, FftNode::ResolveOutputs)
             .add_render_graph_edge(Core2d, FftNode::ComputeFFT, FftNode::ComputeIFFT)
-            // Without this edge, the 2D pass can run before FFT/IFFT compute finishes, so sprites
-            // sample still-empty storage textures (appears blank).
-            .add_render_graph_edge(Core2d, FftNode::ComputeIFFT, Node2d::MainOpaquePass);
+            // Resolve runs after IFFT so `spatial_output` / `power_spectrum` are valid for the 2D pass.
+            .add_render_graph_edge(Core2d, FftNode::ComputeIFFT, FftNode::ResolveOutputs)
+            .add_render_graph_edge(Core2d, FftNode::ResolveOutputs, Node2d::MainOpaquePass);
     }
 }

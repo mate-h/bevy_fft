@@ -66,9 +66,6 @@ fn ifft(
             input_value = read_buffer_a(pos);
         #else
             input_value = read_buffer_c(pos);
-            if (pos.x >= 128u || pos.y >= 128u) {
-                input_value = splat_c32_n(c32(0.0, 0.0));
-            }
         #endif
         temp[bit_reversed] = c32_n(input_value.re, -input_value.im);
     } else {

@@ -36,7 +36,7 @@ fn main() {
             (
                 setup_pattern_snapshot_textures.after(prepare_fft_textures),
                 update_output_sprites.after(setup_pattern_snapshot_textures),
-                switch_example_pattern,
+                switch_input_pattern,
             ),
         )
         .run();
@@ -50,21 +50,18 @@ struct GridPosition {
     index: usize,
 }
 
-/// Real/imag copies of buffer **A** taken right after the pattern generator runs, before the
-/// forward FFT overwrites the pipeline. Used so the UI can show the true spatial input while
-/// `buffer_a_*` later holds an IFFT intermediate.
+/// Copy of buffer A (real) right after pattern generation, for input visualization.
 #[derive(Component, Clone, ExtractComponent)]
-struct FftPatternSnapshot {
+struct InputPatternTextures {
     re: Handle<Image>,
-    im: Handle<Image>,
 }
 
 /// **1** = radial (`generate_concentric_circles`), **2** = horizontal stripes (`generate_horizontal_rgb_sine`).
 #[derive(Resource, Clone, Copy, Default, PartialEq, Eq, ExtractResource)]
-struct ExamplePattern(ExamplePatternKind);
+struct InputPattern(InputPatternKind);
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum ExamplePatternKind {
+enum InputPatternKind {
     #[default]
     Radial,
     Horizontal,
@@ -88,35 +85,28 @@ fn setup(mut commands: Commands) {
         roundtrip: true,
     });
 
-    let columns = 4;
-    let rows = 2;
-    let spacing = 256.0 + 8.0;
+    let columns = 2;
+    let spacing = 256.0 + 16.0;
     let start_x = -((columns - 1) as f32) * spacing / 2.0;
-    let start_y = ((rows - 1) as f32) * spacing / 2.0;
 
-    for row in 0..rows {
-        for col in 0..columns {
-            let index = row * columns + col;
-            let x = start_x + col as f32 * spacing;
-            let y = start_y - row as f32 * spacing;
-
-            commands.spawn((
-                Sprite {
-                    custom_size: Some(size),
-                    ..default()
-                },
-                Transform::from_xyz(x, y, 0.0),
-                OutputImage,
-                GridPosition { index },
-            ));
-        }
+    for col in 0..columns {
+        let x = start_x + col as f32 * spacing;
+        commands.spawn((
+            Sprite {
+                custom_size: Some(size),
+                ..default()
+            },
+            Transform::from_xyz(x, 0.0, 0.0),
+            OutputImage,
+            GridPosition { index: col },
+        ));
     }
 }
 
 fn setup_pattern_snapshot_textures(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
-    query: Query<(Entity, &FftSource, &FftTextures), Without<FftPatternSnapshot>>,
+    query: Query<(Entity, &FftSource, &FftTextures), Without<InputPatternTextures>>,
 ) {
     for (entity, source, _) in &query {
         let extent = Extent3d {
@@ -133,23 +123,20 @@ fn setup_pattern_snapshot_textures(
         );
         image.texture_descriptor.usage = TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING;
 
-        let re = images.add(image.clone());
-        let im = images.add(image);
-        commands
-            .entity(entity)
-            .insert(FftPatternSnapshot { re, im });
+        let re = images.add(image);
+        commands.entity(entity).insert(InputPatternTextures { re });
     }
 }
 
-fn switch_example_pattern(
+fn switch_input_pattern(
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut pattern: ResMut<ExamplePattern>,
+    mut pattern: ResMut<InputPattern>,
 ) {
     if keyboard.just_pressed(KeyCode::Digit1) {
-        pattern.0 = ExamplePatternKind::Radial;
+        pattern.0 = InputPatternKind::Radial;
     }
     if keyboard.just_pressed(KeyCode::Digit2) {
-        pattern.0 = ExamplePatternKind::Horizontal;
+        pattern.0 = InputPatternKind::Horizontal;
     }
 }
 
@@ -219,12 +206,12 @@ impl Node for ExamplePatternNode {
         world: &World,
     ) -> Result<(), NodeRunError> {
         let pipelines = world.resource::<ExamplePatternPipeline>();
-        let pattern = world.resource::<ExamplePattern>();
+        let pattern = world.resource::<InputPattern>();
         let pipeline_cache = world.resource::<PipelineCache>();
 
         let pipeline_id = match pattern.0 {
-            ExamplePatternKind::Radial => pipelines.radial,
-            ExamplePatternKind::Horizontal => pipelines.horizontal,
+            InputPatternKind::Radial => pipelines.radial,
+            InputPatternKind::Horizontal => pipelines.horizontal,
         };
 
         let Some(pattern_pipeline) = pipeline_cache.get_compute_pipeline(pipeline_id) else {
@@ -262,7 +249,7 @@ enum PatternExampleNode {
 }
 
 struct CopyPatternInputSnapshotNode {
-    query: QueryState<(&'static FftTextures, &'static FftPatternSnapshot)>,
+    query: QueryState<(&'static FftTextures, &'static InputPatternTextures)>,
 }
 
 impl FromWorld for CopyPatternInputSnapshotNode {
@@ -291,13 +278,7 @@ impl Node for CopyPatternInputSnapshotNode {
             let Some(src_re) = gpu_images.get(&fft.buffer_a_re) else {
                 continue;
             };
-            let Some(src_im) = gpu_images.get(&fft.buffer_a_im) else {
-                continue;
-            };
             let Some(dst_re) = gpu_images.get(&snap.re) else {
-                continue;
-            };
-            let Some(dst_im) = gpu_images.get(&snap.im) else {
                 continue;
             };
 
@@ -305,11 +286,6 @@ impl Node for CopyPatternInputSnapshotNode {
             encoder.copy_texture_to_texture(
                 src_re.texture.as_image_copy(),
                 dst_re.texture.as_image_copy(),
-                extent,
-            );
-            encoder.copy_texture_to_texture(
-                src_im.texture.as_image_copy(),
-                dst_im.texture.as_image_copy(),
                 extent,
             );
         }
@@ -320,10 +296,10 @@ impl Node for CopyPatternInputSnapshotNode {
 
 impl Plugin for PatternPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ExamplePattern>()
+        app.init_resource::<InputPattern>()
             .add_plugins((
-                ExtractResourcePlugin::<ExamplePattern>::default(),
-                ExtractComponentPlugin::<FftPatternSnapshot>::default(),
+                ExtractResourcePlugin::<InputPattern>::default(),
+                ExtractComponentPlugin::<InputPatternTextures>::default(),
             ));
     }
 
@@ -349,22 +325,15 @@ impl Plugin for PatternPlugin {
 }
 
 fn update_output_sprites(
-    fft_query: Query<(&FftTextures, &FftPatternSnapshot)>,
+    fft_query: Query<(&FftTextures, &InputPatternTextures)>,
     mut outputs: Query<(&mut Sprite, &GridPosition), With<OutputImage>>,
 ) {
     if let Ok((fft_textures, snap)) = fft_query.single() {
         for (mut sprite, grid_pos) in outputs.iter_mut() {
             match grid_pos.index {
-                0 => sprite.image = fft_textures.buffer_d_re.clone(),
-                1 => sprite.image = fft_textures.buffer_d_im.clone(),
-                2 => sprite.image = fft_textures.buffer_c_re.clone(),
-                3 => sprite.image = fft_textures.buffer_c_im.clone(),
-                // Bottom-left: spatial input before FFT/IFFT (buffer A is reused mid-roundtrip).
-                4 => sprite.image = snap.re.clone(),
-                5 => sprite.image = snap.im.clone(),
-                6 => sprite.image = fft_textures.buffer_a_re.clone(),
-                7 => sprite.image = fft_textures.buffer_a_im.clone(),
-                _ => sprite.image = fft_textures.buffer_d_re.clone(),
+                0 => sprite.image = snap.re.clone(),
+                1 => sprite.image = fft_textures.spatial_output.clone(),
+                _ => {}
             }
         }
     }

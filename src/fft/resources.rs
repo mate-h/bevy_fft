@@ -23,6 +23,7 @@ use crate::{complex::c32, fft::FftInputTexture};
 #[derive(Resource)]
 pub struct FftBindGroupLayouts {
     pub common: BindGroupLayoutDescriptor,
+    pub resolve_outputs: BindGroupLayoutDescriptor,
 }
 
 impl FromWorld for FftBindGroupLayouts {
@@ -47,8 +48,39 @@ impl FromWorld for FftBindGroupLayouts {
             ),
         );
 
+        let resolve_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                uniform_buffer::<FftSettings>(false),
+                texture_storage_2d(
+                    TextureFormat::Rgba32Float,
+                    StorageTextureAccess::ReadOnly,
+                ),
+                texture_storage_2d(
+                    TextureFormat::Rgba32Float,
+                    StorageTextureAccess::ReadOnly,
+                ),
+                texture_storage_2d(
+                    TextureFormat::Rgba32Float,
+                    StorageTextureAccess::ReadOnly,
+                ),
+                texture_storage_2d(
+                    TextureFormat::Rgba32Float,
+                    StorageTextureAccess::WriteOnly,
+                ),
+                texture_storage_2d(
+                    TextureFormat::Rgba32Float,
+                    StorageTextureAccess::WriteOnly,
+                ),
+            ),
+        );
+
         Self {
             common: BindGroupLayoutDescriptor::new("fft_common_bind_group_layout", &entries),
+            resolve_outputs: BindGroupLayoutDescriptor::new(
+                "fft_resolve_outputs_bind_group_layout",
+                &resolve_entries,
+            ),
         }
     }
 }
@@ -59,6 +91,7 @@ pub(crate) struct FftPipelines {
     pub fft_vertical: CachedComputePipelineId,
     pub ifft_horizontal: CachedComputePipelineId,
     pub ifft_vertical: CachedComputePipelineId,
+    pub resolve_outputs: CachedComputePipelineId,
 }
 
 impl FromWorld for FftPipelines {
@@ -68,6 +101,7 @@ impl FromWorld for FftPipelines {
         let asset_server = world.resource::<AssetServer>();
         let fft = asset_server.load("fft.wgsl");
         let ifft = asset_server.load("ifft.wgsl");
+        let resolve_shader = super::shaders::RESOLVE_OUTPUTS.clone();
 
         // shader definitions
         let base_shader_defs = vec![ShaderDefVal::UInt("CHANNELS".into(), 4)];
@@ -121,18 +155,29 @@ impl FromWorld for FftPipelines {
             zero_initialize_workgroup_memory: false,
         });
 
+        let resolve_outputs = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("fft_resolve_outputs_pipeline".into()),
+            layout: vec![layouts.resolve_outputs.clone()],
+            push_constant_ranges: vec![],
+            shader: resolve_shader,
+            shader_defs: vec![],
+            entry_point: Some("resolve_fft_outputs".into()),
+            zero_initialize_workgroup_memory: false,
+        });
+
         Self {
             fft_horizontal,
             fft_vertical,
             ifft_horizontal,
             ifft_vertical,
+            resolve_outputs,
         }
     }
 }
 
 #[derive(Component, ExtractComponent, Clone)]
 pub struct FftTextures {
-    // Ping pong buffers (read-write)
+    /// Internal FFT working buffers (ping-pong).
     pub buffer_a_re: Handle<Image>,
     pub buffer_a_im: Handle<Image>,
     pub buffer_b_re: Handle<Image>,
@@ -141,6 +186,10 @@ pub struct FftTextures {
     pub buffer_c_im: Handle<Image>,
     pub buffer_d_re: Handle<Image>,
     pub buffer_d_im: Handle<Image>,
+    /// Real part of the final spatial result after IFFT (copy of `buffer_b_re`, stable for display).
+    pub spatial_output: Handle<Image>,
+    /// Centered log magnitude of the spectrum in `buffer_c` after the forward FFT (for visualization).
+    pub power_spectrum: Handle<Image>,
 }
 
 pub fn prepare_fft_textures(
@@ -176,6 +225,9 @@ pub fn prepare_fft_textures(
         let buffer_d_re = images.add(image.clone());
         let buffer_d_im = images.add(image.clone());
 
+        let spatial_output = images.add(image.clone());
+        let power_spectrum = images.add(image.clone());
+
         commands.entity(entity).insert(FftTextures {
             buffer_a_re,
             buffer_a_im,
@@ -185,6 +237,8 @@ pub fn prepare_fft_textures(
             buffer_c_im,
             buffer_d_re,
             buffer_d_im,
+            spatial_output,
+            power_spectrum,
         });
     }
 }
@@ -192,6 +246,11 @@ pub fn prepare_fft_textures(
 #[derive(Component)]
 pub struct FftBindGroups {
     pub common: BindGroup,
+}
+
+#[derive(Component)]
+pub(crate) struct FftResolveBindGroups {
+    pub group: BindGroup,
 }
 
 #[allow(clippy::too_many_arguments)] // Bevy system: many injected resources + query
@@ -267,6 +326,58 @@ pub(crate) fn prepare_fft_bind_groups(
         );
 
         commands.entity(entity).insert(FftBindGroups { common });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_fft_resolve_bind_groups(
+    mut commands: Commands,
+    render_device: Res<RenderDevice>,
+    pipeline_cache: Res<PipelineCache>,
+    layouts: Res<FftBindGroupLayouts>,
+    fft_uniforms: Res<ComponentUniforms<FftSettings>>,
+    gpu_images: Res<RenderAssets<GpuImage>>,
+    query: Query<
+        (Entity, &FftTextures),
+        (With<FftBindGroups>, Without<FftResolveBindGroups>),
+    >,
+) {
+    let Some(settings_binding) = fft_uniforms.binding() else {
+        return;
+    };
+
+    for (entity, textures) in &query {
+        let Some(c_re) = gpu_images.get(&textures.buffer_c_re) else {
+            continue;
+        };
+        let Some(c_im) = gpu_images.get(&textures.buffer_c_im) else {
+            continue;
+        };
+        let Some(b_re) = gpu_images.get(&textures.buffer_b_re) else {
+            continue;
+        };
+        let Some(power) = gpu_images.get(&textures.power_spectrum) else {
+            continue;
+        };
+        let Some(spatial) = gpu_images.get(&textures.spatial_output) else {
+            continue;
+        };
+
+        let layout = pipeline_cache.get_bind_group_layout(&layouts.resolve_outputs);
+        let group = render_device.create_bind_group(
+            "fft_resolve_outputs_bind_group",
+            &layout,
+            &BindGroupEntries::sequential((
+                settings_binding.clone(),
+                &c_re.texture_view,
+                &c_im.texture_view,
+                &b_re.texture_view,
+                &power.texture_view,
+                &spatial.texture_view,
+            )),
+        );
+
+        commands.entity(entity).insert(FftResolveBindGroups { group });
     }
 }
 

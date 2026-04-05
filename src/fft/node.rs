@@ -27,7 +27,7 @@ use bevy::{
 
 use super::{
     FftSettings,
-    resources::{FftBindGroups, FftPipelines},
+    resources::{FftBindGroups, FftPipelines, FftResolveBindGroups},
 };
 
 use bytemuck;
@@ -36,6 +36,9 @@ use bytemuck;
 pub enum FftNode {
     ComputeFFT,
     ComputeIFFT,
+    /// Fills `spatial_output` and `power_spectrum` after the pipeline.
+    ResolveOutputs,
+    /// Reserved hook for examples (pattern generation).
     GeneratePattern,
 }
 
@@ -146,6 +149,56 @@ impl Node for FftComputeNode {
                 compute_pass.set_push_constants(0, bytemuck::cast_slice(&[vertical_start]));
                 compute_pass.dispatch_workgroups(num_workgroups_x, num_workgroups_y, 1);
             }
+        }
+
+        Ok(())
+    }
+}
+
+pub(super) struct FftResolveOutputsNode {
+    query: QueryState<(&'static FftResolveBindGroups, &'static FftSettings)>,
+}
+
+impl FromWorld for FftResolveOutputsNode {
+    fn from_world(world: &mut World) -> Self {
+        Self {
+            query: world.query(),
+        }
+    }
+}
+
+impl Node for FftResolveOutputsNode {
+    fn update(&mut self, world: &mut World) {
+        self.query.update_archetypes(world);
+    }
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let pipelines = world.resource::<FftPipelines>();
+        let pipeline_cache = world.resource::<PipelineCache>();
+
+        let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipelines.resolve_outputs) else {
+            return Ok(());
+        };
+
+        let command_encoder = render_context.command_encoder();
+        let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("fft_resolve_outputs_pass"),
+            timestamp_writes: None,
+        });
+
+        compute_pass.set_pipeline(pipeline);
+
+        let wg = 16u32;
+        for (bind, settings) in self.query.iter_manual(world) {
+            compute_pass.set_bind_group(0, &bind.group, &[]);
+            let nx = settings.size.x.div_ceil(wg);
+            let ny = settings.size.y.div_ceil(wg);
+            compute_pass.dispatch_workgroups(nx, ny, 1);
         }
 
         Ok(())
