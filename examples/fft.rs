@@ -1,14 +1,21 @@
 use bevy::{
+    asset::RenderAssetUsages,
     core_pipeline::core_2d::graph::Core2d,
+    image::Image,
+    input::keyboard::KeyCode,
     prelude::*,
     render::{
         RenderApp,
-        render_graph::{Node, NodeRunError, RenderGraphContext, RenderGraphExt},
+        extract_component::{ExtractComponent, ExtractComponentPlugin},
+        extract_resource::{ExtractResource, ExtractResourcePlugin},
+        render_asset::RenderAssets,
+        render_graph::{Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel},
         render_resource::{
             CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor,
-            PipelineCache,
+            Extent3d, PipelineCache, TextureDimension, TextureFormat, TextureUsages,
         },
         renderer::RenderContext,
+        texture::GpuImage,
     },
     shader::ShaderDefVal,
 };
@@ -16,7 +23,7 @@ use bevy_fft::{
     complex::c32,
     fft::{
         FftInputTexture, FftNode, FftPlugin, FftSettings, FftSource, FftTextures,
-        resources::{FftBindGroupLayouts, FftBindGroups},
+        resources::{prepare_fft_textures, FftBindGroupLayouts, FftBindGroups},
     },
 };
 
@@ -24,51 +31,61 @@ fn main() {
     App::new()
         .add_plugins((DefaultPlugins, FftPlugin, PatternPlugin))
         .add_systems(Startup, setup)
-        .add_systems(Update, update_output_sprites)
+        .add_systems(
+            Update,
+            (
+                setup_pattern_snapshot_textures.after(prepare_fft_textures),
+                update_output_sprites.after(setup_pattern_snapshot_textures),
+                switch_example_pattern,
+            ),
+        )
         .run();
 }
 
 #[derive(Component)]
 struct OutputImage;
 
-// 1. Create an identifier component
 #[derive(Component)]
 struct GridPosition {
     index: usize,
 }
 
+/// Real/imag copies of buffer **A** taken right after the pattern generator runs, before the
+/// forward FFT overwrites the pipeline. Used so the UI can show the true spatial input while
+/// `buffer_a_*` later holds an IFFT intermediate.
+#[derive(Component, Clone, ExtractComponent)]
+struct FftPatternSnapshot {
+    re: Handle<Image>,
+    im: Handle<Image>,
+}
+
+/// **1** = radial (`generate_concentric_circles`), **2** = horizontal stripes (`generate_horizontal_rgb_sine`).
+#[derive(Resource, Clone, Copy, Default, PartialEq, Eq, ExtractResource)]
+struct ExamplePattern(ExamplePatternKind);
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum ExamplePatternKind {
+    #[default]
+    Radial,
+    Horizontal,
+}
+
 struct PatternPlugin;
 
 fn setup(mut commands: Commands) {
-    // Camera
     commands.spawn(Camera2d);
 
-    // Clone the images to release the immutable borrow on 'images'
     let size = Vec2::splat(256.0);
-    // Calculate FFT roots
     let mut roots = [c32::new(0.0, 0.0); 8192];
-    for order in 0..13 {
-        let base = 1 << order;
-        let count = base >> 1;
-        for k in 0..count {
-            let theta = -2.0 * std::f32::consts::PI * (k as f32) / (base as f32);
-            let root = c32::new(theta.cos(), theta.sin());
-            roots[base + k] = root;
-        }
-    }
+    bevy_fft::fft::fill_forward_fft_twiddles(&mut roots);
 
-    // Spawn FFT entity. With `inverse: true`, the example pattern shader writes
-    // directly into the IFFT input buffers (see `assets/examples/pattern.wgsl`).
-    //
-    // To drive the FFT from a CPU-side image instead, insert `FftInputTexture`
-    // whose real (and optional imag) textures match `size` exactly — e.g.
-    // `showcase.png` in the README is not 256×256, so copying would be skipped.
     commands.spawn(FftSource {
         size: size.as_uvec2(),
         orders: 8,
         padding: UVec2::ZERO,
         roots,
-        inverse: true,
+        inverse: false,
+        roundtrip: true,
     });
 
     let columns = 4;
@@ -96,11 +113,50 @@ fn setup(mut commands: Commands) {
     }
 }
 
-// Render-world pattern generation node, moved to the example. This runs only
-// when no external input texture has been provided.
+fn setup_pattern_snapshot_textures(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    query: Query<(Entity, &FftSource, &FftTextures), Without<FftPatternSnapshot>>,
+) {
+    for (entity, source, _) in &query {
+        let extent = Extent3d {
+            width: source.size.x,
+            height: source.size.y,
+            depth_or_array_layers: 1,
+        };
+        let mut image = Image::new_fill(
+            extent,
+            TextureDimension::D2,
+            &[0; 16],
+            TextureFormat::Rgba32Float,
+            RenderAssetUsages::default(),
+        );
+        image.texture_descriptor.usage = TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING;
+
+        let re = images.add(image.clone());
+        let im = images.add(image);
+        commands
+            .entity(entity)
+            .insert(FftPatternSnapshot { re, im });
+    }
+}
+
+fn switch_example_pattern(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut pattern: ResMut<ExamplePattern>,
+) {
+    if keyboard.just_pressed(KeyCode::Digit1) {
+        pattern.0 = ExamplePatternKind::Radial;
+    }
+    if keyboard.just_pressed(KeyCode::Digit2) {
+        pattern.0 = ExamplePatternKind::Horizontal;
+    }
+}
+
 #[derive(Resource)]
 struct ExamplePatternPipeline {
-    pattern_generation: CachedComputePipelineId,
+    radial: CachedComputePipelineId,
+    horizontal: CachedComputePipelineId,
 }
 
 impl FromWorld for ExamplePatternPipeline {
@@ -109,18 +165,29 @@ impl FromWorld for ExamplePatternPipeline {
         let layouts = world.resource::<FftBindGroupLayouts>();
         let asset_server = world.resource::<AssetServer>();
         let pattern = asset_server.load("examples/pattern.wgsl");
+        let defs = vec![ShaderDefVal::UInt("CHANNELS".into(), 4)];
 
-        let pattern_generation = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("example_pattern_generation_pipeline".into()),
+        let radial = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("example_pattern_radial".into()),
             layout: vec![layouts.common.clone()],
             push_constant_ranges: vec![],
             shader: pattern.clone(),
-            shader_defs: vec![ShaderDefVal::UInt("CHANNELS".into(), 4)],
+            shader_defs: defs.clone(),
             entry_point: Some("generate_concentric_circles".into()),
             zero_initialize_workgroup_memory: false,
         });
 
-        Self { pattern_generation }
+        let horizontal = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("example_pattern_horizontal".into()),
+            layout: vec![layouts.common.clone()],
+            push_constant_ranges: vec![],
+            shader: pattern.clone(),
+            shader_defs: defs,
+            entry_point: Some("generate_horizontal_rgb_sine".into()),
+            zero_initialize_workgroup_memory: false,
+        });
+
+        Self { radial, horizontal }
     }
 }
 
@@ -151,17 +218,20 @@ impl Node for ExamplePatternNode {
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
-        let pattern_pipeline = world.resource::<ExamplePatternPipeline>();
+        let pipelines = world.resource::<ExamplePatternPipeline>();
+        let pattern = world.resource::<ExamplePattern>();
         let pipeline_cache = world.resource::<PipelineCache>();
 
-        let Some(pattern_pipeline) =
-            pipeline_cache.get_compute_pipeline(pattern_pipeline.pattern_generation)
-        else {
+        let pipeline_id = match pattern.0 {
+            ExamplePatternKind::Radial => pipelines.radial,
+            ExamplePatternKind::Horizontal => pipelines.horizontal,
+        };
+
+        let Some(pattern_pipeline) = pipeline_cache.get_compute_pipeline(pipeline_id) else {
             return Ok(());
         };
 
         for (bind_groups, settings, input_texture) in self.query.iter_manual(world) {
-            // If an external texture was provided, skip generating the pattern.
             if input_texture.is_some() {
                 continue;
             }
@@ -186,8 +256,76 @@ impl Node for ExamplePatternNode {
     }
 }
 
+#[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
+enum PatternExampleNode {
+    CopyInputSnapshot,
+}
+
+struct CopyPatternInputSnapshotNode {
+    query: QueryState<(&'static FftTextures, &'static FftPatternSnapshot)>,
+}
+
+impl FromWorld for CopyPatternInputSnapshotNode {
+    fn from_world(world: &mut World) -> Self {
+        Self {
+            query: world.query(),
+        }
+    }
+}
+
+impl Node for CopyPatternInputSnapshotNode {
+    fn update(&mut self, world: &mut World) {
+        self.query.update_archetypes(world);
+    }
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let gpu_images = world.resource::<RenderAssets<GpuImage>>();
+        let encoder = render_context.command_encoder();
+
+        for (fft, snap) in self.query.iter_manual(world) {
+            let Some(src_re) = gpu_images.get(&fft.buffer_a_re) else {
+                continue;
+            };
+            let Some(src_im) = gpu_images.get(&fft.buffer_a_im) else {
+                continue;
+            };
+            let Some(dst_re) = gpu_images.get(&snap.re) else {
+                continue;
+            };
+            let Some(dst_im) = gpu_images.get(&snap.im) else {
+                continue;
+            };
+
+            let extent = src_re.size;
+            encoder.copy_texture_to_texture(
+                src_re.texture.as_image_copy(),
+                dst_re.texture.as_image_copy(),
+                extent,
+            );
+            encoder.copy_texture_to_texture(
+                src_im.texture.as_image_copy(),
+                dst_im.texture.as_image_copy(),
+                extent,
+            );
+        }
+
+        Ok(())
+    }
+}
+
 impl Plugin for PatternPlugin {
-    fn build(&self, _app: &mut App) {}
+    fn build(&self, app: &mut App) {
+        app.init_resource::<ExamplePattern>()
+            .add_plugins((
+                ExtractResourcePlugin::<ExamplePattern>::default(),
+                ExtractComponentPlugin::<FftPatternSnapshot>::default(),
+            ));
+    }
 
     fn finish(&self, app: &mut App) {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -197,28 +335,35 @@ impl Plugin for PatternPlugin {
         render_app
             .init_resource::<ExamplePatternPipeline>()
             .add_render_graph_node::<ExamplePatternNode>(Core2d, FftNode::GeneratePattern)
-            .add_render_graph_edge(Core2d, FftNode::GeneratePattern, FftNode::ComputeFFT);
+            .add_render_graph_node::<CopyPatternInputSnapshotNode>(
+                Core2d,
+                PatternExampleNode::CopyInputSnapshot,
+            )
+            .add_render_graph_edge(Core2d, FftNode::GeneratePattern, PatternExampleNode::CopyInputSnapshot)
+            .add_render_graph_edge(
+                Core2d,
+                PatternExampleNode::CopyInputSnapshot,
+                FftNode::ComputeFFT,
+            );
     }
 }
 
-// System to update the output sprite with the FFT texture.
-// IFFT writes the viridis visualization to `buffer_d_*`; intermediate A/B/C are raw complex
-// (often nearly black when displayed as linear RGB), so we show D first in the grid.
 fn update_output_sprites(
-    fft_query: Query<&FftTextures>,
+    fft_query: Query<(&FftTextures, &FftPatternSnapshot)>,
     mut outputs: Query<(&mut Sprite, &GridPosition), With<OutputImage>>,
 ) {
-    if let Ok(fft_textures) = fft_query.single() {
+    if let Ok((fft_textures, snap)) = fft_query.single() {
         for (mut sprite, grid_pos) in outputs.iter_mut() {
             match grid_pos.index {
                 0 => sprite.image = fft_textures.buffer_d_re.clone(),
                 1 => sprite.image = fft_textures.buffer_d_im.clone(),
-                2 => sprite.image = fft_textures.buffer_a_re.clone(),
-                3 => sprite.image = fft_textures.buffer_a_im.clone(),
-                4 => sprite.image = fft_textures.buffer_b_re.clone(),
-                5 => sprite.image = fft_textures.buffer_b_im.clone(),
-                6 => sprite.image = fft_textures.buffer_c_re.clone(),
-                7 => sprite.image = fft_textures.buffer_c_im.clone(),
+                2 => sprite.image = fft_textures.buffer_c_re.clone(),
+                3 => sprite.image = fft_textures.buffer_c_im.clone(),
+                // Bottom-left: spatial input before FFT/IFFT (buffer A is reused mid-roundtrip).
+                4 => sprite.image = snap.re.clone(),
+                5 => sprite.image = snap.im.clone(),
+                6 => sprite.image = fft_textures.buffer_a_re.clone(),
+                7 => sprite.image = fft_textures.buffer_a_im.clone(),
                 _ => sprite.image = fft_textures.buffer_d_re.clone(),
             }
         }

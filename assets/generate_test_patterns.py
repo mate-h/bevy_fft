@@ -1,7 +1,8 @@
+import os
+import sys
+
 import numpy as np
 from PIL import Image
-import matplotlib.pyplot as plt
-import os
 
 out_dir = "assets/test_patterns"
 os.makedirs(out_dir, exist_ok=True)
@@ -307,6 +308,105 @@ def test_ifft(image_data):
     
     return img_back, error, max_error, mean_error, test_cases
 
+def roundtrip_fft_ifft_spatial_real(spatial: np.ndarray) -> tuple[np.ndarray, dict]:
+    """
+    Ground truth: real-valued spatial signal -> fft2 -> ifft2 -> recovered (real part).
+
+    Uses NumPy's default convention: forward fft2 is unnormalized; ifft2 applies 1/(N*M).
+    For real input, imaginary part of recovery should be ~0 (within float noise).
+
+    No fftshift here — that only permutes bins and is undone by ifftshift if you pair them.
+    """
+    x = np.asarray(spatial, dtype=np.float64)
+    if x.ndim != 2:
+        raise ValueError("expected 2D array")
+    F = np.fft.fft2(x)
+    y = np.fft.ifft2(F)
+    y_real = np.real(y)
+    y_imag = np.imag(y)
+    err = np.abs(x - y_real)
+    info = {
+        "max_abs_error_real": float(np.max(err)),
+        "mean_abs_error_real": float(np.mean(err)),
+        "max_abs_imag": float(np.max(np.abs(y_imag))),
+        "rms_error_real": float(np.sqrt(np.mean(err**2))),
+    }
+    return y_real, info
+
+
+def roundtrip_fft_ifft_with_shift(spatial: np.ndarray) -> tuple[np.ndarray, dict]:
+    """
+    Same spectrum as pipeline that fftshifts for visualization, then undoes before IFFT.
+    Must match roundtrip_fft_ifft_spatial_real up to numerical noise.
+    """
+    x = np.asarray(spatial, dtype=np.float64)
+    F = np.fft.fft2(x)
+    F_s = np.fft.fftshift(F)
+    F_u = np.fft.ifftshift(F_s)
+    y = np.fft.ifft2(F_u)
+    y_real = np.real(y)
+    err = np.abs(x - y_real)
+    info = {
+        "max_abs_error_real": float(np.max(err)),
+        "mean_abs_error_real": float(np.mean(err)),
+        "max_abs_imag": float(np.max(np.abs(np.imag(y)))),
+        "rms_error_real": float(np.sqrt(np.mean(err**2))),
+    }
+    return y_real, info
+
+
+def pattern_to_float_gray(pattern: np.ndarray) -> np.ndarray:
+    """RGB or grayscale uint8/float pattern -> float64 grayscale (mean of channels if RGB)."""
+    p = np.asarray(pattern)
+    if p.ndim == 3:
+        return np.mean(p, axis=2).astype(np.float64)
+    return p.astype(np.float64)
+
+
+def print_roundtrip_ground_truth_table(patterns: dict[str, np.ndarray]) -> None:
+    """
+    Print pattern -> FFT -> IFFT -> pattern metrics (NumPy reference).
+
+    Your GPU path should target the same mathematical transform; normalization in shaders
+    (e.g. explicit 1/N^2) must match this convention for identity recovery.
+    """
+    print("\n=== Ground truth: spatial -> fft2 -> ifft2 -> spatial (float, grayscale) ===\n")
+    print(f"{'pattern':<18} {'max|err|':>12} {'rms|err|':>12} {'max|im|':>12}")
+    print("-" * 56)
+    for name, pat in patterns.items():
+        g = pattern_to_float_gray(pat)
+        _, info = roundtrip_fft_ifft_spatial_real(g)
+        print(
+            f"{name:<18} {info['max_abs_error_real']:12.3e} "
+            f"{info['rms_error_real']:12.3e} {info['max_abs_imag']:12.3e}"
+        )
+
+    # Sanity: shift in frequency domain does not change recovery
+    print("\n=== Sanity: with fftshift / ifftshift on spectrum (should match direct) ===\n")
+    for name in ("checkerboard", "circles"):
+        if name not in patterns:
+            continue
+        g = pattern_to_float_gray(patterns[name])
+        _, d = roundtrip_fft_ifft_spatial_real(g)
+        _, s = roundtrip_fft_ifft_with_shift(g)
+        print(
+            f"{name}: direct max_err={d['max_abs_error_real']:.3e}, "
+            f"shift path max_err={s['max_abs_error_real']:.3e}"
+        )
+
+    # Per-channel RGB (matches treating each channel like a separate plane)
+    print("\n=== Per-channel float round-trip (RGB patterns, channels independent) ===\n")
+    for name, pat in patterns.items():
+        p = np.asarray(pat)
+        if p.ndim != 3 or p.shape[2] < 3:
+            continue
+        ch_errs = []
+        for c in range(3):
+            _, inf = roundtrip_fft_ifft_spatial_real(p[:, :, c].astype(np.float64))
+            ch_errs.append(inf["max_abs_error_real"])
+        print(f"{name:<18} max|err| per channel (R,G,B): {ch_errs}")
+
+
 def compare_roots():
     # Our implementation
     def calculate_root(k, base):
@@ -325,6 +425,8 @@ def compare_roots():
         print(f"k={k}: Ours={your_root:.4f}, NumPy={np_root:.4f}")
 
 def main():
+    import matplotlib.pyplot as plt
+
     # Set image size
     size = (256, 256)
     
@@ -411,6 +513,28 @@ def main():
         #     save_image(case_img, f"{name}_{case_name}.png")
 
     compare_roots()
+    print_roundtrip_ground_truth_table(patterns)
+
+
+def roundtrip_only() -> None:
+    """NumPy + PIL only: print FFT/IFFT identity metrics (no matplotlib)."""
+    size = (256, 256)
+    patterns = {
+        "sine": create_sine_pattern(size, frequency=(8, 8)),
+        "impulse": create_impulse_pattern(size),
+        "checkerboard": create_checkerboard_pattern(size, check_size=32),
+        "circles": create_concentric_circles(size, num_circles=8),
+        "stripes": create_diagonal_stripes(size, stripe_width=16),
+        "colorful": create_colorful_pattern(size, frequency=(5, 5)),
+        "rainbow_spiral": create_rainbow_spiral(size, revolutions=3),
+        "mandelbrot": create_color_mandelbrot(size, max_iter=100),
+    }
+    compare_roots()
+    print_roundtrip_ground_truth_table(patterns)
+
 
 if __name__ == "__main__":
-    main() 
+    if "--roundtrip-only" in sys.argv:
+        roundtrip_only()
+    else:
+        main()

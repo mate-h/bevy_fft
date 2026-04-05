@@ -68,16 +68,16 @@ impl Node for FftComputeNode {
 
         for (bind_groups, settings) in self.query.iter_manual(world) {
             let inverse = settings.inverse != 0;
+            let roundtrip = settings.roundtrip != 0;
 
-            if node_label == FftNode::ComputeFFT.intern() && inverse {
+            if node_label == FftNode::ComputeFFT.intern() && inverse && !roundtrip {
                 once!(info!(
                     "Skipping forward FFT because inverse mode is enabled"
                 ));
                 continue;
             }
 
-            if node_label == FftNode::ComputeIFFT.intern() && !inverse {
-                // Not in inverse mode, so skip the IFFT step
+            if node_label == FftNode::ComputeIFFT.intern() && !inverse && !roundtrip {
                 continue;
             }
 

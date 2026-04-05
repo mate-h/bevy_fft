@@ -31,16 +31,60 @@ use resources::{
 
 use crate::complex::c32;
 
+/// Twiddle factors `exp(-i·2π·k / base)` stored at `roots[base + k]` for
+/// `base = 2^order`
+pub fn fill_forward_fft_twiddles(roots: &mut [c32; 8192]) {
+    roots.fill(c32::new(0.0, 0.0));
+    for order in 0..13u32 {
+        let base = 1u32 << order;
+        let count = (base >> 1).max(1);
+        for k in 0..count {
+            let theta = -2.0 * std::f32::consts::PI * (k as f32) / (base as f32);
+            roots[(base + k) as usize] = c32::new(theta.cos(), theta.sin());
+        }
+    }
+}
+
+/// Pre-filled table for `orders ≤ 12` (4096-point) forward FFT stages.
+pub fn forward_fft_twiddle_table() -> [c32; 8192] {
+    let mut roots = [c32::new(0.0, 0.0); 8192];
+    fill_forward_fft_twiddles(&mut roots);
+    roots
+}
+
 #[cfg(test)]
 mod layout_tests {
-    use super::FftSettings;
+    use super::{forward_fft_twiddle_table, FftSettings};
     use bevy::render::render_resource::ShaderType;
+    use std::f32::consts::PI;
 
     #[test]
     fn fft_settings_uniform_size_matches_wgsl() {
         // WGSL uniform layout for `bindings.wgsl` must match `ShaderType` / encase.
         let n = FftSettings::min_size().get() as usize;
         assert_eq!(n, 48, "update bindings.wgsl FftSettings if this changes");
+    }
+
+    /// Spots mistakes in `fill_forward_fft_twiddles` indexing without duplicating the full DIT.
+    #[test]
+    fn twiddle_table_matches_formula() {
+        let roots = forward_fft_twiddle_table();
+        for order in 1u32..=12 {
+            let base = 1u32 << order;
+            let count = (base >> 1).max(1);
+            for k in [0u32, 1, count / 2, count.saturating_sub(1)] {
+                if k >= count {
+                    continue;
+                }
+                let idx = (base + k) as usize;
+                let theta = -2.0 * PI * (k as f32) / (base as f32);
+                assert!(
+                    (roots[idx].re - theta.cos()).abs() < 1e-5
+                        && (roots[idx].im - theta.sin()).abs() < 1e-5,
+                    "roots[{idx}] order={order} k={k}",
+                );
+            }
+        }
     }
 }
 
@@ -65,8 +109,13 @@ pub struct FftSource {
     pub padding: UVec2,
     /// Roots of the FFT
     pub roots: [c32; 8192],
-    /// Inverse flag
+    /// Inverse flag (`IFFT` reads from C). Ignored for dispatch when [`roundtrip`](Self::roundtrip) is true.
     pub inverse: bool,
+    /// If true, each frame runs forward FFT then inverse FFT (buffers A, then C, then B), with the
+    /// pattern written to spatial buffer A, like a spatial to spectrum to spatial check.
+    /// If false and `inverse` is true, the pattern may load a made up spectrum into C; that need not
+    /// match the FFT of whatever you draw in space, so inverse FFT will not recover that spatial image.
+    pub roundtrip: bool,
 }
 
 impl Default for FftSource {
@@ -75,8 +124,9 @@ impl Default for FftSource {
             size: UVec2::new(256, 256),
             orders: 8,
             padding: UVec2::ZERO,
-            roots: [c32::new(0.0, 0.0); 8192],
+            roots: forward_fft_twiddle_table(),
             inverse: false,
+            roundtrip: false,
         }
     }
 }
@@ -107,6 +157,7 @@ pub struct FftSettings {
     pub orders: u32,
     pub padding: UVec2,
     pub inverse: u32,
+    pub roundtrip: u32,
     pub window_type: u32,
     pub window_strength: f32,
     pub radial_falloff: f32,
@@ -124,6 +175,7 @@ impl ExtractComponent for FftSettings {
             orders: item.orders,
             padding: item.padding,
             inverse: item.inverse as u32,
+            roundtrip: item.roundtrip as u32,
             window_type: 0,
             window_strength: 0.0,
             radial_falloff: 0.0,

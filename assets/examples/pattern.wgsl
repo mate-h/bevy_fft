@@ -64,14 +64,20 @@ fn generate_concentric_circles(
     value_b = get_value(distance, phase_b);
     
     // Calculate imaginary components (90 degrees phase shift from real components)
-    value_r_im = get_value(distance, phase_r);
-    value_g_im = get_value(distance, phase_g);
-    value_b_im = get_value(distance, phase_b);
+    // value_r_im = get_value(distance, phase_r);
+    // value_g_im = get_value(distance, phase_g);
+    // value_b_im = get_value(distance, phase_b);
+    value_r_im = 0.0;
+    value_g_im = 0.0;
+    value_b_im = 0.0;
     
     // Store as complex value with RGB channels. When inverse mode is enabled
     // we populate buffer C directly so the IFFT can consume it without
     // running the forward FFT stage first.
-    if (settings.inverse != 0u) {
+    if (settings.roundtrip != 0u) {
+        textureStore(buffer_a_re, pos, vec4<f32>(value_r, value_g, value_b, 1.0));
+        textureStore(buffer_a_im, pos, vec4<f32>(value_r_im, value_g_im, value_b_im, 1.0));
+    } else if (settings.inverse != 0u) {
         textureStore(buffer_c_re, pos, vec4<f32>(value_r, value_g, value_b, 1.0));
         textureStore(buffer_c_im, pos, vec4<f32>(value_r_im, value_g_im, value_b_im, 1.0));
     } else {
@@ -87,4 +93,69 @@ fn get_value(distance: f32, phase_shift: f32) -> f32 {
     let amplitude = 1.0;
     let falloff = 10.0;
     return amplitude * cos(distance * frequency_oscillation * 6.28 + phase_shift) * exp(-falloff * pow(distance, 2.0));
+}
+
+/// Diagonal (u + v) phase; R/G/B sines with 120° separation.
+/// - `roundtrip`: spatial data in buffer A (then forward FFT → C and IFFT → B).
+/// - `inverse` only: synthetic spectrum in C (IFFT maps it to spatial math, not “same” diagonal).
+@compute
+@workgroup_size(16, 16, 1)
+fn generate_diagonal_rgb_sine(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+) {
+    let pos = vec2<u32>(global_id.xy);
+    let size = settings.size;
+    if (any(pos >= size)) {
+        return;
+    }
+
+    // Phase along diagonal (1,1); lower factor = longer waves (smaller frequency).
+    let t = f32(pos.x + pos.y) * (6.28318 * 0.025);
+    let time = globals.time * 1.5;
+
+    let value_r = sin(t + time);
+    let value_g = sin(t + time + 6.28318 / 3.0);
+    let value_b = sin(t + time + 2.0 * 6.28318 / 3.0);
+
+    if (settings.roundtrip != 0u) {
+        textureStore(buffer_a_re, pos, vec4<f32>(value_r, value_g, value_b, 1.0));
+        textureStore(buffer_a_im, pos, vec4<f32>(0.0, 0.0, 0.0, 1.0));
+    } else if (settings.inverse != 0u) {
+        textureStore(buffer_c_re, pos, vec4<f32>(value_r, value_g, value_b, 1.0));
+        textureStore(buffer_c_im, pos, vec4<f32>(0.0, 0.0, 0.0, 1.0));
+    } else {
+        textureStore(buffer_a_re, pos, vec4<f32>(value_r, value_g, value_b, 1.0));
+        textureStore(buffer_a_im, pos, vec4<f32>(0.0, 0.0, 0.0, 1.0));
+    }
+}
+
+/// Horizontal phase (depends on `x` only); same RGB separation as diagonal.
+@compute
+@workgroup_size(16, 16, 1)
+fn generate_horizontal_rgb_sine(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+) {
+    let pos = vec2<u32>(global_id.xy);
+    let size = settings.size;
+    if (any(pos >= size)) {
+        return;
+    }
+
+    let t = f32(pos.x) * (6.28318 * 0.025);
+    let time = globals.time * 1.5;
+
+    let value_r = sin(t + time);
+    let value_g = sin(t + time + 6.28318 / 3.0);
+    let value_b = sin(t + time + 2.0 * 6.28318 / 3.0);
+
+    if (settings.roundtrip != 0u) {
+        textureStore(buffer_a_re, pos, vec4<f32>(value_r, value_g, value_b, 1.0));
+        textureStore(buffer_a_im, pos, vec4<f32>(0.0, 0.0, 0.0, 1.0));
+    } else if (settings.inverse != 0u) {
+        textureStore(buffer_c_re, pos, vec4<f32>(value_r, value_g, value_b, 1.0));
+        textureStore(buffer_c_im, pos, vec4<f32>(0.0, 0.0, 0.0, 1.0));
+    } else {
+        textureStore(buffer_a_re, pos, vec4<f32>(value_r, value_g, value_b, 1.0));
+        textureStore(buffer_a_im, pos, vec4<f32>(0.0, 0.0, 0.0, 1.0));
+    }
 }

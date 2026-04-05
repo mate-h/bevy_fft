@@ -26,7 +26,6 @@
         write_shifted_d_im
     },
     plot::{
-        viridis_quintic,
         apply_window
     }
 };
@@ -85,19 +84,19 @@ fn fft(
     }
     workgroupBarrier();
 
-    // Second phase: Butterfly operations in sequential order
+    // Radix-2 DIT: stride half = 1,2,...,N/2 (eight stages for N=256). Twiddle table uses
+    // base 2^(s+1) per stage s → pass (s + 1) into get_root.
     for (var order = 0u; order < 8u; order++) {
-        let subsection_count = 1u << order;
-        let half_subsection = subsection_count >> 1u;
-        
-        // Calculate butterfly pattern using sequential indices
+        let half_subsection = 1u << order;
+        let subsection_count = half_subsection << 1u;
+
         let subsection_index = sequential & (subsection_count - 1u);
         let offset_in_pair = subsection_index & (half_subsection - 1u);
         let is_second_half = (subsection_index & half_subsection) != 0u;
-        
+
         let pair_index = sequential ^ half_subsection;
-        
-        let root = get_root(order, offset_in_pair);
+
+        let root = get_root(order + 1u, offset_in_pair);
         let root_inverted = c32(-root.re, -root.im);
         
         let value_1 = temp[sequential];
@@ -114,32 +113,27 @@ fn fft(
         workgroupBarrier();
     }
 
-    // Write results maintaining the bit-reversed ordering from the start
+    // Same index layout for both 1D passes (no fftshift in-between); see ifft.wgsl.
     c_o = temp[sequential];
-    c_o.re.w = 1.0;
-    c_o.im.w = 1.0;
-    let center = (pos - 128u) % 256u;
+    let fft_out_coord = pos;
     if (in_bounds) {
+        // Opaque alpha on real/imag textures for sprite blending; per-channel butterflies unchanged
+        // for RGB. Same for im.w so *_im buffers are not fully transparent.
+        c_o.re.w = 1.0;
+        c_o.im.w = 1.0;
         #ifdef VERTICAL
-            write_buffer_c(center, c_o);
+            write_buffer_c(fft_out_coord, c_o);
         #else
-            write_buffer_b(center, c_o);
+            write_buffer_b(fft_out_coord, c_o);
         #endif
     }
 
+    // Raw real/imag RGBA to D (no display scaling).
     if (in_bounds) {
-        let mag = c_o.re * c_o.re + c_o.im * c_o.im;
-        let mag_normalized = log(1.0 + abs(mag)) * 0.2;
-        let color = viridis_quintic(mag_normalized.x);
-        #ifdef VERTICAL
-            write_shifted_d_im(center, vec4(color.xyz, 1.0));
-        #else
-            write_shifted_d_re(center, vec4(color.xyz, 1.0));
-        #endif
+        write_shifted_d_re(fft_out_coord, c_o.re);
+        write_shifted_d_im(fft_out_coord, c_o.im);
     }
 }
-
-
 
 fn swizzle(order: u32, index: u32) -> u32 {
     return reverseBits(index) >> (32u - order);
@@ -147,9 +141,8 @@ fn swizzle(order: u32, index: u32) -> u32 {
 
 fn get_root(order: u32, index: u32) -> c32 {
     let base = 1u << order;
-    let count = base >> 1u;
+    let count = max(1u, base >> 1u);
     let i = base + index % count;
-    let root = roots_buffer.roots[i];
-    return root;
+    return roots_buffer.roots[i];
 }
 

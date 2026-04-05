@@ -9,6 +9,8 @@ struct FftSettings {
     // `vec2<u32>` aligns to 8; `orders` ends at byte 12 → implicit pad 12..16
     padding: vec2<u32>,
     inverse: u32,
+    // If nonzero, run forward FFT then IFFT (OpenGL-style roundtrip). Pattern then fills spatial buffer A.
+    roundtrip: u32,
     window_type: u32, // 0=None, 1=Tukey, 2=Blackman, 3=Kaiser
     window_strength: f32,
     radial_falloff: f32,
