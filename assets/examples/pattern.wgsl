@@ -1,28 +1,37 @@
 #define_import_path bevy_fft::pattern
 
-#import bevy_fft::{
-    complex::{
-        splat_c32_n,
-        c32,
-        c32_2,
-        c32_3,
-        c32_4,
-    },
-    bindings::{
-        globals,
-        settings,
-        buffer_a_re,
-        buffer_a_im,
-        buffer_b_re,
-        buffer_b_im,
-        buffer_c_re,
-        buffer_c_im,
-        buffer_d_re,
-        buffer_d_im,
-    }
-};
+#import bevy_fft::complex::c32;
+#import bevy_render::globals::Globals;
 
-alias c32_n = c32_4;
+// Must match `FftSettings` / `FftRoots` and binding indices in `bevy_fft::bindings`
+// (pattern shares bind group 0 with FFT pipelines).
+struct FftSettings {
+    size: vec2<u32>,
+    orders: u32,
+    padding: vec2<u32>,
+    inverse: u32,
+    roundtrip: u32,
+    window_type: u32,
+    window_strength: f32,
+    radial_falloff: f32,
+    normalization: f32,
+}
+
+struct FftRoots {
+    roots: array<c32, 8192>,
+}
+
+@group(0) @binding(0) var<uniform> globals: Globals;
+@group(0) @binding(1) var<uniform> settings: FftSettings;
+@group(0) @binding(2) var<storage, read_write> roots_buffer: FftRoots;
+@group(0) @binding(3) var buffer_a_re: texture_storage_2d<rgba32float, read_write>;
+@group(0) @binding(4) var buffer_a_im: texture_storage_2d<rgba32float, read_write>;
+@group(0) @binding(5) var buffer_b_re: texture_storage_2d<rgba32float, read_write>;
+@group(0) @binding(6) var buffer_b_im: texture_storage_2d<rgba32float, read_write>;
+@group(0) @binding(7) var buffer_c_re: texture_storage_2d<rgba32float, read_write>;
+@group(0) @binding(8) var buffer_c_im: texture_storage_2d<rgba32float, read_write>;
+@group(0) @binding(9) var buffer_d_re: texture_storage_2d<rgba32float, read_write>;
+@group(0) @binding(10) var buffer_d_im: texture_storage_2d<rgba32float, read_write>;
 
 @compute
 @workgroup_size(16, 16, 1)

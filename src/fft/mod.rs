@@ -19,15 +19,16 @@ use bevy::{
 };
 
 mod node;
+pub mod prelude;
 pub mod resources;
+
 pub use node::FftNode;
-pub use resources::FftTextures;
+pub use resources::{FftTextures, prepare_fft_textures};
 
 use node::{FftComputeNode, FftResolveOutputsNode};
 use resources::{
     FftBindGroupLayouts, FftPipelines, FftRootsBuffer, copy_input_textures_to_fft_buffers,
     prepare_fft_bind_groups, prepare_fft_resolve_bind_groups, prepare_fft_roots_buffer,
-    prepare_fft_textures,
 };
 
 use crate::complex::c32;
@@ -55,7 +56,7 @@ pub fn forward_fft_twiddle_table() -> [c32; 8192] {
 
 #[cfg(test)]
 mod layout_tests {
-    use super::{forward_fft_twiddle_table, FftSettings};
+    use super::{FftSettings, forward_fft_twiddle_table};
     use bevy::render::render_resource::ShaderType;
     use std::f32::consts::PI;
 
@@ -130,6 +131,22 @@ impl Default for FftSource {
             roots: forward_fft_twiddle_table(),
             inverse: false,
             roundtrip: false,
+        }
+    }
+}
+
+impl FftSource {
+    /// Spatial forward FFT then inverse FFT every frame (buffers A → C → B).
+    ///
+    /// GPU kernels are fixed to **256×256** and eight radix-2 stages; keep `orders` at 8.
+    pub fn spatial_roundtrip_256() -> Self {
+        Self {
+            size: UVec2::splat(256),
+            orders: 8,
+            padding: UVec2::ZERO,
+            roots: forward_fft_twiddle_table(),
+            inverse: false,
+            roundtrip: true,
         }
     }
 }
@@ -212,7 +229,12 @@ impl Plugin for FftPlugin {
         load_internal_asset!(app, shaders::BINDINGS, "bindings.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::C32, "../complex/c32.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::PLOT, "plot.wgsl", Shader::from_wgsl);
-        load_internal_asset!(app, shaders::RESOLVE_OUTPUTS, "resolve_outputs.wgsl", Shader::from_wgsl);
+        load_internal_asset!(
+            app,
+            shaders::RESOLVE_OUTPUTS,
+            "resolve_outputs.wgsl",
+            Shader::from_wgsl
+        );
         // TODO: Add FFT and IFFT shaders as internal assets
 
         app.register_type::<FftSource>()
@@ -221,8 +243,8 @@ impl Plugin for FftPlugin {
             .add_systems(
                 Update,
                 (
-                    prepare_fft_textures,
-                    copy_input_textures_to_fft_buffers.after(prepare_fft_textures),
+                    resources::prepare_fft_textures,
+                    copy_input_textures_to_fft_buffers.after(resources::prepare_fft_textures),
                 ),
             )
             .add_plugins((

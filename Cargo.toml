@@ -10,7 +10,7 @@ image = { version = "0.25", default-features = false }
 
 [[example]]
 name = "fft"
-path = "examples/fft.rs"
+path = "examples/fft/main.rs"
 
 [features]
 file_watcher = ["bevy/file_watcher"]

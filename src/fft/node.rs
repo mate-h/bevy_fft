@@ -38,7 +38,7 @@ pub enum FftNode {
     ComputeIFFT,
     /// Fills `spatial_output` and `power_spectrum` after the pipeline.
     ResolveOutputs,
-    /// Reserved hook for examples (pattern generation).
+    /// Optional render-graph anchor: register your own compute node with this label to run before [`Self::ComputeFFT`].
     GeneratePattern,
 }
 

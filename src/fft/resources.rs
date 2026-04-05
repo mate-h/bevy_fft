@@ -52,26 +52,11 @@ impl FromWorld for FftBindGroupLayouts {
             ShaderStages::COMPUTE,
             (
                 uniform_buffer::<FftSettings>(false),
-                texture_storage_2d(
-                    TextureFormat::Rgba32Float,
-                    StorageTextureAccess::ReadOnly,
-                ),
-                texture_storage_2d(
-                    TextureFormat::Rgba32Float,
-                    StorageTextureAccess::ReadOnly,
-                ),
-                texture_storage_2d(
-                    TextureFormat::Rgba32Float,
-                    StorageTextureAccess::ReadOnly,
-                ),
-                texture_storage_2d(
-                    TextureFormat::Rgba32Float,
-                    StorageTextureAccess::WriteOnly,
-                ),
-                texture_storage_2d(
-                    TextureFormat::Rgba32Float,
-                    StorageTextureAccess::WriteOnly,
-                ),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadOnly),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadOnly),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadOnly),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
             ),
         );
 
@@ -175,6 +160,10 @@ impl FromWorld for FftPipelines {
     }
 }
 
+/// GPU images for one [`FftSource`] entity.
+///
+/// Use [`Self::spatial_output`] and [`Self::power_spectrum`] after the render-graph resolve step, plus
+/// your own input image or snapshot for display. The `buffer_*` fields are internal working memory.
 #[derive(Component, ExtractComponent, Clone)]
 pub struct FftTextures {
     /// Internal FFT working buffers (ping-pong).
@@ -337,10 +326,7 @@ pub(crate) fn prepare_fft_resolve_bind_groups(
     layouts: Res<FftBindGroupLayouts>,
     fft_uniforms: Res<ComponentUniforms<FftSettings>>,
     gpu_images: Res<RenderAssets<GpuImage>>,
-    query: Query<
-        (Entity, &FftTextures),
-        (With<FftBindGroups>, Without<FftResolveBindGroups>),
-    >,
+    query: Query<(Entity, &FftTextures), (With<FftBindGroups>, Without<FftResolveBindGroups>)>,
 ) {
     let Some(settings_binding) = fft_uniforms.binding() else {
         return;
@@ -377,7 +363,9 @@ pub(crate) fn prepare_fft_resolve_bind_groups(
             )),
         );
 
-        commands.entity(entity).insert(FftResolveBindGroups { group });
+        commands
+            .entity(entity)
+            .insert(FftResolveBindGroups { group });
     }
 }
 
