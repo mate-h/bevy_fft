@@ -1,92 +1,40 @@
-# FFT Compute Shader in Bevy
+# bevy_fft
 
-This project implements GPU based Fast Fourier Transform (FFT) using compute shaders in Bevy engine.
+This crate is a small GPU **FFT library** for [Bevy](https://bevyengine.org). It includes a 2D forward and inverse path with ping-pong buffers, plus a place to run spectrum-domain compute between the two passes. It ships with a sample app that applies a radial band-pass on the spectrum in the middle of the pipeline.
 
-<img src="./assets/showcase.png" alt="showcase" width="600"/>
+<img src="./assets/showcase.png" alt="FFT demo showcase" width="600"/>
 
-## Project Goals
+## What it includes
 
-## Core FFT Component
+The stock pipeline is built around a **256×256** complex transform with workspace tiles labeled **A** through **D**. After the graph finishes, resolved images **`spatial_output`** and **`power_spectrum`** are available for sampling. The Rust API exposes **`FftPlugin`**, **`FftSource`**, **`FftSchedule`**, **`FftInputTexture`**, **`FftInputDomain`**, and **`FftPatternTarget`**. Run `cargo doc --open` for generated API documentation, or open [`src/fft/mod.rs`](src/fft/mod.rs) as the source of truth.
 
-- Use appropriate texture formats for representing complex numbers
-  - multi-channel use cases, assuming a maximum of 4 channels in the texture
-    - a pair of Rgba32Float textures
-    - or a single Rgba32Uint texture with real and imaginary components packed at half the precision
-  - single channel use case
-    - put the real and imaginary parts into a Rgba32Float texture as the red and green channels
-- Use appropriate workgroup sizes to maximize GPU parallelism and memory access patterns, typically 256 threads
-- Use ping-pong buffers for FFT computation to handle large textures (1024x1024+) that exceed workgroup shared memory limits
-- Implement proper normalization and boundary conditions to prevent floating-point errors and edge artifacts
-- Memory barriers to prevent race conditions in compute shaders
-- Multi dimensional FFT, 1D (audio), 2D (image), 3D (volume)
+Between **`ComputeFFT`** and **`ComputeIFFT`** the graph visits **`SpectrumPass`**, which is a no-op until something is wired in. Call **`splice_spectrum_pass`** after registering your own Core2d compute node, and reuse **`FftBindGroupLayouts::common`** to match FFT bindings.
 
-## Testing
+There is also an [**ocean**](src/ocean/mod.rs) entry point. **`OceanPlugin`** loads a vertex shader **`OCEAN_MESH`** that displaces a mesh using a height texture such as **`FftTextures::spatial_output`**. That shader is a building block, not a complete water renderer.
 
-Generate the test patterns using the python script in the assets folder.
+Ambitious extras such as a full ocean sim or FFT bloom are sketched in [**`ROADMAP.md`**](ROADMAP.md).
+
+## Try it
+
+Generate optional test patterns if you like.
 
 ```bash
 pip install numpy matplotlib pillow
 python assets/generate_test_patterns.py
 ```
-Place the `bevy_fft` folder adjacent to the directory of your local git clone of Bevy engine repository.
-Then run the bevy app to test the FFT and IFFT compute shaders, use the file watcher feature to automatically reload the shaders when they are modified.
+
+Then run the demo. The **`file_watcher`** feature hot-reloads WGSL while you iterate.
 
 ```bash
 cargo run --example fft --features file_watcher
 ```
 
-### Realistic Ocean Surface Simulation
+The **`fft`** example drives **`FftSchedule::ForwardThenInverse`**. Data starts in spatial **A**, moves to spectrum **C** for a radial band-pass tuned with the sliders at the top-left, then returns through IFFT to **B**.
 
-Create a real-time ocean surface simulation using the Fast Fourier Transform (FFT) to generate realistic wave patterns based on physical models.
-We compute the Inverse FFT of the frequency domain spectrum to get the time domain wave height.
-In the frequency domain spectrum, each complex value represents a wave component where the magnitude corresponds to the wave amplitude and the phase angle determines the wave offset. When transformed back to the spatial domain through IFFT, these components combine to produce the height field of the ocean surface.
+## A few types worth knowing
 
-### Functional Requirements
-- Generate initial wave spectrum based on statistical wave models
-  - JONSWAP spectrum default constants
-  - Phillips spectrum default constants
-- Implement time-dependent phase evolution using dispersion relation
-- Calculate spectrum with horizontal displacement (choppiness)
-- Perform horizontal and vertical FFT passes using butterfly operations
-- Generate normal maps from displacement data for realistic lighting
-- Support wind direction and speed parameters to affect wave patterns
-- Implement proper dispersion relation formula
-- Handle special cases like DC term removal to prevent artifacts
-- Apply statistical wave constants as user facing components
-- Scale displacement based on ocean size and desired wave height
-- Apply displacement mapping to mesh vertices in a vertex shader
-- Implement realistic water lighting with fresnel effect and subsurface scattering
-- Support environment reflections and refractions
-- Add foam generation at wave peaks
-- Reduce tiling artifacts by compute multiple octaves of ocean waves at different scales
-- Use HDR rendering with proper exposure control, also see Bloom section
-- Utilize compute shaders for GPU-accelerated FFT
-- Support dynamic tessellation based on camera distance
-- Scale detail and displacement based on viewing distance
+Pick **`FftSchedule`** to control how much runs each frame. **`Forward`** stops after the transform into **C**. **`Inverse`** assumes **C** is already filled and writes **B**. **`ForwardThenInverse`** runs both passes so spectrum buffer **C** can be edited on the GPU between them.
 
-### Physically Based Bloom Convolution
+**`FftInputDomain`** steers where **`FftInputTexture`** lands on the CPU each update, either spatial **A** in **`Spatial`** mode or spectrum **C** in **`Spectrum`** mode. **`FftPatternTarget`** tells procedural shaders whether to write **A** or **C**, in line with the uniform in [`bindings.wgsl`](src/fft/bindings.wgsl). Most apps import from **`bevy_fft::fft::prelude`** and add **`bevy_fft::ocean`** only when using the mesh shader.
 
-Develop a high-quality bloom post-processing effect using FFT-based convolution with physically accurate light scattering kernels. This can be obtained from a camera by taking reference photographs or can be generated using a compute shader, or an external software.
-
-# Bloom Algorithm
-
-The Bloom algorithm first identifies the brightest point in the scene, which becomes the center of the kernel. It then separately measures the center energy (concentrated at the kernel center) and scatter dispersion energy (dispersed outward from the center). The algorithm also determines the maximum scatter dispersion values to properly clamp the kernel and prevent artifacts.
-
-The user-facing component provides separate control over center energy and scatter dispersion energy. This allows for more realistic bloom that mimics how real camera lenses respond to bright light sources.
-
-## Functional Requirements
-
-- forward FFT of the Scene, transform the HDR scene into frequency domain
-- forward FFT of the Kernel, transform the light scattering kernel into frequency domain
-- point-wise multiply the two frequency-domain representations, no texture filtering is needed
-- inverse FFT, transform back to spatial domain to get the bloom result
-- downsampling for large kernels, reduces the resolution of the multiplication, improving performance.
-- pre-compute and store optimized kernel values for common light sources (e.g., sun, moon) to reduce runtime computation.
-- cache frequently used FFT results to avoid redundant calculations.
-- reduction-based approach to find the maximum luminance pixel in the scene
-- energy measurement separately surveys the center zone and edge zone to accurately measure energy distribution
-- packs kernel data into structured buffers for optimal GPU access
-- dynamic resizing of the kernel based on the current screen resolution while preserving its optical properties
-- bloom effect remains stable between frames to prevent flickering
-- integrate with other post-processing effects in the rendering pipeline
-- calculate tint based on the energy distribution to ensure physically plausible coloration
+Textures use **Rgba32Float** pairs for real and imaginary storage. Kernels currently launch **256** threads per row. The ping-pong layout is meant to grow to bigger grids later. Broader wishes such as 1D or 3D FFTs and packed formats stay in [`ROADMAP.md`](ROADMAP.md).

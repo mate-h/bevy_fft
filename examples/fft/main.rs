@@ -1,7 +1,10 @@
-//! Input → power spectrum → IFFT output (256²). Keys **1** / **2** switch the procedural pattern.
+//! Round-trip FFT and IFFT on a 256x256 texture with a radial band-pass filter.
 
+mod band_pass;
 mod pattern;
+mod ui;
 
+use band_pass::{BandPassParams, BandPassPlugin};
 use bevy::{
     asset::RenderAssetUsages,
     image::Image,
@@ -10,11 +13,18 @@ use bevy::{
 };
 use bevy_fft::fft::prelude::*;
 use pattern::{InputPatternTextures, PatternPlugin, switch_pattern};
+use ui::{BandPassUiPlugin, FftDemoStartup};
 
 fn main() {
     App::new()
-        .add_plugins((DefaultPlugins, FftPlugin, PatternPlugin))
-        .add_systems(Startup, setup)
+        .add_plugins((
+            DefaultPlugins,
+            FftPlugin,
+            PatternPlugin,
+            BandPassPlugin,
+            BandPassUiPlugin,
+        ))
+        .add_systems(Startup, setup.in_set(FftDemoStartup::Scene))
         .add_systems(
             Update,
             (
@@ -31,7 +41,13 @@ struct DemoSprite(u8);
 
 fn setup(mut commands: Commands) {
     commands.spawn(Camera2d);
-    commands.spawn(FftSource::spatial_roundtrip_256());
+    commands.spawn((
+        FftSource::grid_256_forward_then_inverse(),
+        BandPassParams {
+            band_center: 0.37,
+            band_width: 0.5,
+        },
+    ));
 
     let tile = 256.0;
     let gap = 16.0;

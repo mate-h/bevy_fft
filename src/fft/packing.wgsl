@@ -19,8 +19,8 @@
         unpack_c32_3,
         unpack_c32_4,
     },
-    // These functions are broken when using storage textures as arguments to functions
-    // therefore we need to import the bindings directly in order to use them
+    // Some helpers cannot take storage textures by parameter in WGSL, so we import the
+    // concrete texture bindings from this crate’s `bindings` module instead.
     bindings::{
         src_tex,
         dst_tex,
@@ -45,13 +45,12 @@
 #endif
 #endif
 
-// LOADING
+// --- load packed texels as channel structs ---
 
 #ifdef CHANNELS
 #if CHANNELS == 1 
 fn load_c32_n(pos: vec2<u32>) -> c32 {
     let packed = textureLoad(dst_tex, pos).x;
-    // create u32_data from packed
     var data = packed_c32(packed);
     return unpack_c32(data);
 }
@@ -110,7 +109,8 @@ fn load_re_c32_n(tex: texture_2d<f32>, pos: vec2<u32>) -> c32_n {
 }
 #endif
 
-// STORING
+// --- pack channel structs into storage texels ---
+
 #ifdef CHANNELS
 #if CHANNELS == 1 
 fn store_c32_n(pos: vec2<u32>, c: c32) {

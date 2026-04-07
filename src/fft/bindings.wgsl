@@ -2,16 +2,17 @@
 
 #import bevy_fft::complex::c32;
 #import bevy_render::globals::Globals;
-// Must match `FftSettings` in `src/fft/mod.rs` (`ShaderType` uniform layout).
+// Keep this struct byte-for-byte identical to the Rust `FftSettings` uniform.
 struct FftSettings {
     size: vec2<u32>,
     orders: u32,
-    // `vec2<u32>` aligns to 8; `orders` ends at byte 12 → implicit pad 12..16
+    // Keeps `orders` on a 16-byte boundary before the next fields.
     padding: vec2<u32>,
-    inverse: u32,
-    // If nonzero, run forward FFT then IFFT (OpenGL-style roundtrip). Pattern then fills spatial buffer A.
-    roundtrip: u32,
-    window_type: u32, // 0=None, 1=Tukey, 2=Blackman, 3=Kaiser
+    // Same numeric encoding as `FftSchedule` on the Rust side.
+    schedule: u32,
+    // Same numeric encoding as `FftPatternTarget` on the Rust side.
+    pattern_target: u32,
+    window_type: u32, // 0 none, 1 Tukey, 2 Blackman, 3 Kaiser
     window_strength: f32,
     radial_falloff: f32,
     normalization: f32,
@@ -25,7 +26,7 @@ struct FftRoots {
 @group(0) @binding(1) var<uniform> settings: FftSettings;
 @group(0) @binding(2) var<storage, read_write> roots_buffer: FftRoots;
 
-// two ping-pong buffers
+// Complex workspace buffers **A**–**D**.
 @group(0) @binding(3) var buffer_a_re: texture_storage_2d<rgba32float, read_write>;
 @group(0) @binding(4) var buffer_a_im: texture_storage_2d<rgba32float, read_write>;
 @group(0) @binding(5) var buffer_b_re: texture_storage_2d<rgba32float, read_write>;

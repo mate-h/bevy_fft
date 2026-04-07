@@ -17,7 +17,7 @@ use bevy::{
     utils::once,
 };
 
-use super::{FftRoots, FftSettings, FftSource};
+use super::{FftInputDomain, FftRoots, FftSettings, FftSource};
 use crate::{complex::c32, fft::FftInputTexture};
 
 #[derive(Resource)]
@@ -88,7 +88,6 @@ impl FromWorld for FftPipelines {
         let ifft = asset_server.load("ifft.wgsl");
         let resolve_shader = super::shaders::RESOLVE_OUTPUTS.clone();
 
-        // shader definitions
         let base_shader_defs = vec![ShaderDefVal::UInt("CHANNELS".into(), 4)];
         let mut horizontal_shader_defs = base_shader_defs.clone();
         horizontal_shader_defs.push(ShaderDefVal::Bool("HORIZONTAL".into(), true));
@@ -160,13 +159,13 @@ impl FromWorld for FftPipelines {
     }
 }
 
-/// GPU images for one [`FftSource`] entity.
+/// All GPU textures that back a single [`FftSource`].
 ///
-/// Use [`Self::spatial_output`] and [`Self::power_spectrum`] after the render-graph resolve step, plus
-/// your own input image or snapshot for display. The `buffer_*` fields are internal working memory.
+/// The resolve pass fills [`Self::spatial_output`] and [`Self::power_spectrum`]. The
+/// `buffer_*` handles are ping-pong storage used inside the FFT graph and are mainly interesting
+/// when you author custom compute that plugs into those bindings.
 #[derive(Component, ExtractComponent, Clone)]
 pub struct FftTextures {
-    /// Internal FFT working buffers (ping-pong).
     pub buffer_a_re: Handle<Image>,
     pub buffer_a_im: Handle<Image>,
     pub buffer_b_re: Handle<Image>,
@@ -175,9 +174,9 @@ pub struct FftTextures {
     pub buffer_c_im: Handle<Image>,
     pub buffer_d_re: Handle<Image>,
     pub buffer_d_im: Handle<Image>,
-    /// Real part of the final spatial result after IFFT (copy of `buffer_b_re`, stable for display).
+    /// Spatial result after the inverse FFT. Typical bind target for on-screen display.
     pub spatial_output: Handle<Image>,
-    /// Centered log magnitude of the spectrum in `buffer_c` after the forward FFT (for visualization).
+    /// Log-magnitude spectrum with the DC term moved to the middle for easier viewing.
     pub power_spectrum: Handle<Image>,
 }
 
@@ -242,8 +241,13 @@ pub(crate) struct FftResolveBindGroups {
     pub group: BindGroup,
 }
 
-#[allow(clippy::too_many_arguments)] // Bevy system: many injected resources + query
-pub(crate) fn prepare_fft_bind_groups(
+#[allow(clippy::too_many_arguments)]
+/// Rebuilds the main FFT bind groups once per frame.
+///
+/// CPU uploads can rebuild [`GpuImage`] data for buffer **A**, which would leave stale views if we
+/// cached bind groups forever. Refreshing every frame keeps the bindings aligned with whatever the
+/// asset system just produced.
+pub fn prepare_fft_bind_groups(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
@@ -252,7 +256,7 @@ pub(crate) fn prepare_fft_bind_groups(
     fft_roots_buffer: Res<FftRootsBuffer>,
     globals_buffer: Res<GlobalsBuffer>,
     gpu_images: Res<RenderAssets<GpuImage>>,
-    query: Query<(Entity, &FftTextures, &FftSettings), Without<FftBindGroups>>,
+    query: Query<(Entity, &FftTextures, &FftSettings)>,
 ) {
     let Some(settings_binding) = fft_uniforms.binding() else {
         info!("FftSettings uniform buffer missing, skipping bind group creation");
@@ -318,6 +322,13 @@ pub(crate) fn prepare_fft_bind_groups(
     }
 }
 
+type PrepareFftResolveBindGroupsQuery<'w, 's> = Query<
+    'w,
+    's,
+    (Entity, &'static FftTextures),
+    (With<FftBindGroups>, Without<FftResolveBindGroups>),
+>;
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_fft_resolve_bind_groups(
     mut commands: Commands,
@@ -326,7 +337,7 @@ pub(crate) fn prepare_fft_resolve_bind_groups(
     layouts: Res<FftBindGroupLayouts>,
     fft_uniforms: Res<ComponentUniforms<FftSettings>>,
     gpu_images: Res<RenderAssets<GpuImage>>,
-    query: Query<(Entity, &FftTextures), (With<FftBindGroups>, Without<FftResolveBindGroups>)>,
+    query: PrepareFftResolveBindGroupsQuery,
 ) {
     let Some(settings_binding) = fft_uniforms.binding() else {
         return;
@@ -409,8 +420,9 @@ pub(crate) fn prepare_fft_roots_buffer(
     fft_roots_buffer.buffer.write_buffer(&device, &queue);
 }
 
-/// Copy app-provided textures into the FFT working buffers on the CPU side.
-/// If an imaginary texture is not provided, the imaginary buffer is zeroed.
+/// Copies [`FftInputTexture`] data into the FFT working images on the CPU.
+///
+/// When no imaginary texture is attached the corresponding buffer is cleared to zero.
 pub(crate) fn copy_input_textures_to_fft_buffers(
     mut images: ResMut<Assets<Image>>,
     query: Query<(&FftTextures, &FftInputTexture, &FftSource)>,
@@ -434,11 +446,9 @@ pub(crate) fn copy_input_textures_to_fft_buffers(
             continue;
         }
 
-        // Decide which buffers receive the copy based on direction.
-        let (dst_re_handle, dst_im_handle) = if source.inverse {
-            (&textures.buffer_c_re, &textures.buffer_c_im)
-        } else {
-            (&textures.buffer_a_re, &textures.buffer_a_im)
+        let (dst_re_handle, dst_im_handle) = match source.input_domain {
+            FftInputDomain::Spectrum => (&textures.buffer_c_re, &textures.buffer_c_im),
+            FftInputDomain::Spatial => (&textures.buffer_a_re, &textures.buffer_a_im),
         };
 
         if let (Some(dst_re), Some(src_bytes)) =

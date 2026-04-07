@@ -1,3 +1,7 @@
+//! Single-precision complex number **`c32`** for CPU-side twiddle tables and GPU uniform packing.
+//!
+//! WGSL definitions live in **`c32.wgsl`**.
+
 use std::{
     fmt::{self, Display, Formatter},
     ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign},

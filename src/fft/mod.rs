@@ -22,19 +22,20 @@ mod node;
 pub mod prelude;
 pub mod resources;
 
-pub use node::FftNode;
-pub use resources::{FftTextures, prepare_fft_textures};
+pub use node::{FftNode, FftSpectrumPassthroughNode, splice_spectrum_pass};
+pub use resources::{prepare_fft_bind_groups, FftTextures, prepare_fft_textures};
 
 use node::{FftComputeNode, FftResolveOutputsNode};
 use resources::{
     FftBindGroupLayouts, FftPipelines, FftRootsBuffer, copy_input_textures_to_fft_buffers,
-    prepare_fft_bind_groups, prepare_fft_resolve_bind_groups, prepare_fft_roots_buffer,
+    prepare_fft_resolve_bind_groups, prepare_fft_roots_buffer,
 };
 
 use crate::complex::c32;
 
-/// Twiddle factors `exp(-i·2π·k / base)` at `roots[base + k]` for `base = 2^order`,
-/// matching `get_root` in `assets/fft.wgsl` / `assets/ifft.wgsl`.
+/// Fills `roots` with the twiddle factors used by the forward FFT. For each stage with
+/// `base = 2^order`, the value at index `base + k` is `exp(-i·2π·k / base)`. The WGSL `get_root`
+/// routines in `fft.wgsl` and `ifft.wgsl` read the table using the same layout.
 pub fn fill_forward_fft_twiddles(roots: &mut [c32; 8192]) {
     roots.fill(c32::new(0.0, 0.0));
     for order in 0..13u32 {
@@ -47,7 +48,7 @@ pub fn fill_forward_fft_twiddles(roots: &mut [c32; 8192]) {
     }
 }
 
-/// Pre-filled table for `orders ≤ 12` (4096-point) forward FFT stages.
+/// Builds a twiddle table that covers forward stages up through `orders ≤ 12`.
 pub fn forward_fft_twiddle_table() -> [c32; 8192] {
     let mut roots = [c32::new(0.0, 0.0); 8192];
     fill_forward_fft_twiddles(&mut roots);
@@ -62,12 +63,12 @@ mod layout_tests {
 
     #[test]
     fn fft_settings_uniform_size_matches_wgsl() {
-        // WGSL uniform layout for `bindings.wgsl` must match `ShaderType` / encase.
+        // If this fails, update `bindings.wgsl` so `FftSettings` matches the Rust uniform layout.
         let n = FftSettings::min_size().get() as usize;
         assert_eq!(n, 48, "update bindings.wgsl FftSettings if this changes");
     }
 
-    /// Spots mistakes in `fill_forward_fft_twiddles` indexing without duplicating the full DIT.
+    /// Cheap regression check for the twiddle indexing logic.
     #[test]
     fn twiddle_table_matches_formula() {
         let roots = forward_fft_twiddle_table();
@@ -102,24 +103,77 @@ pub(crate) mod shaders {
         uuid_handle!("c4d5e6f0-1111-4222-a333-444455556666");
 }
 
-// Public-facing component
+/// Chooses how much of the 2D FFT pipeline runs on each frame.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Reflect)]
+#[repr(u32)]
+pub enum FftSchedule {
+    /// Runs the forward transform so spatial buffer **A** becomes spectrum **C**. Skips the inverse pass.
+    #[default]
+    Forward = 0,
+    /// Runs the inverse transform so spectrum **C** becomes spatial **B**. Skips the forward pass.
+    Inverse = 1,
+    /// Runs forward then inverse so data flows **A** → **C** → **B**.
+    /// Pick this when spectrum buffer **C** is edited on the GPU between the two passes.
+    ForwardThenInverse = 2,
+}
+
+impl FftSchedule {
+    #[inline]
+    pub const fn to_bits(self) -> u32 {
+        self as u32
+    }
+
+    #[inline]
+    pub fn try_from_bits(bits: u32) -> Option<Self> {
+        match bits {
+            0 => Some(Self::Forward),
+            1 => Some(Self::Inverse),
+            2 => Some(Self::ForwardThenInverse),
+            _ => None,
+        }
+    }
+}
+
+/// Describes what your [`FftInputTexture`] images represent so CPU uploads go to the right buffer.
+///
+/// Spatial images land in **A**. Ready-made spectra land in **C**.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Reflect)]
+#[repr(u32)]
+pub enum FftInputDomain {
+    #[default]
+    Spatial = 0,
+    Spectrum = 1,
+}
+
+/// Tells procedural or pattern shaders whether they are filling spatial samples or a spectrum.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Reflect)]
+#[repr(u32)]
+pub enum FftPatternTarget {
+    /// Writes spatial-domain samples into buffer **A**. Fits a forward FFT or a full round trip.
+    #[default]
+    SpatialA = 0,
+    /// Writes spectral data into **C**, which pairs well with a workflow that only runs an inverse FFT.
+    SpectrumC = 1,
+}
+
 #[derive(Component, Clone, Reflect)]
 pub struct FftSource {
-    /// Size of the FFT texture
+    /// Grid width and height for this FFT entity.
     pub size: UVec2,
-    /// Number of FFT steps (log2 of size)
+    /// Base-two logarithm of the transform size. The stock WGSL expects eight stages for 256×256 inputs.
     pub orders: u32,
-    /// Padding around the source texture
+    /// Extra border pixels reserved for future windowing or padding work.
     pub padding: UVec2,
-    /// Roots of the FFT
+    /// Twiddle factors shared with the GPU through [`FftRoots`].
     pub roots: [c32; 8192],
-    /// Inverse flag (`IFFT` reads from C). Ignored for dispatch when [`roundtrip`](Self::roundtrip) is true.
-    pub inverse: bool,
-    /// If true, each frame runs forward FFT then inverse FFT (buffers A, then C, then B), with the
-    /// pattern written to spatial buffer A, like a spatial to spectrum to spatial check.
-    /// If false and `inverse` is true, the pattern may load a made up spectrum into C; that need not
-    /// match the FFT of whatever you draw in space, so inverse FFT will not recover that spatial image.
-    pub roundtrip: bool,
+    /// Forward, inverse, or both. See [`FftSchedule`].
+    pub schedule: FftSchedule,
+    /// Whether CPU uploads are spatial images or spectra. Spectrum mode targets buffer **C**.
+    pub input_domain: FftInputDomain,
+    /// Where generated patterns should write, either **A** or **C**, independent of the schedule.
+    pub pattern_target: FftPatternTarget,
+    /// Scales the resolved spatial preview. The underlying FFT buffers stay untouched.
+    pub spatial_display_gain: f32,
 }
 
 impl Default for FftSource {
@@ -129,30 +183,34 @@ impl Default for FftSource {
             orders: 8,
             padding: UVec2::ZERO,
             roots: forward_fft_twiddle_table(),
-            inverse: false,
-            roundtrip: false,
+            schedule: FftSchedule::Forward,
+            input_domain: FftInputDomain::Spatial,
+            pattern_target: FftPatternTarget::SpatialA,
+            spatial_display_gain: 1.0,
         }
     }
 }
 
 impl FftSource {
-    /// Spatial forward FFT then inverse FFT every frame (buffers A → C → B).
+    /// Builds the usual 256×256 setup that runs a forward FFT and inverse FFT each frame.
     ///
-    /// GPU kernels are fixed to **256×256** and eight radix-2 stages; keep `orders` at 8.
-    pub fn spatial_roundtrip_256() -> Self {
+    /// Data moves **A** → **C** → **B**. Keep `orders` at eight to match the bundled radix-2 stages.
+    pub fn grid_256_forward_then_inverse() -> Self {
         Self {
             size: UVec2::splat(256),
             orders: 8,
             padding: UVec2::ZERO,
             roots: forward_fft_twiddle_table(),
-            inverse: false,
-            roundtrip: true,
+            schedule: FftSchedule::ForwardThenInverse,
+            input_domain: FftInputDomain::Spatial,
+            pattern_target: FftPatternTarget::SpatialA,
+            spatial_display_gain: 1.0,
         }
     }
+
 }
 
-/// Provide external textures to the FFT/IFFT pipelines. The real component is
-/// required; imag may be omitted to default to zero.
+/// Hooks user images into the FFT path. The real handle is required, and a missing imaginary image is treated as zero.
 #[derive(Component, Clone, Reflect)]
 pub struct FftInputTexture {
     pub real: Handle<Image>,
@@ -169,15 +227,16 @@ impl ExtractComponent for FftInputTexture {
     }
 }
 
-// Internal render-world component
 #[derive(Component, Clone, Copy, Reflect, ShaderType)]
 #[repr(C)]
 pub struct FftSettings {
     pub size: UVec2,
     pub orders: u32,
     pub padding: UVec2,
-    pub inverse: u32,
-    pub roundtrip: u32,
+    /// [`FftSchedule`] encoded the way the WGSL uniform expects.
+    pub schedule: u32,
+    /// [`FftPatternTarget`] encoded the way the WGSL uniform expects.
+    pub pattern_target: u32,
     pub window_type: u32,
     pub window_strength: f32,
     pub radial_falloff: f32,
@@ -194,12 +253,12 @@ impl ExtractComponent for FftSettings {
             size: item.size,
             orders: item.orders,
             padding: item.padding,
-            inverse: item.inverse as u32,
-            roundtrip: item.roundtrip as u32,
+            schedule: item.schedule.to_bits(),
+            pattern_target: item.pattern_target as u32,
             window_type: 0,
             window_strength: 0.0,
             radial_falloff: 0.0,
-            normalization: 1.0,
+            normalization: item.spatial_display_gain,
         })
     }
 }
@@ -224,7 +283,6 @@ pub struct FftPlugin;
 
 impl Plugin for FftPlugin {
     fn build(&self, app: &mut App) {
-        // Load shaders
         load_internal_asset!(app, shaders::BUFFER, "buffer.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::BINDINGS, "bindings.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::C32, "../complex/c32.wgsl", Shader::from_wgsl);
@@ -235,9 +293,12 @@ impl Plugin for FftPlugin {
             "resolve_outputs.wgsl",
             Shader::from_wgsl
         );
-        // TODO: Add FFT and IFFT shaders as internal assets
+        // Forward and inverse passes still load from `assets/` so they are easy to tweak.
 
         app.register_type::<FftSource>()
+            .register_type::<FftSchedule>()
+            .register_type::<FftInputDomain>()
+            .register_type::<FftPatternTarget>()
             .register_type::<FftRoots>()
             .register_type::<FftInputTexture>()
             .add_systems(
@@ -278,10 +339,12 @@ impl Plugin for FftPlugin {
                 ),
             )
             .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeFFT)
+            .add_render_graph_node::<FftSpectrumPassthroughNode>(Core2d, FftNode::SpectrumPass)
             .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeIFFT)
             .add_render_graph_node::<FftResolveOutputsNode>(Core2d, FftNode::ResolveOutputs)
-            .add_render_graph_edge(Core2d, FftNode::ComputeFFT, FftNode::ComputeIFFT)
-            // Resolve runs after IFFT so `spatial_output` / `power_spectrum` are valid for the 2D pass.
+            .add_render_graph_edge(Core2d, FftNode::ComputeFFT, FftNode::SpectrumPass)
+            .add_render_graph_edge(Core2d, FftNode::SpectrumPass, FftNode::ComputeIFFT)
+            // Ordering ensures `spatial_output` and `power_spectrum` exist before the main 2D pass samples them.
             .add_render_graph_edge(Core2d, FftNode::ComputeIFFT, FftNode::ResolveOutputs)
             .add_render_graph_edge(Core2d, FftNode::ResolveOutputs, Node2d::MainOpaquePass);
     }

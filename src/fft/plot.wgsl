@@ -16,26 +16,24 @@ fn viridis_quintic(x: f32) -> vec3<f32> {
     );
 }
 
-// Unified window function with multiple options
+// Spatial-domain taper chosen by `window_type` / `window_strength` in FFT settings.
 fn apply_window(pos: vec2<u32>, size: vec2<u32>, window_type: u32, strength: f32) -> f32 {
-    // Normalize coordinates
     let x_norm = f32(pos.x) / f32(size.x - 1u);
     let y_norm = f32(pos.y) / f32(size.y - 1u);
     
     var window_value = 1.0;
     
-    // No window
     if (window_type == 0u) {
         window_value = 1.0;
     }
-    // Tukey window (good for ocean waves - minimal edge effects with flat center)
+    // Tukey: gentle edges and a wide flat center; works well on large height-field tiles.
     else if (window_type == 1u) {
-        let alpha = 0.1; // Small alpha preserves most of the pattern
+        let alpha = 0.1; // small alpha keeps most of the interior untapered
         let x_window = tukey_1d(x_norm, alpha);
         let y_window = tukey_1d(y_norm, alpha);
         window_value = x_window * y_window;
     }
-    // Blackman window (good for bloom - smooth falloff)
+    // Blackman: strong edge roll-off when you want sidelobe suppression in both axes.
     else if (window_type == 2u) {
         let a0 = 0.42;
         let a1 = 0.5;
@@ -46,7 +44,7 @@ fn apply_window(pos: vec2<u32>, size: vec2<u32>, window_type: u32, strength: f32
         
         window_value = x_window * y_window;
     }
-    // Kaiser window (good for precise frequency control)
+    // Kaiser: trades main-lobe width against side lobes via `beta`.
     else if (window_type == 3u) {
         let beta = 2.0;
         let x_centered = 2.0 * x_norm - 1.0;
@@ -61,7 +59,7 @@ fn apply_window(pos: vec2<u32>, size: vec2<u32>, window_type: u32, strength: f32
         }
     }
     
-    // Apply window strength (blend between no window and full window)
+    // `strength` mixes identity (0) with the full taper (1).
     return (1.0 - strength) + strength * window_value;
 }
 

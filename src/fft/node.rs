@@ -1,24 +1,12 @@
-// use bevy_ecs::{
-//     label::DynEq,
-//     query::QueryState,
-//     world::{FromWorld, World},
-// };
-// use bevy_log::{error, info};
-// use bevy_render::{
-//     render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
-//     render_resource::{ComputePassDescriptor, PipelineCache},
-//     renderer::RenderContext,
-// };
-// use bevy_utils::once;
-
 use bevy::{
+    core_pipeline::core_2d::graph::Core2d,
     ecs::{
         query::QueryState,
         world::{FromWorld, World},
     },
     log::{error, info},
     render::{
-        render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
+        render_graph::{Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel},
         render_resource::{ComputePassDescriptor, PipelineCache},
         renderer::RenderContext,
     },
@@ -26,7 +14,7 @@ use bevy::{
 };
 
 use super::{
-    FftSettings,
+    FftSchedule, FftSettings,
     resources::{FftBindGroups, FftPipelines, FftResolveBindGroups},
 };
 
@@ -35,11 +23,48 @@ use bytemuck;
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
 pub enum FftNode {
     ComputeFFT,
+    /// After the forward FFT the spectrum lives in **C**. The stock implementation for this label
+    /// does nothing on the GPU. Use [`splice_spectrum_pass`] to insert a real compute pass here.
+    SpectrumPass,
     ComputeIFFT,
-    /// Fills `spatial_output` and `power_spectrum` after the pipeline.
+    /// Finishes the frame by writing user-facing views into `spatial_output` and `power_spectrum`.
     ResolveOutputs,
-    /// Optional render-graph anchor: register your own compute node with this label to run before [`Self::ComputeFFT`].
+    /// Optional hook. Register a compute node with this label to run pattern generation before [`Self::ComputeFFT`].
     GeneratePattern,
+}
+
+/// Empty placeholder for [`FftNode::SpectrumPass`], replaced when splicing a custom node.
+#[derive(Default)]
+pub struct FftSpectrumPassthroughNode;
+
+impl Node for FftSpectrumPassthroughNode {
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        _render_context: &mut RenderContext,
+        _world: &World,
+    ) -> Result<(), NodeRunError> {
+        Ok(())
+    }
+}
+
+/// Drops the default spectrum pass and wires `user_pass` between [`FftNode::ComputeFFT`] and [`FftNode::ComputeIFFT`].
+///
+/// Register `user_pass` on the **Core2d** render graph before calling this function.
+pub fn splice_spectrum_pass(world: &mut World, user_pass: impl RenderLabel) {
+    let Some(mut render_graph) = world.get_resource_mut::<RenderGraph>() else {
+        return;
+    };
+    let Some(graph) = render_graph.get_sub_graph_mut(Core2d) else {
+        return;
+    };
+    if graph.get_node_state(FftNode::SpectrumPass).is_err() {
+        return;
+    }
+    let _ = graph.remove_node(FftNode::SpectrumPass);
+    let user = user_pass.intern();
+    graph.add_node_edge(FftNode::ComputeFFT, user);
+    graph.add_node_edge(user, FftNode::ComputeIFFT);
 }
 
 pub(super) struct FftComputeNode {
@@ -70,21 +95,21 @@ impl Node for FftComputeNode {
         let node_label = graph.label();
 
         for (bind_groups, settings) in self.query.iter_manual(world) {
-            let inverse = settings.inverse != 0;
-            let roundtrip = settings.roundtrip != 0;
+            let schedule = FftSchedule::try_from_bits(settings.schedule).unwrap_or(FftSchedule::Forward);
 
-            if node_label == FftNode::ComputeFFT.intern() && inverse && !roundtrip {
+            if node_label == FftNode::ComputeFFT.intern() && matches!(schedule, FftSchedule::Inverse) {
                 once!(info!(
-                    "Skipping forward FFT because inverse mode is enabled"
+                    "Skipping forward FFT because schedule is FftSchedule::Inverse"
                 ));
                 continue;
             }
 
-            if node_label == FftNode::ComputeIFFT.intern() && !inverse && !roundtrip {
+            if node_label == FftNode::ComputeIFFT.intern()
+                && matches!(schedule, FftSchedule::Forward)
+            {
                 continue;
             }
 
-            // Choose pipelines based on node label
             let (horizontal_pipeline_id, vertical_pipeline_id, prefix) =
                 if node_label == FftNode::ComputeFFT.intern() {
                     (pipelines.fft_horizontal, pipelines.fft_vertical, "fft")
@@ -98,7 +123,6 @@ impl Node for FftComputeNode {
                     return Ok(());
                 };
 
-            // Get pipelines
             let Some(horizontal_pipeline) =
                 pipeline_cache.get_compute_pipeline(horizontal_pipeline_id)
             else {
@@ -118,7 +142,6 @@ impl Node for FftComputeNode {
             let num_workgroups_x = settings.size.x.div_ceil(workgroup_size);
             let num_workgroups_y = settings.size.y;
 
-            // First pass: Horizontal FFT
             {
                 let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
                     label: Some(&*format!("{}_horizontal_pass", prefix)),
@@ -128,15 +151,12 @@ impl Node for FftComputeNode {
                 compute_pass.set_pipeline(horizontal_pipeline);
                 compute_pass.set_bind_group(0, &bind_groups.common, &[]);
 
-                // Set initial iteration to 0 using push constants
                 compute_pass.set_push_constants(0, bytemuck::cast_slice(&[0u32]));
                 compute_pass.dispatch_workgroups(num_workgroups_x, num_workgroups_y, 1);
-            } // compute_pass is dropped here, ensuring the first pass completes
+            }
 
-            // Second pass: Vertical FFT
             {
-                // This calculation needs to consider the full orders
-                let vertical_start = settings.orders - 8; // Start from where horizontal left off
+                let vertical_start = settings.orders - 8;
 
                 let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
                     label: Some(&*format!("{}_vertical_pass", prefix)),

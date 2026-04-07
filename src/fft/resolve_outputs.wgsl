@@ -1,12 +1,12 @@
 #define_import_path bevy_fft::resolve_outputs
 
-// Must stay in sync with `FftSettings` / `bindings.wgsl`.
+// Mirror `FftSettings` from `bindings.wgsl` whenever the uniform changes.
 struct FftSettings {
     size: vec2<u32>,
     orders: u32,
     padding: vec2<u32>,
-    inverse: u32,
-    roundtrip: u32,
+    schedule: u32,
+    pattern_target: u32,
     window_type: u32,
     window_strength: f32,
     radial_falloff: f32,
@@ -20,7 +20,7 @@ struct FftSettings {
 @group(0) @binding(4) var power_spectrum_out: texture_storage_2d<rgba32float, write>;
 @group(0) @binding(5) var spatial_output_out: texture_storage_2d<rgba32float, write>;
 
-/// Centered power spectrum: fftshift so DC is in the middle, log magnitude per RGB channel.
+// fftshifted log magnitude for RGB, plus a copy of the spatial preview.
 @compute
 @workgroup_size(16, 16, 1)
 fn resolve_fft_outputs(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -33,7 +33,8 @@ fn resolve_fft_outputs(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ip = vec2<i32>(i32(pos.x), i32(pos.y));
 
     let spatial = textureLoad(spatial_b_re, ip);
-    textureStore(spatial_output_out, pos, spatial);
+    let s = vec4<f32>(spatial.xyz * settings.normalization, spatial.w);
+    textureStore(spatial_output_out, pos, s);
 
     let hx = dims.x >> 1u;
     let hy = dims.y >> 1u;

@@ -315,7 +315,7 @@ def roundtrip_fft_ifft_spatial_real(spatial: np.ndarray) -> tuple[np.ndarray, di
     Uses NumPy's default convention: forward fft2 is unnormalized; ifft2 applies 1/(N*M).
     For real input, imaginary part of recovery should be ~0 (within float noise).
 
-    No fftshift here — that only permutes bins and is undone by ifftshift if you pair them.
+    No fftshift here. It only permutes bins and ifftshift undoes that when you use the pair.
     """
     x = np.asarray(spatial, dtype=np.float64)
     if x.ndim != 2:

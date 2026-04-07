@@ -108,7 +108,7 @@ fn ifft(
     c_o.re.w = 1.0;
     c_o.im.w = 1.0;
     // No fftshift between 1D passes: 2D IFFT must be ifft_y(ifft_x(C)) on the same index
-    // layout (like WebTide / NumPy). Per-axis shift between passes breaks separability and
+    // layout as common FFT stacks (e.g. NumPy). Per-axis shift between passes breaks separability and
     // collapses diagonal spectra into line artifacts.
     let fft_out_coord = pos;
     if (in_bounds) {

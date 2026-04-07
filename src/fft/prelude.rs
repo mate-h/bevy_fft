@@ -1,9 +1,10 @@
-//! Common imports for apps using the FFT pipeline.
+//! Re-exports the types most applications need when using this crate.
 //!
-//! Shaders are currently fixed to a 256×256 grid (`orders == 8`).
+//! The bundled shaders target a 256×256 grid, so keep `orders` at eight unless you change the WGSL.
 
-pub use super::resources::prepare_fft_textures;
+pub use super::resources::{prepare_fft_bind_groups, prepare_fft_textures};
 pub use super::{
-    FftInputTexture, FftNode, FftPlugin, FftSource, FftTextures, fill_forward_fft_twiddles,
+    splice_spectrum_pass, FftInputDomain, FftInputTexture, FftNode, FftPatternTarget, FftPlugin,
+    FftSchedule, FftSource, FftSpectrumPassthroughNode, FftTextures, fill_forward_fft_twiddles,
     forward_fft_twiddle_table,
 };
