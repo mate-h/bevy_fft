@@ -1,6 +1,6 @@
 # bevy_fft
 
-This crate is a small GPU FFT library for [Bevy](https://bevyengine.org). It runs a 256×256 complex 2D transform with ping-pong workspace buffers, and leaves a spectrum slot between forward and inverse passes for your own compute.
+This crate is a small GPU FFT library for [Bevy](https://bevyengine.org). Use it when you want to filter or synthesize data in the frequency domain on the GPU, then turn it back into something you can show on screen or feed into a mesh, for example a height field from an ocean-style spectrum. It plugs into Bevy’s render graph and works with square power-of-two grids.
 
 The fft example applies a radial band-pass in that spectrum stage. The ocean example runs an inverse-only path each frame and displaces a mesh from the resolved spatial height and slopes.
 
@@ -10,9 +10,9 @@ The fft example applies a radial band-pass in that spectrum stage. The ocean exa
 
 ## What it includes
 
-The stock pipeline is built around a 256×256 complex transform with workspace tiles labeled A through D. After the graph finishes, resolved images `spatial_output` and `power_spectrum` are available for sampling. The Rust API exposes `FftPlugin`, `FftSource`, `FftSchedule`, `FftInputTexture`, `FftInputDomain`, and `FftPatternTarget`. Run `cargo doc --open` for generated API documentation, or open [`src/fft/mod.rs`](src/fft/mod.rs) as the source of truth.
+The stock pipeline uses your chosen grid edge length as long as it is a non-zero power of two. Helpers such as `FftSource::square_forward_then_inverse(n)` and `square_inverse_only(n)` set `FftTextures` and schedule work. After the graph finishes, resolved images `spatial_output` and `power_spectrum` are available for sampling. The Rust API exposes `FftPlugin`, `FftSource`, `FftSchedule`, `FftInputTexture`, `FftInputDomain`, and `FftPatternTarget`. Run `cargo doc --open` for generated API documentation, or open [`src/fft/mod.rs`](src/fft/mod.rs) as the source of truth.
 
-FFT compute runs on the root [`RenderGraph`](https://docs.rs/bevy_render/latest/bevy_render/render_graph/graph/struct.RenderGraph.html) so it executes once per frame before camera work (the graph edges `ResolveOutputs` → `CameraDriverLabel`). Between `ComputeFFT` and `ComputeIFFT` the root graph visits `SpectrumPass`, which is a no-op until something is wired in. Register your custom node on that same root graph, call `splice_spectrum_pass` from plugin `finish`, and reuse `FftBindGroupLayouts::common` to match FFT bindings.
+FFT compute runs on the root [`RenderGraph`](https://docs.rs/bevy_render/latest/bevy_render/render_graph/graph/struct.RenderGraph.html) so it executes once per frame before camera work (the graph ends with `ResolveOutputs` → `CameraDriverLabel`). The chain is `ComputeFFT` → `SpectrumPass` → `ResolveSpectrum` → `ComputeIFFT` → `ResolveOutputs`. Between forward and inverse FFT the graph visits `SpectrumPass`, which is a no-op until something is wired in. Register your custom node on that same root graph, call `splice_spectrum_pass` from plugin `finish`, and reuse `FftBindGroupLayouts::common` to match FFT bindings.
 
 There is also an [ocean](src/ocean/mod.rs) entry point. `OceanPlugin` splices ocean spectrum compute into the FFT graph and registers `OceanSurfaceMaterial`, which displaces a mesh using `FftTextures::spatial_output`. It is a building block, not a complete water renderer.
 
@@ -42,4 +42,8 @@ Pick `FftSchedule` to control how much runs each frame. `Forward` stops after th
 
 `FftInputDomain` steers where `FftInputTexture` lands on the CPU each update, either spatial A in `Spatial` mode or spectrum C in `Spectrum` mode. `FftPatternTarget` tells procedural shaders whether to write A or C, in line with the uniform in [`bindings.wgsl`](src/fft/bindings.wgsl). Most apps import from `bevy_fft::fft::prelude` and add `bevy_fft::ocean` only when using the mesh shader.
 
-Textures use Rgba32Float pairs for real and imaginary storage. Kernels currently launch 256 threads per row. The ping-pong layout is meant to grow to bigger grids later. Broader wishes such as 1D or 3D FFTs and packed formats stay in [`ROADMAP.md`](ROADMAP.md).
+Workspace buffers use Rgba32Float real and imaginary textures. Radix-2 butterfly stages use `256 × 1` workgroups and a 2D dispatch over half-width butterflies and full grid lines. The WGSL [`c32`](src/complex/c32.wgsl) helpers can pack one complex as two f16 in a single `u32`, but the stock FFT graph is still wired to float storage only. 1D or 3D FFTs, packed uint buffers, and related layout work stay in [`ROADMAP.md`](ROADMAP.md).
+
+### How large can the grid be?
+
+Today the twiddle table in Rust and WGSL is a fixed `8192` complex table filled for butterfly bases up through `2^12`, which matches a full radix-2 pass schedule for `4096 × 4096` rows and columns. On top of that, the GPU enforces its own max texture dimension. This is commonly 8192 or 16384 on many desktop adapters for 2D storage textures.

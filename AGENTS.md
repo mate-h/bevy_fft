@@ -8,7 +8,7 @@ Refer to this guide for Markdown in-repo docs, inline documentation, code commen
 
 - Write in plain, readable English: short paragraphs, full sentences, the way you’d explain the project to another developer in person.
 - Prefer **concrete descriptions** over changelog-style bullet dumps. Lists are fine when they help scanability, but avoid turning every section into `**Label**: explanation` rows.
-- **Do not use emoji** anywhere in this repo’s writing unless someone **explicitly requests** them for that change. That includes Markdown, **inline documentation** tied to APIs or modules, ordinary **code comments**, and UI copy. No decorative or tonal icons instead of plain words.
+- **Do not use emoji** in project writing unless someone **explicitly requests** them for that change. That includes Markdown, **inline documentation** tied to APIs or modules, ordinary **code comments**, and UI copy. No decorative or tonal icons instead of plain words.
 
 ## Punctuation
 
@@ -17,7 +17,7 @@ Refer to this guide for Markdown in-repo docs, inline documentation, code commen
 
 ## Avoid “AI default” patterns
 
-- **Title-colon explanations.** Patterns like `**Spectrum slot**: the graph runs…` or opening lines like `X for Bevy: A, B, and C.` read robotic. Rewrite as normal sentences, or fold the idea into a short paragraph.
+- **Title-colon explanations.** Patterns like `**Subsystem name**: the pipeline runs…` or opening lines that string together several internal pieces read robotic. Rewrite as normal sentences, or fold the idea into a short paragraph.
 - **Heavy parenthetical asides.** Cut down `(example here)` and `(see above)`. Prefer another sentence or a light comma, or drop the aside.
 - **“You get” / “you can”** as the main verb for describing what the **library or product** offers. Prefer **includes**, **ships with**, or a direct subject (**It includes…**, **The library ships with…**).
 - **“Helpers”** when naming the project. Prefer **library** (or **package**) for what the project is.
@@ -31,18 +31,23 @@ Refer to this guide for Markdown in-repo docs, inline documentation, code commen
 
 ## Documentation structure
 
-- In README-style Markdown and other reader-facing docs, avoid leaning on bold for every API name, buffer label, or keyword. Prefer `inline code` when an identifier needs to stand out. Use bold sparingly for real emphasis, not as a way to decorate each important-looking word.
-- For document titles and major headings, prefer a **short connecting phrase** over a **parenthetical qualifier**. Example: *Agent notes on writing style* reads more naturally than *Agent notes (writing style)*, which looks like a filed label. Same idea as *Guide to X*, *Notes on Y*, *Z for this repo*.
+- In README-style Markdown and other reader-facing docs, avoid leaning on bold for every API name, type, or keyword. Prefer `inline code` when an identifier needs to stand out. Use bold sparingly for real emphasis, not as a way to decorate each important-looking word.
+- For document titles and major headings, prefer a **short connecting phrase** over a **parenthetical qualifier**. Example: *Agent notes on writing style* reads more naturally than *Agent notes (writing style)*, which looks like a filed label. Same idea as *Guide to X*, *Notes on Y*, *Z for the project*.
 - Section headings can be neutral (**What it includes**, **Try it**) instead of marketing-style lead-ins.
 - For **public APIs**, weave identifiers into sentences instead of serial **`Name`**: behavior bullets, unless a tight reference table is really needed.
 - Link to source paths or your **published API reference** when it exists. Do not promise a **hosting URL** for docs until the project actually publishes there.
 
+## Use case before implementation
+
+- In READMEs, overviews, and other entry points, **lead with why someone would care**: the problem, the outcome, or the workflow they unlock. Low-level structure (call order, storage layout, private types) belongs in **later sections** or in the code, not as the hook.
+- Do not **open** by inventorying how the program is built (every layer, pipeline step, or internal name) when a short outcome-focused sentence would answer “what is this for?”.
+
 ## UI copy
 
-This repo follows the same habits as above, plus normal UI wording rules.
+Use the same habits as above, plus normal UI wording rules.
 
 - **Short fragments.** Prefer a few words over a sentence when space is tight. Cut filler.
-- **Buttons and actions** should read like something the user can do. Use verbs or clear verb phrases where it fits (*Save*, *Open settings*, *Apply band-pass*).
+- **Buttons and actions** should read like something the user can do. Use verbs or clear verb phrases where it fits (*Save*, *Open settings*, *Export*).
 - **Labels** stay simple and descriptive. Name the thing or value, not a tutorial (*Center*, *Width*, *Gain* rather than *The center frequency of your band* in a small label).
 - **Hints and help lines** can be one short line. Same punctuation habits as doc prose.
 
