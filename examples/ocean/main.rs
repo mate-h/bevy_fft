@@ -7,6 +7,7 @@ use bevy::{
     anti_alias::fxaa::Fxaa,
     camera::Exposure,
     camera_controller::free_camera::{FreeCamera, FreeCameraPlugin, FreeCameraState},
+    color::{Color, LinearRgba},
     core_pipeline::tonemapping::Tonemapping,
     light::{
         AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, GlobalAmbientLight,
@@ -212,6 +213,14 @@ fn spawn_ocean_when_ready(
                 foam_intensity: 0.65,
                 foam_cutoff: 0.88,
                 foam_falloff: 0.22,
+                foam_color: Vec4::new(1.0, 1.0, 1.0, 0.0),
+                crest_scatter_intensity: 0.25,
+                crest_scatter_view_power: 2.5,
+                crest_scatter_rim_power: 3.0,
+                crest_scatter_slope_scale: 1.0,
+                crest_scatter_tint: default_crest_scatter_tint(),
+                crest_light_dir_to_light_ws: Vec4::ZERO,
+                crest_light_radiance: Vec4::ZERO,
                 foam_trail_decay: 0.94,
             },
             displacement: tex.spatial_output.clone(),
@@ -285,6 +294,47 @@ fn ocean_egui_panel(
     let mut foam_trail_decay = surface_ready
         .map(|m| m.extension.settings.foam_trail_decay)
         .unwrap_or(0.94);
+    let mut crest_scatter_intensity = surface_ready
+        .map(|m| m.extension.settings.crest_scatter_intensity)
+        .unwrap_or(0.25);
+    let mut crest_scatter_view_power = surface_ready
+        .map(|m| m.extension.settings.crest_scatter_view_power)
+        .unwrap_or(2.5);
+    let mut crest_scatter_rim_power = surface_ready
+        .map(|m| m.extension.settings.crest_scatter_rim_power)
+        .unwrap_or(3.0);
+    let mut crest_scatter_slope_scale = surface_ready
+        .map(|m| m.extension.settings.crest_scatter_slope_scale)
+        .unwrap_or(1.0);
+
+    let default_ocean_linear = LinearRgba::from(Color::srgb(0.04, 0.12, 0.22));
+    let mut ocean_color_rgba = surface_ready
+        .map(|m| {
+            let lr = LinearRgba::from(m.base.base_color);
+            egui::ecolor::Rgba::from_rgb(lr.red, lr.green, lr.blue)
+        })
+        .unwrap_or_else(|| {
+            egui::ecolor::Rgba::from_rgb(
+                default_ocean_linear.red,
+                default_ocean_linear.green,
+                default_ocean_linear.blue,
+            )
+        });
+    let mut foam_color_rgba = surface_ready
+        .map(|m| {
+            let v = m.extension.settings.foam_color;
+            egui::ecolor::Rgba::from_rgb(v.x, v.y, v.z)
+        })
+        .unwrap_or(egui::ecolor::Rgba::WHITE);
+    let mut crest_tint_rgba = surface_ready
+        .map(|m| {
+            let v = m.extension.settings.crest_scatter_tint;
+            egui::ecolor::Rgba::from_rgb(v.x, v.y, v.z)
+        })
+        .unwrap_or_else(|| {
+            let v = default_crest_scatter_tint();
+            egui::ecolor::Rgba::from_rgb(v.x, v.y, v.z)
+        });
 
     let sp_tex = cache.spectrum;
     let dp_tex = cache.displacement;
@@ -392,10 +442,50 @@ fn ocean_egui_panel(
         ui.add(egui::Slider::new(&mut s.time_scale, 0.0..=3.0).text("Time scale"));
         ui.add(egui::Slider::new(&mut mesh_amplitude, 0.0..=4.0).text("Mesh amplitude"));
         ui.add(egui::Slider::new(&mut choppiness, 0.0..=2.0).text("Choppiness"));
+
+        ui.separator();
+        ui.label(egui::RichText::new("Colors (linear RGB)").weak());
+        ui.horizontal(|ui| {
+            ui.label("Ocean base");
+            egui::widgets::color_picker::color_edit_button_rgba(
+                ui,
+                &mut ocean_color_rgba,
+                egui::widgets::color_picker::Alpha::Opaque,
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Foam");
+            egui::widgets::color_picker::color_edit_button_rgba(
+                ui,
+                &mut foam_color_rgba,
+                egui::widgets::color_picker::Alpha::Opaque,
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Crest scatter tint");
+            egui::widgets::color_picker::color_edit_button_rgba(
+                ui,
+                &mut crest_tint_rgba,
+                egui::widgets::color_picker::Alpha::Opaque,
+            );
+        });
+
         ui.add(egui::Slider::new(&mut foam_intensity, 0.0..=1.5).text("Foam intensity"));
         ui.add(egui::Slider::new(&mut foam_cutoff, 0.2..=1.2).text("Foam cutoff"));
         ui.add(egui::Slider::new(&mut foam_falloff, 0.02..=0.8).text("Foam falloff"));
         ui.add(egui::Slider::new(&mut foam_trail_decay, 0.85..=0.999).text("Foam trail decay"));
+        ui.add(
+            egui::Slider::new(&mut crest_scatter_intensity, 0.0..=2.0).text("Crest scatter intensity"),
+        );
+        ui.add(
+            egui::Slider::new(&mut crest_scatter_view_power, 0.5..=12.0).text("Crest scatter view power"),
+        );
+        ui.add(
+            egui::Slider::new(&mut crest_scatter_rim_power, 0.5..=8.0).text("Crest scatter rim power"),
+        );
+        ui.add(
+            egui::Slider::new(&mut crest_scatter_slope_scale, 0.1..=4.0).text("Crest scatter slope scale"),
+        );
         ui.add(egui::Slider::new(&mut sun_settings.elevation, 0.0..=1.0).text("Sun light height"));
         if ui.button("Regenerate spectrum").clicked() {
             s.h0_serial = s.h0_serial.wrapping_add(1);
@@ -439,7 +529,30 @@ fn ocean_egui_panel(
     mat.extension.settings.foam_intensity = foam_intensity;
     mat.extension.settings.foam_cutoff = foam_cutoff;
     mat.extension.settings.foam_falloff = foam_falloff;
+    mat.extension.settings.foam_color = Vec4::new(
+        foam_color_rgba[0],
+        foam_color_rgba[1],
+        foam_color_rgba[2],
+        0.0,
+    );
     mat.extension.settings.foam_trail_decay = foam_trail_decay;
+    mat.extension.settings.crest_scatter_intensity = crest_scatter_intensity;
+    mat.extension.settings.crest_scatter_view_power = crest_scatter_view_power;
+    mat.extension.settings.crest_scatter_rim_power = crest_scatter_rim_power;
+    mat.extension.settings.crest_scatter_slope_scale = crest_scatter_slope_scale;
+    mat.extension.settings.crest_scatter_tint = Vec4::new(
+        crest_tint_rgba[0],
+        crest_tint_rgba[1],
+        crest_tint_rgba[2],
+        0.0,
+    );
+
+    mat.base.base_color = Color::LinearRgba(LinearRgba::new(
+        ocean_color_rgba[0],
+        ocean_color_rgba[1],
+        ocean_color_rgba[2],
+        1.0,
+    ));
 
     let Ok(mut tf) = sun_transform.single_mut() else {
         return;

@@ -14,7 +14,8 @@ pub use crate::fft::{
     splice_spectrum_pass,
 };
 pub use crate::ocean::{
-    OceanDynamicUniform, OceanFoamMask, OceanFoamPhase, OceanFoamUniform, OceanH0Image,
-    OceanH0Uniform, OceanMaterialUniform, OceanPlugin, OceanSimSettings, OceanSurfaceExtension,
-    OceanSurfaceMaterial, OceanSurfaceTag,
+    CREST_SCATTER_REFERENCE_ILLUMINANCE_LUX, OceanDynamicUniform, OceanFoamMask, OceanFoamPhase,
+    OceanFoamUniform, OceanH0Image, OceanH0Uniform, OceanMaterialUniform, OceanPlugin,
+    OceanSimSettings, OceanSurfaceExtension, OceanSurfaceMaterial, OceanSurfaceTag,
+    default_crest_scatter_tint,
 };

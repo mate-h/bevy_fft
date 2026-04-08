@@ -5,7 +5,6 @@
     mesh_position_local_to_clip,
     mesh_position_local_to_world,
 }
-
 struct OceanExtensionUniform {
     amplitude: f32,
     choppiness: f32,
@@ -15,6 +14,15 @@ struct OceanExtensionUniform {
     foam_intensity: f32,
     foam_cutoff: f32,
     foam_falloff: f32,
+    foam_color: vec4<f32>,
+    crest_scatter_intensity: f32,
+    crest_scatter_view_power: f32,
+    crest_scatter_rim_power: f32,
+    crest_scatter_slope_scale: f32,
+    crest_scatter_tint: vec4<f32>,
+    crest_light_dir_to_light_ws: vec4<f32>,
+    crest_light_radiance: vec4<f32>,
+    foam_trail_decay: f32,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> ocean_ext: OceanExtensionUniform;
@@ -81,12 +89,11 @@ fn ocean_displace_surface(instance_index: u32, position_local: vec3<f32>, mesh_u
     return out;
 }
 
-/// Slopes from bilinear fetch on the FFT grid (mip 0), then the same local normal as the vertex path.
-/// `mesh_uv` is the plane attribute UV (0..1); we map to texel-centered coordinates so clamp-to-edge never pins the seam.
-fn ocean_highres_world_normal(instance_index: u32, mesh_uv: vec2<f32>) -> vec3<f32> {
+/// `mesh_uv` is the plane attribute UV (0..1); texel-centered coordinates so clamp-to-edge never pins the seam.
+/// Returns `(d_eta/dx, d_eta/dz, |grad eta|)` in world-scale height units (after amplitude).
+fn ocean_displacement_slopes_steepness(mesh_uv: vec2<f32>) -> vec3<f32> {
     let size = ocean_ext.grid_size;
     let amp = ocean_ext.amplitude;
-    let tile = ocean_ext.ocean_tile_world_size;
 
     let n_tex = max(size, 1.0);
     let uv_tex = mesh_uv * (n_tex - 1.0) / n_tex + vec2<f32>(0.5 / n_tex);
@@ -94,6 +101,14 @@ fn ocean_highres_world_normal(instance_index: u32, mesh_uv: vec2<f32>) -> vec3<f
 
     let deta_dx = disp.r * amp;
     let deta_dz = disp.g * amp;
+    let steep = length(vec2<f32>(deta_dx, deta_dz));
+    return vec3<f32>(deta_dx, deta_dz, steep);
+}
+
+/// Bilinear slopes on the FFT grid (mip 0), same local normal construction as the vertex path.
+fn ocean_world_normal_from_slopes(instance_index: u32, deta_dx: f32, deta_dz: f32) -> vec3<f32> {
+    let size = ocean_ext.grid_size;
+    let tile = ocean_ext.ocean_tile_world_size;
 
     let dx_cell = tile / max(size - 1.0, 1.0);
     let dz_cell = dx_cell;
@@ -115,8 +130,57 @@ fn ocean_foam_coverage(mesh_uv: vec2<f32>) -> f32 {
 fn ocean_mix_foam_into_base_color(mesh_uv: vec2<f32>, base_color: vec4<f32>) -> vec4<f32> {
     let foam_cov = ocean_foam_coverage(mesh_uv);
     let foam_mix = saturate(foam_cov * ocean_ext.foam_intensity);
-    let foam_white = vec3<f32>(1.0, 1.0, 1.0);
-    return vec4<f32>(mix(base_color.rgb, foam_white, foam_mix), base_color.a);
+    let foam_rgb = ocean_ext.foam_color.xyz;
+    return vec4<f32>(mix(base_color.rgb, foam_rgb, foam_mix), base_color.a);
+}
+
+/// Additive highlight on sharp crests from the key directional light (`crest_light_*` in the uniform), rim, and slope; fades where foam is strong.
+/// `N_shade` is the double-sided corrected normal used with lighting. `N_geom` is the FFT slope normal before `prepare_world_normal`, so rim uses true silhouette (see fragment).
+fn ocean_crest_scatter_emissive(
+    N_shade: vec3<f32>,
+    N_geom: vec3<f32>,
+    V: vec3<f32>,
+    slope_steepness: f32,
+    mesh_uv: vec2<f32>,
+) -> vec3<f32> {
+    let intensity = ocean_ext.crest_scatter_intensity;
+    let light_rgb = ocean_ext.crest_light_radiance.xyz;
+    if (intensity <= 0.0 || dot(light_rgb, light_rgb) < 1e-12) {
+        return vec3(0.0);
+    }
+
+    let L = normalize(ocean_ext.crest_light_dir_to_light_ws.xyz);
+    if (dot(L, L) < 1e-12) {
+        return vec3(0.0);
+    }
+
+    let Nn = normalize(N_shade);
+    let Ng = normalize(N_geom);
+    let Vn = normalize(V);
+    let slope_term = saturate(slope_steepness * ocean_ext.crest_scatter_slope_scale);
+
+    let foam_cov = ocean_foam_coverage(mesh_uv);
+    let foam_mix = saturate(foam_cov * ocean_ext.foam_intensity);
+    let foam_suppress = 1.0 - foam_mix;
+
+    // Not front-on to the light (side faces and silhouettes), not only when N·L < 0.
+    let ndotl = dot(Nn, L);
+    let scatter_facing = pow(saturate(1.0 - saturate(ndotl)), 0.65);
+
+    // `V` points fragment→camera; `L` fragment→sun. Back-lit “see-through” crests make V and L roughly
+    // opposed, so use -V·L instead of saturating V·L (which goes to zero there).
+    let through_view = pow(saturate(-dot(Vn, L)), ocean_ext.crest_scatter_view_power);
+    let same_side = pow(saturate(dot(Vn, L)), ocean_ext.crest_scatter_view_power);
+    let toward_light = max(through_view, 0.12 * same_side);
+
+    // Rim from geometric N·V only. `N_shade` is flipped on back faces for double-sided PBR, which
+    // forces N·V > 0 everywhere and makes (1-N·V)^p peak on interior trough walls instead of wave silhouettes.
+    let nv_geom = dot(Ng, Vn);
+    let rim_grazing = pow(saturate(1.0 - nv_geom), ocean_ext.crest_scatter_rim_power);
+    let rim = select(rim_grazing, 0.0, nv_geom <= 0.0);
+
+    let tint = ocean_ext.crest_scatter_tint.xyz;
+    return light_rgb * tint * scatter_facing * toward_light * rim * slope_term * intensity * foam_suppress;
 }
 
 // `PREPASS_PIPELINE` is only set for actual prepass draw pipelines. The main mesh pipeline can still
@@ -256,10 +320,14 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
 #ifdef VERTEX_UVS_A
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
-    let n_world = ocean_highres_world_normal(in.instance_index, in.uv);
+    let disp_slopes = ocean_displacement_slopes_steepness(in.uv);
+    let n_world = ocean_world_normal_from_slopes(in.instance_index, disp_slopes.x, disp_slopes.y);
+    let n_geom = normalize(n_world);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = ocean_mix_foam_into_base_color(in.uv, pbr_input.material.base_color);
+    let crest_e = ocean_crest_scatter_emissive(pbr_input.N, n_geom, pbr_input.V, disp_slopes.z, in.uv);
+    pbr_input.material.emissive = vec4(pbr_input.material.emissive.rgb + crest_e, pbr_input.material.emissive.a);
 #endif
 #endif
     var out: FragmentOutput;
@@ -290,10 +358,14 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
 #ifdef VERTEX_UVS_A
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
-    let n_world = ocean_highres_world_normal(in.instance_index, in.uv);
+    let disp_slopes = ocean_displacement_slopes_steepness(in.uv);
+    let n_world = ocean_world_normal_from_slopes(in.instance_index, disp_slopes.x, disp_slopes.y);
+    let n_geom = normalize(n_world);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = ocean_mix_foam_into_base_color(in.uv, pbr_input.material.base_color);
+    let crest_e = ocean_crest_scatter_emissive(pbr_input.N, n_geom, pbr_input.V, disp_slopes.z, in.uv);
+    pbr_input.material.emissive = vec4(pbr_input.material.emissive.rgb + crest_e, pbr_input.material.emissive.a);
 #endif
 #endif
     return deferred_output(in, pbr_input);

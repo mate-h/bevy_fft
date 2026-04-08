@@ -20,8 +20,9 @@ mod render;
 
 use bevy::{
     asset::{Asset, Handle, load_internal_asset},
+    color::LinearRgba,
     ecs::change_detection::Mut,
-    pbr::{ExtendedMaterial, MaterialExtension, StandardMaterial},
+    pbr::{ExtendedMaterial, MaterialExtension, MeshMaterial3d, StandardMaterial},
     prelude::*,
     reflect::{Reflect, TypePath},
     render::{
@@ -31,6 +32,7 @@ use bevy::{
         render_resource::{AsBindGroup, ShaderType},
     },
     shader::{Shader, ShaderRef},
+    transform::TransformSystems,
 };
 
 pub use render::{
@@ -51,6 +53,11 @@ use crate::fft::{
 
 /// Same factor as `PM_PEAK_COEFF` in `assets/ocean/init_h0.wgsl` (`ω_pm ≈ this * g / U` in rad/s).
 pub const OCEAN_PM_PEAK_COEFF: f32 = 0.87;
+
+/// Bright daylight reference in lux (`lux::RAW_SUNLIGHT` scale). Crest scatter uses
+/// `linear_rgb * (illuminance / this)` so emissive matches artist-friendly [`OceanMaterialUniform::crest_scatter_intensity`]
+/// instead of raw lux.
+pub const CREST_SCATTER_REFERENCE_ILLUMINANCE_LUX: f32 = 130_000.0;
 
 /// User-facing simulation parameters on the main world FFT entity. Horizontal extents use meters.
 #[derive(Component, Clone, Reflect)]
@@ -100,14 +107,31 @@ pub struct OceanMaterialUniform {
     pub grid_size: f32,
     /// Radians on XZ: horizontal unit vector `(cos θ, sin θ)` matches `OceanSimSettings::wind_direction` and the chop factor in `ocean_spectrum`.
     pub wind_direction: f32,
-    /// Brighter foam in lit shading. Blends albedo toward white by `foam_coverage * foam_intensity`.
+    /// Brighter foam in lit shading. Blends albedo toward [`Self::foam_color`] by `foam_coverage * foam_intensity`.
     pub foam_intensity: f32,
     /// Jacobian below this value (wave folding) ramps up foam; typical 0.6 to 1.0.
     pub foam_cutoff: f32,
     /// Width of the transition in Jacobian units (larger = softer edges).
     pub foam_falloff: f32,
+    /// Linear RGB target color for foam when mixing into base albedo (`.w` unused).
+    pub foam_color: Vec4,
+    /// Additive emissive on steep, back-lit wave fronts so directional light reads through tall peaks (scaled by light color).
+    /// Zero disables the effect.
+    pub crest_scatter_intensity: f32,
+    /// Exponent on `dot(view, light)`; higher concentrates glow when looking toward the light through the crest.
+    pub crest_scatter_view_power: f32,
+    /// Exponent on `(1 - N·V)` for a thin-film style rim around silhouettes.
+    pub crest_scatter_rim_power: f32,
+    /// Scales slope magnitude from the displacement map before saturating; larger weights sharper crests.
+    pub crest_scatter_slope_scale: f32,
+    /// Linear RGB multiplier on crest scatter after the key light color. Stronger green and blue than red reads as turquoise water instead of white sun.
+    pub crest_scatter_tint: Vec4,
+    /// World-space direction toward the first [`DirectionalLight`] in the scene (Bevy `dir_to_light`). Filled by [`sync_ocean_crest_key_light`].
+    pub crest_light_dir_to_light_ws: Vec4,
+    /// Linear RGB × (`illuminance` / [`CREST_SCATTER_REFERENCE_ILLUMINANCE_LUX`]) for the key light. Filled by [`sync_ocean_crest_key_light`].
+    pub crest_light_radiance: Vec4,
     /// Per-frame retention of foam from the previous tick (lower = shorter trails). Typical 0.9 to 0.99.
-    /// Passed to the foam compute shader only. It is not part of the material `OceanExtensionUniform` struct in `ocean.wgsl`.
+    /// Passed to the foam compute shader only; kept here so the material uniform matches the GPU struct.
     pub foam_trail_decay: f32,
 }
 
@@ -124,6 +148,13 @@ pub struct OceanSurfaceExtension {
     pub foam_mask: Handle<Image>,
 }
 
+/// Default linear RGB tint for [`OceanMaterialUniform::crest_scatter_tint`] (turquoise bias).
+pub fn default_crest_scatter_tint() -> Vec4 {
+    let c: LinearRgba = Color::srgb(0.12, 0.66, 0.72).into();
+    let a = c.to_f32_array();
+    Vec4::new(a[0], a[1], a[2], 0.0)
+}
+
 impl Default for OceanSurfaceExtension {
     fn default() -> Self {
         Self {
@@ -136,6 +167,14 @@ impl Default for OceanSurfaceExtension {
                 foam_intensity: 0.65,
                 foam_cutoff: 0.88,
                 foam_falloff: 0.22,
+                foam_color: Vec4::new(1.0, 1.0, 1.0, 0.0),
+                crest_scatter_intensity: 0.25,
+                crest_scatter_view_power: 2.5,
+                crest_scatter_rim_power: 3.0,
+                crest_scatter_slope_scale: 1.0,
+                crest_scatter_tint: default_crest_scatter_tint(),
+                crest_light_dir_to_light_ws: Vec4::ZERO,
+                crest_light_radiance: Vec4::ZERO,
                 foam_trail_decay: 0.94,
             },
             displacement: Handle::default(),
@@ -181,6 +220,37 @@ pub mod shaders {
 #[derive(Component)]
 pub struct OceanSurfaceTag;
 
+/// Copies the first directional light into [`OceanMaterialUniform`] so the ocean shader does not bind the full view lights buffer (prepass layouts omit it).
+fn sync_ocean_crest_key_light(
+    mut materials: ResMut<Assets<OceanSurfaceMaterial>>,
+    lights: Query<(Entity, &DirectionalLight, &GlobalTransform)>,
+    ocean_surfaces: Query<&MeshMaterial3d<OceanSurfaceMaterial>, With<OceanSurfaceTag>>,
+) {
+    let (dir_w, rad) = lights
+        .iter()
+        .max_by(|(ea, la, _), (eb, lb, _)| {
+            la.illuminance
+                .total_cmp(&lb.illuminance)
+                .then(ea.index().cmp(&eb.index()))
+        })
+        .map(|(_, light, gt)| {
+            let d = Vec3::from(gt.back()).normalize_or_zero();
+            let c = LinearRgba::from(light.color);
+            let a = c.to_f32_array();
+            let scale = light.illuminance / CREST_SCATTER_REFERENCE_ILLUMINANCE_LUX;
+            let rgb = Vec3::new(a[0], a[1], a[2]) * scale;
+            (d.extend(0.0), rgb.extend(0.0))
+        })
+        .unwrap_or((Vec4::ZERO, Vec4::ZERO));
+
+    for h in &ocean_surfaces {
+        if let Some(mat) = materials.get_mut(&h.0) {
+            mat.extension.settings.crest_light_dir_to_light_ws = dir_w;
+            mat.extension.settings.crest_light_radiance = rad;
+        }
+    }
+}
+
 pub struct OceanPlugin;
 
 impl Plugin for OceanPlugin {
@@ -221,6 +291,10 @@ impl Plugin for OceanPlugin {
             .add_systems(
                 Update,
                 sync_ocean_foam_uniform.after(sync_ocean_dynamic_uniform),
+            )
+            .add_systems(
+                PostUpdate,
+                sync_ocean_crest_key_light.after(TransformSystems::Propagate),
             )
             .add_systems(PostUpdate, sync_ocean_foam_display);
     }
