@@ -6,7 +6,7 @@ use bevy::{
     log::{error, info},
     render::{
         render_graph::{Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel},
-        render_resource::{ComputePassDescriptor, PipelineCache},
+        render_resource::{ComputePass, ComputePassDescriptor, PipelineCache},
         renderer::RenderContext,
     },
     utils::once,
@@ -17,7 +17,22 @@ use super::{
     resources::{FftBindGroups, FftPipelines, FftResolveBindGroups},
 };
 
-use bytemuck;
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct FftPushConstants {
+    stage: u32,
+    axis: u32,
+    src_buffer: u32,
+    dst_buffer: u32,
+    flags: u32,
+}
+
+const BUF_A: u32 = 0;
+const BUF_B: u32 = 1;
+const BUF_C: u32 = 2;
+
+const FLAG_INVERSE_FINALIZE: u32 = 1;
+const FLAG_FORWARD_ALPHA: u32 = 2;
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
 pub enum FftNode {
@@ -25,8 +40,10 @@ pub enum FftNode {
     /// After the forward FFT the spectrum lives in **C**. The stock implementation for this label
     /// does nothing on the GPU. Use [`splice_spectrum_pass`] to insert a real compute pass here.
     SpectrumPass,
+    /// Writes `power_spectrum` from **C** while it still holds the spectrum (before inverse FFT scratch).
+    ResolveSpectrum,
     ComputeIFFT,
-    /// Finishes the frame by writing user-facing views into `spatial_output` and `power_spectrum`.
+    /// Writes `spatial_output` from **B** after the inverse FFT.
     ResolveOutputs,
     /// Optional hook. Register a compute node with this label to run pattern generation before [`Self::ComputeFFT`].
     GeneratePattern,
@@ -47,7 +64,7 @@ impl Node for FftSpectrumPassthroughNode {
     }
 }
 
-/// Drops the default spectrum pass and wires `user_pass` between [`FftNode::ComputeFFT`] and [`FftNode::ComputeIFFT`].
+/// Drops the default spectrum pass and wires `user_pass` between [`FftNode::ComputeFFT`] and [`FftNode::ResolveSpectrum`].
 ///
 /// Call from `RenderApp` after registering `user_pass` on the **root** [`RenderGraph`].
 pub fn splice_spectrum_pass(world: &mut World, user_pass: impl RenderLabel) {
@@ -63,7 +80,7 @@ pub fn splice_spectrum_pass(world: &mut World, user_pass: impl RenderLabel) {
     let _ = graph.remove_node(FftNode::SpectrumPass);
     let user = user_pass.intern();
     graph.add_node_edge(FftNode::ComputeFFT, user);
-    graph.add_node_edge(user, FftNode::ComputeIFFT);
+    graph.add_node_edge(user, FftNode::ResolveSpectrum);
 }
 
 pub(super) struct FftComputeNode {
@@ -75,6 +92,182 @@ impl FromWorld for FftComputeNode {
         Self {
             query: world.query(),
         }
+    }
+}
+
+fn fft_set_push_constants(pass: &mut ComputePass<'_>, pc: &FftPushConstants) {
+    pass.set_push_constants(0, bytemuck::bytes_of(pc));
+}
+
+fn fft_dispatch_dit_chain(
+    pass: &mut ComputePass<'_>,
+    pipeline: &bevy::render::render_resource::ComputePipeline,
+    bind: &bevy::render::render_resource::BindGroup,
+    orders: u32,
+    axis: u32,
+    mut src: u32,
+    mut dst: u32,
+    n: u32,
+    forward_alpha: bool,
+    inverse_finalize_on_last: bool,
+) {
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind, &[]);
+    let half_n = n / 2;
+    let gx = half_n.div_ceil(256);
+    for stage in 0..orders {
+        let mut flags = 0u32;
+        if forward_alpha {
+            flags |= FLAG_FORWARD_ALPHA;
+        }
+        if inverse_finalize_on_last && stage + 1 == orders {
+            flags |= FLAG_INVERSE_FINALIZE;
+        }
+        let pc = FftPushConstants {
+            stage,
+            axis,
+            src_buffer: src,
+            dst_buffer: dst,
+            flags,
+        };
+        fft_set_push_constants(pass, &pc);
+        pass.dispatch_workgroups(gx, n, 1);
+        std::mem::swap(&mut src, &mut dst);
+    }
+}
+
+fn fft_dispatch_copy(
+    pass: &mut ComputePass<'_>,
+    pipeline: &bevy::render::render_resource::ComputePipeline,
+    bind: &bevy::render::render_resource::BindGroup,
+    src: u32,
+    dst: u32,
+    n: u32,
+) {
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind, &[]);
+    let pc = FftPushConstants {
+        stage: 0,
+        axis: 0,
+        src_buffer: src,
+        dst_buffer: dst,
+        flags: 0,
+    };
+    fft_set_push_constants(pass, &pc);
+    let gx = n.div_ceil(16);
+    let gy = n.div_ceil(16);
+    pass.dispatch_workgroups(gx, gy, 1);
+}
+
+fn run_forward_fft(
+    pipelines: &FftPipelines,
+    pipeline_cache: &PipelineCache,
+    pass: &mut ComputePass<'_>,
+    bind: &bevy::render::render_resource::BindGroup,
+    settings: &FftSettings,
+) {
+    let n = settings.size.x;
+    let orders = settings.orders;
+
+    let Some(br_h) = pipeline_cache.get_compute_pipeline(pipelines.forward_br_horizontal) else {
+        once!(error!("Missing forward_br_horizontal pipeline"));
+        return;
+    };
+    let Some(br_v) = pipeline_cache.get_compute_pipeline(pipelines.forward_br_vertical) else {
+        once!(error!("Missing forward_br_vertical pipeline"));
+        return;
+    };
+    let Some(dit) = pipeline_cache.get_compute_pipeline(pipelines.radix2_dit) else {
+        once!(error!("Missing radix2_dit pipeline"));
+        return;
+    };
+    let Some(cpy) = pipeline_cache.get_compute_pipeline(pipelines.fft_copy) else {
+        once!(error!("Missing fft_copy pipeline"));
+        return;
+    };
+
+    {
+        pass.set_pipeline(br_h);
+        pass.set_bind_group(0, bind, &[]);
+        let gx = n.div_ceil(8);
+        let gy = n.div_ceil(8);
+        pass.dispatch_workgroups(gx, gy, 1);
+    }
+
+    fft_dispatch_dit_chain(pass, dit, bind, orders, 0, BUF_B, BUF_A, n, true, false);
+
+    if orders % 2 == 1 {
+        fft_dispatch_copy(pass, cpy, bind, BUF_A, BUF_B, n);
+    }
+
+    {
+        pass.set_pipeline(br_v);
+        pass.set_bind_group(0, bind, &[]);
+        let gx = n.div_ceil(8);
+        let gy = n.div_ceil(8);
+        pass.dispatch_workgroups(gx, gy, 1);
+    }
+
+    fft_dispatch_dit_chain(pass, dit, bind, orders, 1, BUF_C, BUF_B, n, true, false);
+
+    if orders % 2 == 1 {
+        fft_dispatch_copy(pass, cpy, bind, BUF_B, BUF_C, n);
+    }
+}
+
+fn run_inverse_fft(
+    pipelines: &FftPipelines,
+    pipeline_cache: &PipelineCache,
+    pass: &mut ComputePass<'_>,
+    bind: &bevy::render::render_resource::BindGroup,
+    settings: &FftSettings,
+) {
+    let n = settings.size.x;
+    let orders = settings.orders;
+
+    let Some(br_h) = pipeline_cache.get_compute_pipeline(pipelines.inverse_br_horizontal) else {
+        once!(error!("Missing inverse_br_horizontal pipeline"));
+        return;
+    };
+    let Some(br_v) = pipeline_cache.get_compute_pipeline(pipelines.inverse_br_vertical) else {
+        once!(error!("Missing inverse_br_vertical pipeline"));
+        return;
+    };
+    let Some(dit) = pipeline_cache.get_compute_pipeline(pipelines.radix2_dit) else {
+        once!(error!("Missing radix2_dit pipeline"));
+        return;
+    };
+    let Some(cpy) = pipeline_cache.get_compute_pipeline(pipelines.fft_copy) else {
+        once!(error!("Missing fft_copy pipeline"));
+        return;
+    };
+
+    {
+        pass.set_pipeline(br_h);
+        pass.set_bind_group(0, bind, &[]);
+        let gx = n.div_ceil(8);
+        let gy = n.div_ceil(8);
+        pass.dispatch_workgroups(gx, gy, 1);
+    }
+
+    fft_dispatch_dit_chain(pass, dit, bind, orders, 0, BUF_A, BUF_C, n, false, true);
+
+    if orders % 2 == 1 {
+        fft_dispatch_copy(pass, cpy, bind, BUF_C, BUF_A, n);
+    }
+
+    {
+        pass.set_pipeline(br_v);
+        pass.set_bind_group(0, bind, &[]);
+        let gx = n.div_ceil(8);
+        let gy = n.div_ceil(8);
+        pass.dispatch_workgroups(gx, gy, 1);
+    }
+
+    fft_dispatch_dit_chain(pass, dit, bind, orders, 1, BUF_B, BUF_A, n, false, true);
+
+    if orders % 2 == 1 {
+        fft_dispatch_copy(pass, cpy, bind, BUF_A, BUF_B, n);
     }
 }
 
@@ -112,65 +305,95 @@ impl Node for FftComputeNode {
                 continue;
             }
 
-            let (horizontal_pipeline_id, vertical_pipeline_id, prefix) =
-                if node_label == FftNode::ComputeFFT.intern() {
-                    (pipelines.fft_horizontal, pipelines.fft_vertical, "fft")
-                } else if node_label == FftNode::ComputeIFFT.intern() {
-                    (pipelines.ifft_horizontal, pipelines.ifft_vertical, "ifft")
-                } else {
-                    once!(error!(
-                        "FftComputeNode used with invalid label: {:?}",
-                        node_label
-                    ));
-                    return Ok(());
-                };
-
-            let Some(horizontal_pipeline) =
-                pipeline_cache.get_compute_pipeline(horizontal_pipeline_id)
-            else {
-                once!(error!("Failed to get {}_horizontal pipeline", prefix));
-                return Ok(());
-            };
-
-            let Some(vertical_pipeline) = pipeline_cache.get_compute_pipeline(vertical_pipeline_id)
-            else {
-                once!(error!("Failed to get {}_vertical pipeline", prefix));
-                return Ok(());
-            };
-
             let command_encoder = render_context.command_encoder();
+            let label = if node_label == FftNode::ComputeFFT.intern() {
+                "fft_forward"
+            } else {
+                "fft_inverse"
+            };
 
-            let workgroup_size = 256;
-            let num_workgroups_x = settings.size.x.div_ceil(workgroup_size);
-            let num_workgroups_y = settings.size.y;
+            let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some(label.into()),
+                timestamp_writes: None,
+            });
 
-            {
-                let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some(&*format!("{}_horizontal_pass", prefix)),
-                    timestamp_writes: None,
-                });
-
-                compute_pass.set_pipeline(horizontal_pipeline);
-                compute_pass.set_bind_group(0, &bind_groups.common, &[]);
-
-                compute_pass.set_push_constants(0, bytemuck::cast_slice(&[0u32]));
-                compute_pass.dispatch_workgroups(num_workgroups_x, num_workgroups_y, 1);
+            if node_label == FftNode::ComputeFFT.intern() {
+                if !matches!(schedule, FftSchedule::Inverse) {
+                    run_forward_fft(
+                        pipelines,
+                        pipeline_cache,
+                        &mut compute_pass,
+                        &bind_groups.common,
+                        settings,
+                    );
+                }
+            } else if node_label == FftNode::ComputeIFFT.intern() {
+                if !matches!(schedule, FftSchedule::Forward) {
+                    run_inverse_fft(
+                        pipelines,
+                        pipeline_cache,
+                        &mut compute_pass,
+                        &bind_groups.common,
+                        settings,
+                    );
+                }
+            } else {
+                once!(error!(
+                    "FftComputeNode used with invalid label: {:?}",
+                    node_label
+                ));
+                return Ok(());
             }
+        }
 
-            {
-                let vertical_start = settings.orders - 8;
+        Ok(())
+    }
+}
 
-                let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some(&*format!("{}_vertical_pass", prefix)),
-                    timestamp_writes: None,
-                });
+pub(super) struct FftResolveSpectrumNode {
+    query: QueryState<(&'static FftResolveBindGroups, &'static FftSettings)>,
+}
 
-                compute_pass.set_pipeline(vertical_pipeline);
-                compute_pass.set_bind_group(0, &bind_groups.common, &[]);
+impl FromWorld for FftResolveSpectrumNode {
+    fn from_world(world: &mut World) -> Self {
+        Self {
+            query: world.query(),
+        }
+    }
+}
 
-                compute_pass.set_push_constants(0, bytemuck::cast_slice(&[vertical_start]));
-                compute_pass.dispatch_workgroups(num_workgroups_x, num_workgroups_y, 1);
-            }
+impl Node for FftResolveSpectrumNode {
+    fn update(&mut self, world: &mut World) {
+        self.query.update_archetypes(world);
+    }
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let pipelines = world.resource::<FftPipelines>();
+        let pipeline_cache = world.resource::<PipelineCache>();
+
+        let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipelines.resolve_spectrum) else {
+            return Ok(());
+        };
+
+        let command_encoder = render_context.command_encoder();
+        let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("fft_resolve_spectrum_pass".into()),
+            timestamp_writes: None,
+        });
+
+        compute_pass.set_pipeline(pipeline);
+
+        let wg = 16u32;
+        for (bind, settings) in self.query.iter_manual(world) {
+            compute_pass.set_bind_group(0, &bind.group, &[]);
+            let nx = settings.size.x.div_ceil(wg);
+            let ny = settings.size.y.div_ceil(wg);
+            compute_pass.dispatch_workgroups(nx, ny, 1);
         }
 
         Ok(())
@@ -203,13 +426,13 @@ impl Node for FftResolveOutputsNode {
         let pipelines = world.resource::<FftPipelines>();
         let pipeline_cache = world.resource::<PipelineCache>();
 
-        let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipelines.resolve_outputs) else {
+        let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipelines.resolve_spatial) else {
             return Ok(());
         };
 
         let command_encoder = render_context.command_encoder();
         let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("fft_resolve_outputs_pass"),
+            label: Some("fft_resolve_spatial_pass".into()),
             timestamp_writes: None,
         });
 

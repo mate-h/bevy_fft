@@ -216,9 +216,6 @@ pub(super) fn prepare_ocean_h0_image(
     >,
 ) {
     for (entity, source) in &query {
-        if source.size.x != 256 || source.size.y != 256 {
-            continue;
-        }
         let mut image = Image::new_fill(
             Extent3d {
                 width: source.size.x,

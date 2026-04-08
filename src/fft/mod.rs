@@ -25,7 +25,7 @@ pub mod resources;
 pub use node::{FftNode, FftSpectrumPassthroughNode, splice_spectrum_pass};
 pub use resources::{FftTextures, prepare_fft_bind_groups, prepare_fft_textures};
 
-use node::{FftComputeNode, FftResolveOutputsNode};
+use node::{FftComputeNode, FftResolveOutputsNode, FftResolveSpectrumNode};
 use resources::{
     FftBindGroupLayouts, FftPipelines, FftRootsBuffer, copy_input_textures_to_fft_buffers,
     prepare_fft_resolve_bind_groups, prepare_fft_roots_buffer,
@@ -53,6 +53,14 @@ pub fn forward_fft_twiddle_table() -> [c32; 8192] {
     let mut roots = [c32::new(0.0, 0.0); 8192];
     fill_forward_fft_twiddles(&mut roots);
     roots
+}
+
+/// Returns `log2(n)` when `n` is a power of two in `u32`, otherwise `None`.
+pub fn fft_orders_for_size(n: u32) -> Option<u32> {
+    if n == 0 || (n & (n - 1)) != 0 {
+        return None;
+    }
+    Some(n.trailing_zeros())
 }
 
 #[cfg(test)]
@@ -92,11 +100,21 @@ mod layout_tests {
     }
 
     #[test]
-    fn grid_256_inverse_only_is_fixed_size_inverse() {
-        let s = super::FftSource::grid_256_inverse_only();
+    fn square_inverse_only_sizes_track_orders() {
+        let s = super::FftSource::square_inverse_only(256);
         assert_eq!(s.size, UVec2::splat(256));
         assert_eq!(s.orders, 8);
         assert_eq!(s.schedule, super::FftSchedule::Inverse);
+        let s512 = super::FftSource::square_inverse_only(512);
+        assert_eq!(s512.orders, 9);
+    }
+
+    #[test]
+    fn fft_orders_for_size_accepts_powers_of_two() {
+        assert_eq!(super::fft_orders_for_size(512), Some(9));
+        assert_eq!(super::fft_orders_for_size(1), Some(0));
+        assert_eq!(super::fft_orders_for_size(0), None);
+        assert_eq!(super::fft_orders_for_size(3), None);
     }
 }
 
@@ -108,6 +126,7 @@ pub(crate) mod shaders {
     pub const BUFFER: Handle<Shader> = uuid_handle!("33f1ccb3-7d87-48d3-8984-51892e6652d0");
     pub const BINDINGS: Handle<Shader> = uuid_handle!("1900debb-855d-489b-a973-2559249c3945");
     pub const PLOT: Handle<Shader> = uuid_handle!("a021a614-a32b-4b4b-9604-00005bce1436");
+    pub const FFT_COMMON: Handle<Shader> = uuid_handle!("a1b2c3d4-1111-2222-3333-444455556677");
     pub const RESOLVE_OUTPUTS: Handle<Shader> =
         uuid_handle!("c4d5e6f0-1111-4222-a333-444455556666");
 }
@@ -201,13 +220,12 @@ impl Default for FftSource {
 }
 
 impl FftSource {
-    /// Builds the usual 256×256 setup that runs a forward FFT and inverse FFT each frame.
-    ///
-    /// Data moves **A** → **C** → **B**. Keep `orders` at eight to match the bundled radix-2 stages.
-    pub fn grid_256_forward_then_inverse() -> Self {
+    /// Square `n`×`n` grid with [`Self::schedule`] set to [`FftSchedule::ForwardThenInverse`].
+    pub fn square_forward_then_inverse(n: u32) -> Self {
+        let orders = fft_orders_for_size(n).expect("FFT size must be a non-zero power of two");
         Self {
-            size: UVec2::splat(256),
-            orders: 8,
+            size: UVec2::splat(n),
+            orders,
             padding: UVec2::ZERO,
             roots: forward_fft_twiddle_table(),
             schedule: FftSchedule::ForwardThenInverse,
@@ -217,14 +235,13 @@ impl FftSource {
         }
     }
 
-    /// Inverse-only setup for **`Spectrum`** writers such as [`crate::ocean::OceanPlugin`].
-    ///
-    /// Omit `FftInputTexture` so nothing clears buffer **C** on the CPU each frame. Tune
-    /// [`Self::spatial_display_gain`] so [`FftTextures::spatial_output`] sits in a comfortable range for materials.
-    pub fn grid_256_inverse_only() -> Self {
+    /// Square grid that only runs the inverse transform each frame (spectrum writers such as
+    /// [`crate::ocean::OceanPlugin`]). Data ends in buffer **B** as spatial output.
+    pub fn square_inverse_only(n: u32) -> Self {
+        let orders = fft_orders_for_size(n).expect("FFT size must be a non-zero power of two");
         Self {
-            size: UVec2::splat(256),
-            orders: 8,
+            size: UVec2::splat(n),
+            orders,
             padding: UVec2::ZERO,
             roots: forward_fft_twiddle_table(),
             schedule: FftSchedule::Inverse,
@@ -232,6 +249,16 @@ impl FftSource {
             pattern_target: FftPatternTarget::SpatialA,
             spatial_display_gain: 1.0,
         }
+    }
+
+    /// Builds the usual 256×256 setup that runs a forward FFT and inverse FFT each frame.
+    pub fn grid_256_forward_then_inverse() -> Self {
+        Self::square_forward_then_inverse(256)
+    }
+
+    /// Inverse-only setup for **`Spectrum`** writers such as [`crate::ocean::OceanPlugin`].
+    pub fn grid_256_inverse_only() -> Self {
+        Self::square_inverse_only(256)
     }
 }
 
@@ -312,6 +339,7 @@ impl Plugin for FftPlugin {
         load_internal_asset!(app, shaders::BINDINGS, "bindings.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::C32, "../complex/c32.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::PLOT, "plot.wgsl", Shader::from_wgsl);
+        load_internal_asset!(app, shaders::FFT_COMMON, "fft_common.wgsl", Shader::from_wgsl);
         load_internal_asset!(
             app,
             shaders::RESOLVE_OUTPUTS,
@@ -370,6 +398,10 @@ impl Plugin for FftPlugin {
             .resource_scope(|world, mut graph: Mut<RenderGraph>| {
                 graph.add_node(FftNode::ComputeFFT, FftComputeNode::from_world(world));
                 graph.add_node(FftNode::SpectrumPass, FftSpectrumPassthroughNode::default());
+                graph.add_node(
+                    FftNode::ResolveSpectrum,
+                    FftResolveSpectrumNode::from_world(world),
+                );
                 graph.add_node(FftNode::ComputeIFFT, FftComputeNode::from_world(world));
                 graph.add_node(
                     FftNode::ResolveOutputs,
@@ -378,6 +410,7 @@ impl Plugin for FftPlugin {
                 graph.add_node_edges((
                     FftNode::ComputeFFT,
                     FftNode::SpectrumPass,
+                    FftNode::ResolveSpectrum,
                     FftNode::ComputeIFFT,
                     FftNode::ResolveOutputs,
                 ));

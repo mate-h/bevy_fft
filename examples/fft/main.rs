@@ -42,7 +42,7 @@ struct DemoSprite(u8);
 fn setup(mut commands: Commands) {
     commands.spawn(Camera2d);
     commands.spawn((
-        FftSource::grid_256_forward_then_inverse(),
+        FftSource::square_forward_then_inverse(256),
         BandPassParams {
             band_center: 0.37,
             band_width: 0.5,

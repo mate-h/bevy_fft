@@ -83,9 +83,13 @@ impl Default for SunLightSettings {
 struct SunLight;
 
 fn setup(mut commands: Commands, mut scattering_mediums: ResMut<Assets<ScatteringMedium>>) {
+    let n = 512u32;
     commands.spawn((
-        FftSource::grid_256_inverse_only(),
-        OceanSimSettings::default(),
+        FftSource::square_inverse_only(n),
+        OceanSimSettings {
+            texture_size: n,
+            ..default()
+        },
         OceanH0Uniform::default(),
         OceanDynamicUniform::default(),
     ));
@@ -159,7 +163,7 @@ fn spawn_ocean_when_ready(
     let tile = sim.tile_size;
     let mesh = Plane3d::new(Vec3::Y, Vec2::splat(tile * 0.5))
         .mesh()
-        .subdivisions(255)
+        .subdivisions(sim.texture_size.saturating_sub(1))
         .build();
 
     let material = OceanSurfaceMaterial {

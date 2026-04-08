@@ -72,11 +72,14 @@ impl FromWorld for FftBindGroupLayouts {
 
 #[derive(Resource)]
 pub(crate) struct FftPipelines {
-    pub fft_horizontal: CachedComputePipelineId,
-    pub fft_vertical: CachedComputePipelineId,
-    pub ifft_horizontal: CachedComputePipelineId,
-    pub ifft_vertical: CachedComputePipelineId,
-    pub resolve_outputs: CachedComputePipelineId,
+    pub forward_br_horizontal: CachedComputePipelineId,
+    pub forward_br_vertical: CachedComputePipelineId,
+    pub radix2_dit: CachedComputePipelineId,
+    pub fft_copy: CachedComputePipelineId,
+    pub inverse_br_horizontal: CachedComputePipelineId,
+    pub inverse_br_vertical: CachedComputePipelineId,
+    pub resolve_spectrum: CachedComputePipelineId,
+    pub resolve_spatial: CachedComputePipelineId,
 }
 
 impl FromWorld for FftPipelines {
@@ -89,79 +92,109 @@ impl FromWorld for FftPipelines {
         let resolve_shader = super::shaders::RESOLVE_OUTPUTS.clone();
 
         let base_shader_defs = vec![ShaderDefVal::UInt("CHANNELS".into(), 4)];
-        let mut horizontal_shader_defs = base_shader_defs.clone();
-        horizontal_shader_defs.push(ShaderDefVal::Bool("HORIZONTAL".into(), true));
-        let mut vertical_shader_defs = base_shader_defs.clone();
-        vertical_shader_defs.push(ShaderDefVal::Bool("VERTICAL".into(), true));
 
-        let push_constant_range = PushConstantRange {
+        let push_constant_range_20 = PushConstantRange {
             stages: ShaderStages::COMPUTE,
-            range: 0..4,
+            range: 0..20,
         };
 
-        let fft_horizontal = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("fft_horizontal_pipeline".into()),
+        let forward_br_horizontal = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("fft_forward_br_horizontal".into()),
             layout: vec![layouts.common.clone()],
-            push_constant_ranges: vec![push_constant_range.clone()],
+            push_constant_ranges: vec![],
             shader: fft.clone(),
-            shader_defs: horizontal_shader_defs.clone(),
-            entry_point: Some("fft".into()),
+            shader_defs: base_shader_defs.clone(),
+            entry_point: Some("fft_forward_br_horizontal".into()),
             zero_initialize_workgroup_memory: false,
         });
 
-        let fft_vertical = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("fft_vertical_pipeline".into()),
+        let forward_br_vertical = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("fft_forward_br_vertical".into()),
             layout: vec![layouts.common.clone()],
-            push_constant_ranges: vec![push_constant_range.clone()],
+            push_constant_ranges: vec![],
             shader: fft.clone(),
-            shader_defs: vertical_shader_defs.clone(),
-            entry_point: Some("fft".into()),
+            shader_defs: base_shader_defs.clone(),
+            entry_point: Some("fft_forward_br_vertical".into()),
             zero_initialize_workgroup_memory: false,
         });
 
-        let ifft_horizontal = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("ifft_horizontal_pipeline".into()),
+        let radix2_dit = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("fft_radix2_dit".into()),
             layout: vec![layouts.common.clone()],
-            push_constant_ranges: vec![push_constant_range.clone()],
-            shader: ifft.clone(),
-            shader_defs: horizontal_shader_defs,
-            entry_point: Some("ifft".into()),
+            push_constant_ranges: vec![push_constant_range_20.clone()],
+            shader: fft.clone(),
+            shader_defs: base_shader_defs.clone(),
+            entry_point: Some("fft_radix2_dit".into()),
             zero_initialize_workgroup_memory: false,
         });
 
-        let ifft_vertical = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("ifft_vertical_pipeline".into()),
+        let fft_copy = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("fft_copy_buffer".into()),
             layout: vec![layouts.common.clone()],
-            push_constant_ranges: vec![push_constant_range],
-            shader: ifft.clone(),
-            shader_defs: vertical_shader_defs,
-            entry_point: Some("ifft".into()),
+            push_constant_ranges: vec![push_constant_range_20],
+            shader: fft.clone(),
+            shader_defs: base_shader_defs.clone(),
+            entry_point: Some("fft_copy_buffer".into()),
             zero_initialize_workgroup_memory: false,
         });
 
-        let resolve_outputs = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("fft_resolve_outputs_pipeline".into()),
+        let inverse_br_horizontal = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("ifft_br_horizontal".into()),
+            layout: vec![layouts.common.clone()],
+            push_constant_ranges: vec![],
+            shader: ifft.clone(),
+            shader_defs: base_shader_defs.clone(),
+            entry_point: Some("ifft_br_horizontal".into()),
+            zero_initialize_workgroup_memory: false,
+        });
+
+        let inverse_br_vertical = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("ifft_br_vertical".into()),
+            layout: vec![layouts.common.clone()],
+            push_constant_ranges: vec![],
+            shader: ifft.clone(),
+            shader_defs: base_shader_defs,
+            entry_point: Some("ifft_br_vertical".into()),
+            zero_initialize_workgroup_memory: false,
+        });
+
+        let resolve_spectrum = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("fft_resolve_spectrum_pipeline".into()),
+            layout: vec![layouts.resolve_outputs.clone()],
+            push_constant_ranges: vec![],
+            shader: resolve_shader.clone(),
+            shader_defs: vec![],
+            entry_point: Some("resolve_power_spectrum_from_c".into()),
+            zero_initialize_workgroup_memory: false,
+        });
+
+        let resolve_spatial = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("fft_resolve_spatial_pipeline".into()),
             layout: vec![layouts.resolve_outputs.clone()],
             push_constant_ranges: vec![],
             shader: resolve_shader,
             shader_defs: vec![],
-            entry_point: Some("resolve_fft_outputs".into()),
+            entry_point: Some("resolve_spatial_from_b".into()),
             zero_initialize_workgroup_memory: false,
         });
 
         Self {
-            fft_horizontal,
-            fft_vertical,
-            ifft_horizontal,
-            ifft_vertical,
-            resolve_outputs,
+            forward_br_horizontal,
+            forward_br_vertical,
+            radix2_dit,
+            fft_copy,
+            inverse_br_horizontal,
+            inverse_br_vertical,
+            resolve_spectrum,
+            resolve_spatial,
         }
     }
 }
 
 /// All GPU textures that back a single [`FftSource`].
 ///
-/// The resolve pass fills [`Self::spatial_output`] and [`Self::power_spectrum`]. The
+/// Resolve passes fill [`Self::spatial_output`] (after inverse FFT from **B**) and
+/// [`Self::power_spectrum`] (after the spectrum stage from **C**). The
 /// `buffer_*` handles are ping-pong storage used inside the FFT graph and are mainly interesting
 /// when you author custom compute that plugs into those bindings.
 #[derive(Component, ExtractComponent, Clone)]
@@ -322,14 +355,11 @@ pub fn prepare_fft_bind_groups(
     }
 }
 
-type PrepareFftResolveBindGroupsQuery<'w, 's> = Query<
-    'w,
-    's,
-    (Entity, &'static FftTextures),
-    (With<FftBindGroups>, Without<FftResolveBindGroups>),
->;
+type PrepareFftResolveBindGroupsQuery<'w, 's> =
+    Query<'w, 's, (Entity, &'static FftTextures), With<FftBindGroups>>;
 
 #[allow(clippy::too_many_arguments)]
+/// Rebuilds resolve bind groups every frame so `texture_view`s stay aligned with [`prepare_fft_bind_groups`].
 pub(crate) fn prepare_fft_resolve_bind_groups(
     mut commands: Commands,
     render_device: Res<RenderDevice>,

@@ -3,17 +3,17 @@
 #import bevy_fft::{
     complex::{
         splat_c32_n,
-        fma_c32_n,
         add_c32_n,
         mul_c32_n,
-        // channel specific imports (aliasing doesn't work cross-modules)
+        conj_c32_n,
+        neg_c32_n,
         c32,
         c32_2,
         c32_3,
         c32_4,
-    }, 
+    },
     bindings::{
-        roots_buffer
+        settings,
     },
     buffer::{
         read_buffer_a,
@@ -23,11 +23,15 @@
         write_buffer_b,
         write_buffer_c,
         write_shifted_d_re,
-        write_shifted_d_im
+        write_shifted_d_im,
     },
     plot::{
         apply_window
-    }
+    },
+    fft_common::{
+        fft_reverse_lower_bits,
+        get_fft_root,
+    },
 };
 
 #ifdef CHANNELS
@@ -42,107 +46,155 @@
 #endif
 #endif
 
-var<workgroup> temp: array<c32_n, 256>;
-// var<push_constant> iteration_override: u32;
+struct FftPushConstants {
+    stage: u32,
+    axis: u32,
+    src_buffer: u32,
+    dst_buffer: u32,
+    flags: u32,
+}
 
-@compute
-@workgroup_size(256, 1, 1)
-fn fft(
-    @builtin(global_invocation_id) global_index: vec3<u32>
-) {
-    #ifdef VERTICAL
-        let pos = vec2(global_index.y, global_index.x);
-    #else
-        let pos = vec2(global_index.x, global_index.y);
-    #endif
-    
-    let sequential = global_index.x;
-    let bit_reversed = swizzle(8u, sequential);
-    
-    let in_bounds = all(pos < vec2(256u)) && all(pos >= vec2(0u));
-    let c_zero = splat_c32_n(c32(0.0, 0.0));
-    var c_o: c32_n;
-    var input_value: c32_n;
+var<push_constant> pc: FftPushConstants;
 
-    // First phase: Bit reversal permutation
-    if (in_bounds) {
-        #ifdef VERTICAL
-            input_value = read_buffer_b(pos);
-        #else
-            input_value = read_buffer_a(pos);
-        #endif
-        
-        // Apply window function
-        let window_type = 0u;
-        let window_strength = 1.0;
-        var window = apply_window(pos, vec2(256u), window_type, window_strength);
-        input_value = mul_c32_n(input_value, splat_c32_n(c32(window, 0.0)));
-        
-        temp[bit_reversed] = input_value;
+const FLAG_INVERSE_FINALIZE: u32 = 1u;
+const FLAG_FORWARD_ALPHA: u32 = 2u;
+const WG: u32 = 256u;
+
+fn read_fft_buf(buf_id: u32, pos: vec2<u32>) -> c32_n {
+    switch buf_id {
+        case 0u: { return read_buffer_a(pos); }
+        case 1u: { return read_buffer_b(pos); }
+        case 2u: { return read_buffer_c(pos); }
+        default: { return splat_c32_n(c32(0.0, 0.0)); }
+    }
+}
+
+fn write_fft_buf(buf_id: u32, pos: vec2<u32>, value: c32_n) {
+    switch buf_id {
+        case 0u: { write_buffer_a(pos, value); }
+        case 1u: { write_buffer_b(pos, value); }
+        case 2u: { write_buffer_c(pos, value); }
+        default: { }
+    }
+}
+
+fn mark_opaque_alpha(vs: c32_n) -> c32_n {
+    var out = vs;
+    out.re.w = 1.0;
+    out.im.w = 1.0;
+    return out;
+}
+
+fn dit_butterfly_writes(pos_u: vec2<u32>, pos_v: vec2<u32>, j: u32) {
+    let N = settings.size.x;
+    let inv_scale = 1.0 / f32(N);
+    let root = get_fft_root(pc.stage + 1u, j);
+
+    let a = read_fft_buf(pc.src_buffer, pos_u);
+    let b = mul_c32_n(read_fft_buf(pc.src_buffer, pos_v), splat_c32_n(root));
+    var out_u = add_c32_n(a, b);
+    var out_v = add_c32_n(a, neg_c32_n(b));
+
+    if ((pc.flags & FLAG_INVERSE_FINALIZE) != 0u) {
+        out_u = mul_c32_n(conj_c32_n(out_u), splat_c32_n(c32(inv_scale, 0.0)));
+        out_v = mul_c32_n(conj_c32_n(out_v), splat_c32_n(c32(inv_scale, 0.0)));
+    }
+
+    if ((pc.flags & FLAG_FORWARD_ALPHA) != 0u) {
+        out_u = mark_opaque_alpha(out_u);
+        out_v = mark_opaque_alpha(out_v);
+    }
+
+    write_fft_buf(pc.dst_buffer, pos_u, out_u);
+    write_fft_buf(pc.dst_buffer, pos_v, out_v);
+
+    if ((pc.flags & FLAG_FORWARD_ALPHA) != 0u) {
+        write_shifted_d_re(pos_u, out_u.re);
+        write_shifted_d_im(pos_u, out_u.im);
+        write_shifted_d_re(pos_v, out_v.re);
+        write_shifted_d_im(pos_v, out_v.im);
+    }
+}
+
+/// Bit-reverse permute along rows, optional Tukey window on spatial data, natural order in X.
+@compute @workgroup_size(8, 8, 1)
+fn fft_forward_br_horizontal(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let p = gid.xy;
+    let dims = settings.size;
+    if (p.x >= dims.x || p.y >= dims.y) {
+        return;
+    }
+    let order = settings.orders;
+    let rx = fft_reverse_lower_bits(p.x, order);
+    var v = read_buffer_a(p);
+    let window_type = settings.window_type;
+    let window_strength = settings.window_strength;
+    let w = apply_window(p, dims, window_type, window_strength);
+    v = mul_c32_n(v, splat_c32_n(c32(w, 0.0)));
+    v = mark_opaque_alpha(v);
+    let dst = vec2<u32>(rx, p.y);
+    write_buffer_b(dst, v);
+    write_shifted_d_re(p, v.re);
+    write_shifted_d_im(p, v.im);
+}
+
+/// Bit-reverse along columns after row FFT; reads B, writes C.
+@compute @workgroup_size(8, 8, 1)
+fn fft_forward_br_vertical(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let p = gid.xy;
+    let dims = settings.size;
+    if (p.x >= dims.x || p.y >= dims.y) {
+        return;
+    }
+    let order = settings.orders;
+    let ry = fft_reverse_lower_bits(p.y, order);
+    var v = read_buffer_b(p);
+    v = mark_opaque_alpha(v);
+    let dst = vec2<u32>(p.x, ry);
+    write_buffer_c(dst, v);
+    write_shifted_d_re(p, v.re);
+    write_shifted_d_im(p, v.im);
+}
+
+/// One radix-2 DIT stage; horizontal axis if pc.axis == 0, else vertical.
+@compute @workgroup_size(256, 1, 1)
+fn fft_radix2_dit(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dims = settings.size;
+    let N = dims.x;
+    let half_n = N >> 1u;
+    let butterfly = gid.x;
+    let line = gid.y;
+    if (butterfly >= half_n || line >= N) {
+        return;
+    }
+
+    let m = 1u << (pc.stage + 1u);
+    let m2 = m >> 1u;
+    let group = butterfly / m2;
+    let j = butterfly % m2;
+    let k = group * m;
+    let u = k + j;
+    let v = u + m2;
+
+    if (pc.axis == 0u) {
+        let pos_u = vec2<u32>(u, line);
+        let pos_v = vec2<u32>(v, line);
+        dit_butterfly_writes(pos_u, pos_v, j);
     } else {
-        temp[bit_reversed] = c_zero;
-    }
-    workgroupBarrier();
-
-    // Radix-2 DIT: stride half = 1,2,...,N/2 (eight stages for N=256). Twiddle table uses
-    // base 2^(s+1) per stage s → pass (s + 1) into get_root.
-    for (var order = 0u; order < 8u; order++) {
-        let half_subsection = 1u << order;
-        let subsection_count = half_subsection << 1u;
-
-        let subsection_index = sequential & (subsection_count - 1u);
-        let offset_in_pair = subsection_index & (half_subsection - 1u);
-        let is_second_half = (subsection_index & half_subsection) != 0u;
-
-        let pair_index = sequential ^ half_subsection;
-
-        let root = get_root(order + 1u, offset_in_pair);
-        let root_inverted = c32(-root.re, -root.im);
-        
-        let value_1 = temp[sequential];
-        let value_2 = temp[pair_index];
-        
-        if (is_second_half) {
-            c_o = fma_c32_n(value_1, root_inverted, value_2);
-        } else {
-            c_o = fma_c32_n(value_2, root, value_1);
-        };
-
-        workgroupBarrier();
-        temp[sequential] = c_o;
-        workgroupBarrier();
-    }
-
-    // Same index layout for both 1D passes (no fftshift in-between); see ifft.wgsl.
-    c_o = temp[sequential];
-    let fft_out_coord = pos;
-    if (in_bounds) {
-        // Opaque alpha on real/imag textures for sprite blending; per-channel butterflies unchanged
-        // for RGB. Same for im.w so *_im buffers are not fully transparent.
-        c_o.re.w = 1.0;
-        c_o.im.w = 1.0;
-        #ifdef VERTICAL
-            write_buffer_c(fft_out_coord, c_o);
-        #else
-            write_buffer_b(fft_out_coord, c_o);
-        #endif
-    }
-
-    // Raw real/imag RGBA to D (no display scaling).
-    if (in_bounds) {
-        write_shifted_d_re(fft_out_coord, c_o.re);
-        write_shifted_d_im(fft_out_coord, c_o.im);
+        let pos_u = vec2<u32>(line, u);
+        let pos_v = vec2<u32>(line, v);
+        dit_butterfly_writes(pos_u, pos_v, j);
     }
 }
 
-fn swizzle(order: u32, index: u32) -> u32 {
-    return reverseBits(index) >> (32u - order);
+@compute @workgroup_size(16, 16, 1)
+fn fft_copy_buffer(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let p64 = vec2<u32>(gid.xy);
+    let dims = settings.size;
+    if (p64.x >= dims.x || p64.y >= dims.y) {
+        return;
+    }
+    let p32 = vec2<u32>(p64.x, p64.y);
+    let v = read_fft_buf(pc.src_buffer, p32);
+    write_fft_buf(pc.dst_buffer, p32, v);
 }
-
-fn get_root(order: u32, index: u32) -> c32 {
-    let base = 1u << order;
-    let count = max(1u, base >> 1u);
-    let i = base + index % count;
-    return roots_buffer.roots[i];
-}
-
