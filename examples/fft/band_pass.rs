@@ -1,8 +1,8 @@
 //! Radial band-pass on spectrum buffer **C** between forward FFT and IFFT.
 
 use bevy::{
-    core_pipeline::core_2d::graph::Core2d,
     ecs::{
+        change_detection::Mut,
         query::{QueryItem, QueryState},
         schedule::IntoScheduleConfigs,
         system::lifetimeless::Read,
@@ -13,22 +13,20 @@ use bevy::{
         extract_component::{
             ComponentUniforms, ExtractComponent, ExtractComponentPlugin, UniformComponentPlugin,
         },
-        render_graph::{Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel},
+        render_graph::{Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel},
         render_resource::{
-            binding_types::uniform_buffer,
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
-            CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor, PipelineCache,
-            ShaderStages, ShaderType,
+            CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor,
+            PipelineCache, ShaderStages, ShaderType, binding_types::uniform_buffer,
         },
         renderer::{RenderContext, RenderDevice},
     },
     shader::ShaderDefVal,
 };
 use bevy_fft::fft::{
-    prepare_fft_bind_groups,
+    FftSettings, prepare_fft_bind_groups,
     resources::{FftBindGroupLayouts, FftBindGroups},
     splice_spectrum_pass,
-    FftSettings,
 };
 
 /// Parameters for [`radial_band_pass`] in `assets/examples/band_pass.wgsl`.
@@ -123,7 +121,6 @@ impl Plugin for BandPassPlugin {
 
         render_app
             .init_resource::<BandPassPipelineRes>()
-            .add_render_graph_node::<BandPassNode>(Core2d, BandPassLabel)
             .add_systems(
                 Render,
                 prepare_band_pass_bind_group
@@ -131,6 +128,11 @@ impl Plugin for BandPassPlugin {
                     .after(prepare_fft_bind_groups),
             );
 
+        render_app
+            .world_mut()
+            .resource_scope(|world, mut graph: Mut<RenderGraph>| {
+                graph.add_node(BandPassLabel, BandPassNode::from_world(world));
+            });
         splice_spectrum_pass(render_app.world_mut(), BandPassLabel);
     }
 }

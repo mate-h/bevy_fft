@@ -80,33 +80,29 @@ fn setup_band_pass_ui(mut commands: Commands) {
             ));
 
             panel
-                .spawn((
-                    Node {
-                        width: px(row_w),
-                        height: px(30),
-                        flex_direction: FlexDirection::Row,
-                        align_items: AlignItems::Center,
-                        column_gap: px(row_gap_inner),
-                        ..default()
-                    },
-                ))
+                .spawn((Node {
+                    width: px(row_w),
+                    height: px(30),
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: px(row_gap_inner),
+                    ..default()
+                },))
                 .with_children(|row| {
-                    row.spawn((
-                        Node {
-                            width: px(label_col),
-                            height: percent(100.0),
-                            justify_content: JustifyContent::FlexEnd,
-                            align_items: AlignItems::Center,
-                            ..default()
-                        },
-                    ))
-                    .with_children(|cell| {
-                        cell.spawn((
-                            Text::new("Center"),
-                            label_style.clone(),
-                            TextColor(Color::srgb(0.85, 0.85, 0.9)),
-                        ));
-                    });
+                    row.spawn((Node {
+                        width: px(label_col),
+                        height: percent(100.0),
+                        justify_content: JustifyContent::FlexEnd,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },))
+                        .with_children(|cell| {
+                            cell.spawn((
+                                Text::new("Center"),
+                                label_style.clone(),
+                                TextColor(Color::srgb(0.85, 0.85, 0.9)),
+                            ));
+                        });
                     row.spawn((
                         Node {
                             width: px(track_w),
@@ -140,33 +136,29 @@ fn setup_band_pass_ui(mut commands: Commands) {
                 });
 
             panel
-                .spawn((
-                    Node {
-                        width: px(row_w),
-                        height: px(30),
-                        flex_direction: FlexDirection::Row,
-                        align_items: AlignItems::Center,
-                        column_gap: px(row_gap_inner),
-                        ..default()
-                    },
-                ))
+                .spawn((Node {
+                    width: px(row_w),
+                    height: px(30),
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: px(row_gap_inner),
+                    ..default()
+                },))
                 .with_children(|row| {
-                    row.spawn((
-                        Node {
-                            width: px(label_col),
-                            height: percent(100.0),
-                            justify_content: JustifyContent::FlexEnd,
-                            align_items: AlignItems::Center,
-                            ..default()
-                        },
-                    ))
-                    .with_children(|cell| {
-                        cell.spawn((
-                            Text::new("Width"),
-                            label_style.clone(),
-                            TextColor(Color::srgb(0.85, 0.85, 0.9)),
-                        ));
-                    });
+                    row.spawn((Node {
+                        width: px(label_col),
+                        height: percent(100.0),
+                        justify_content: JustifyContent::FlexEnd,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },))
+                        .with_children(|cell| {
+                            cell.spawn((
+                                Text::new("Width"),
+                                label_style.clone(),
+                                TextColor(Color::srgb(0.85, 0.85, 0.9)),
+                            ));
+                        });
                     row.spawn((
                         Node {
                             width: px(track_w),
@@ -200,33 +192,29 @@ fn setup_band_pass_ui(mut commands: Commands) {
                 });
 
             panel
-                .spawn((
-                    Node {
-                        width: px(row_w),
-                        height: px(30),
-                        flex_direction: FlexDirection::Row,
-                        align_items: AlignItems::Center,
-                        column_gap: px(row_gap_inner),
-                        ..default()
-                    },
-                ))
+                .spawn((Node {
+                    width: px(row_w),
+                    height: px(30),
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: px(row_gap_inner),
+                    ..default()
+                },))
                 .with_children(|row| {
-                    row.spawn((
-                        Node {
-                            width: px(label_col),
-                            height: percent(100.0),
-                            justify_content: JustifyContent::FlexEnd,
-                            align_items: AlignItems::Center,
-                            ..default()
-                        },
-                    ))
-                    .with_children(|cell| {
-                        cell.spawn((
-                            Text::new("Gain"),
-                            label_style.clone(),
-                            TextColor(Color::srgb(0.85, 0.85, 0.9)),
-                        ));
-                    });
+                    row.spawn((Node {
+                        width: px(label_col),
+                        height: percent(100.0),
+                        justify_content: JustifyContent::FlexEnd,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },))
+                        .with_children(|cell| {
+                            cell.spawn((
+                                Text::new("Gain"),
+                                label_style.clone(),
+                                TextColor(Color::srgb(0.85, 0.85, 0.9)),
+                            ));
+                        });
                     row.spawn((
                         Node {
                             width: px(track_w),
@@ -278,11 +266,7 @@ pub fn band_pass_ui_sliders(
     mut queries: ParamSet<(
         Query<&mut BandPassParams>,
         Query<&mut FftSource>,
-        Query<(
-            &Interaction,
-            &RelativeCursorPosition,
-            &BandPassSliderKind,
-        )>,
+        Query<(&Interaction, &RelativeCursorPosition, &BandPassSliderKind)>,
     )>,
 ) {
     let mut set_position: Option<f32> = None;
@@ -291,8 +275,7 @@ pub fn band_pass_ui_sliders(
 
     for (interaction, rel, kind) in queries.p2().iter() {
         let active = matches!(*interaction, Interaction::Pressed)
-            || (mouse.pressed(MouseButton::Left)
-                && matches!(*interaction, Interaction::Hovered));
+            || (mouse.pressed(MouseButton::Left) && matches!(*interaction, Interaction::Hovered));
         if !active {
             continue;
         }
@@ -353,8 +336,7 @@ pub fn sync_band_pass_slider_fills(
     }
     if let Ok(src) = fft.single() {
         let g = src.spatial_display_gain;
-        let gain_t =
-            ((g - BRIGHTNESS_MIN) / (BRIGHTNESS_MAX - BRIGHTNESS_MIN)).clamp(0.0, 1.0);
+        let gain_t = ((g - BRIGHTNESS_MIN) / (BRIGHTNESS_MAX - BRIGHTNESS_MIN)).clamp(0.0, 1.0);
         if let Ok(mut node) = nodes.p2().single_mut() {
             node.width = percent(gain_t * 100.0);
         }
@@ -388,7 +370,10 @@ impl Plugin for BandPassUiPlugin {
             Startup,
             FftDemoStartup::BandPassUi.after(FftDemoStartup::Scene),
         )
-        .add_systems(Startup, setup_band_pass_ui.in_set(FftDemoStartup::BandPassUi))
+        .add_systems(
+            Startup,
+            setup_band_pass_ui.in_set(FftDemoStartup::BandPassUi),
+        )
         .add_systems(
             Update,
             (

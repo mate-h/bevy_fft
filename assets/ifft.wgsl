@@ -104,9 +104,7 @@ fn ifft(
     c_o = conj_c32_n(temp[sequential]);
     let inv_dim = 1.0 / 256.0;
     c_o = mul_c32_n(c_o, splat_c32_n(c32(inv_dim, 0.0)));
-    // Opaque alpha on both textures: .re.w / .im.w are RGBA alpha for sprites.
-    c_o.re.w = 1.0;
-    c_o.im.w = 1.0;
+    // Keep lane 3 (`.w`) so a fourth IFFT band (e.g. ocean chop) survives into `spatial_output.a`.
     // No fftshift between 1D passes: 2D IFFT must be ifft_y(ifft_x(C)) on the same index
     // layout as common FFT stacks (e.g. NumPy). Per-axis shift between passes breaks separability and
     // collapses diagonal spectra into line artifacts.

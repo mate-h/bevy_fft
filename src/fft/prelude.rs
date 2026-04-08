@@ -4,7 +4,7 @@
 
 pub use super::resources::{prepare_fft_bind_groups, prepare_fft_textures};
 pub use super::{
-    splice_spectrum_pass, FftInputDomain, FftInputTexture, FftNode, FftPatternTarget, FftPlugin,
-    FftSchedule, FftSource, FftSpectrumPassthroughNode, FftTextures, fill_forward_fft_twiddles,
-    forward_fft_twiddle_table,
+    FftInputDomain, FftInputTexture, FftNode, FftPatternTarget, FftPlugin, FftSchedule, FftSource,
+    FftSpectrumPassthroughNode, FftTextures, fill_forward_fft_twiddles, forward_fft_twiddle_table,
+    splice_spectrum_pass,
 };

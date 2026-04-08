@@ -8,8 +8,9 @@
 //! on buffer **C** between the forward FFT and the inverse FFT, then connect it with
 //! [`fft::splice_spectrum_pass`].
 //!
-//! The [`ocean`] module registers a vertex shader that displaces a mesh from a height texture,
-//! including data produced by the FFT output. Broader ocean and bloom plans live in **`ROADMAP.md`**.
+//! The [`ocean`] module registers [`ocean::OceanSurfaceMaterial`] ([`bevy::pbr::ExtendedMaterial`] over
+//! [`bevy::pbr::StandardMaterial`] plus [`ocean::OceanSurfaceExtension`]) and displaces a mesh using
+//! [`fft::FftTextures::spatial_output`]. Broader ocean and bloom plans live in **`ROADMAP.md`**.
 
 pub mod complex;
 pub mod fft;

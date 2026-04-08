@@ -12,5 +12,14 @@ image = { version = "0.25", default-features = false }
 name = "fft"
 path = "examples/fft/main.rs"
 
+[[example]]
+name = "ocean"
+path = "examples/ocean/main.rs"
+required-features = ["free_camera"]
+
+[dev-dependencies]
+bevy_egui = "0.39"
+
 [features]
 file_watcher = ["bevy/file_watcher"]
+free_camera = ["bevy/free_camera"]

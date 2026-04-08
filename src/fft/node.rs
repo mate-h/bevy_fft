@@ -1,5 +1,4 @@
 use bevy::{
-    core_pipeline::core_2d::graph::Core2d,
     ecs::{
         query::QueryState,
         world::{FromWorld, World},
@@ -50,15 +49,15 @@ impl Node for FftSpectrumPassthroughNode {
 
 /// Drops the default spectrum pass and wires `user_pass` between [`FftNode::ComputeFFT`] and [`FftNode::ComputeIFFT`].
 ///
-/// Register `user_pass` on the **Core2d** render graph before calling this function.
+/// Call from `RenderApp` after registering `user_pass` on the **root** [`RenderGraph`].
 pub fn splice_spectrum_pass(world: &mut World, user_pass: impl RenderLabel) {
-    let Some(mut render_graph) = world.get_resource_mut::<RenderGraph>() else {
-        return;
-    };
-    let Some(graph) = render_graph.get_sub_graph_mut(Core2d) else {
+    let Some(mut graph) = world.get_resource_mut::<RenderGraph>() else {
         return;
     };
     if graph.get_node_state(FftNode::SpectrumPass).is_err() {
+        bevy::log::warn!(
+            "splice_spectrum_pass: `FftNode::SpectrumPass` is missing. Register `FftPlugin` before splicing so the forward chain is set up."
+        );
         return;
     }
     let _ = graph.remove_node(FftNode::SpectrumPass);
@@ -95,9 +94,12 @@ impl Node for FftComputeNode {
         let node_label = graph.label();
 
         for (bind_groups, settings) in self.query.iter_manual(world) {
-            let schedule = FftSchedule::try_from_bits(settings.schedule).unwrap_or(FftSchedule::Forward);
+            let schedule =
+                FftSchedule::try_from_bits(settings.schedule).unwrap_or(FftSchedule::Forward);
 
-            if node_label == FftNode::ComputeFFT.intern() && matches!(schedule, FftSchedule::Inverse) {
+            if node_label == FftNode::ComputeFFT.intern()
+                && matches!(schedule, FftSchedule::Inverse)
+            {
                 once!(info!(
                     "Skipping forward FFT because schedule is FftSchedule::Inverse"
                 ));

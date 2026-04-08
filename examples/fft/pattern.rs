@@ -1,9 +1,9 @@
 //! Procedural GPU patterns or PNG inputs through [`bevy_fft::fft::FftInputTexture`] using assets such as `sunflower.png` and `clouds.png`.
 
+use crate::band_pass::BandPassParams;
 use bevy::{
     asset::RenderAssetUsages,
-    core_pipeline::core_2d::graph::Core2d,
-    ecs::world::FromWorld,
+    ecs::{change_detection::Mut, world::FromWorld},
     input::keyboard::KeyCode,
     prelude::*,
     render::{
@@ -11,17 +11,16 @@ use bevy::{
         extract_component::{ExtractComponent, ExtractComponentPlugin},
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_asset::RenderAssets,
-        render_graph::{Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel},
+        render_graph::{Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel},
         render_resource::{
-            CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor,
-            Extent3d, PipelineCache, TextureDimension, TextureFormat,
+            CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor, Extent3d,
+            PipelineCache, TextureDimension, TextureFormat,
         },
         renderer::RenderContext,
         texture::GpuImage,
     },
     shader::ShaderDefVal,
 };
-use crate::band_pass::BandPassParams;
 use bevy_fft::fft::{
     FftInputTexture, FftNode, FftSettings, FftSource, FftTextures,
     resources::{FftBindGroupLayouts, FftBindGroups},
@@ -114,20 +113,28 @@ impl Plugin for PatternPlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
+        render_app.init_resource::<ExamplePatternPipeline>();
         render_app
-            .init_resource::<ExamplePatternPipeline>()
-            .add_render_graph_node::<ExamplePatternNode>(Core2d, FftNode::GeneratePattern)
-            .add_render_graph_node::<CopyInputTextureNode>(Core2d, PatternGraph::CopyInputTexture)
-            .add_render_graph_edge(
-                Core2d,
-                FftNode::GeneratePattern,
-                PatternGraph::CopyInputTexture,
-            )
-            .add_render_graph_edge(Core2d, PatternGraph::CopyInputTexture, FftNode::ComputeFFT);
+            .world_mut()
+            .resource_scope(|world, mut graph: Mut<RenderGraph>| {
+                graph.add_node(
+                    FftNode::GeneratePattern,
+                    ExamplePatternNode::from_world(world),
+                );
+                graph.add_node(
+                    PatternGraph::CopyInputTexture,
+                    CopyInputTextureNode::from_world(world),
+                );
+                graph.add_node_edge(FftNode::GeneratePattern, PatternGraph::CopyInputTexture);
+                graph.add_node_edge(PatternGraph::CopyInputTexture, FftNode::ComputeFFT);
+            });
     }
 }
 
-pub(crate) fn switch_pattern(keyboard: Res<ButtonInput<KeyCode>>, mut pattern: ResMut<InputPattern>) {
+pub(crate) fn switch_pattern(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut pattern: ResMut<InputPattern>,
+) {
     for (key, kind) in [
         (KeyCode::Digit1, InputPatternKind::Radial),
         (KeyCode::Digit2, InputPatternKind::Horizontal),
@@ -235,18 +242,17 @@ impl FromWorld for ExamplePatternPipeline {
         let shader = world.resource::<AssetServer>().load(PATTERN_SHADER);
         let defs = vec![ShaderDefVal::UInt("CHANNELS".into(), 4)];
 
-        let queue =
-            |label: &'static str, entry: &'static str| {
-                pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-                    label: Some(label.into()),
-                    layout: vec![layouts.common.clone()],
-                    push_constant_ranges: vec![],
-                    shader: shader.clone(),
-                    shader_defs: defs.clone(),
-                    entry_point: Some(entry.into()),
-                    zero_initialize_workgroup_memory: false,
-                })
-            };
+        let queue = |label: &'static str, entry: &'static str| {
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some(label.into()),
+                layout: vec![layouts.common.clone()],
+                push_constant_ranges: vec![],
+                shader: shader.clone(),
+                shader_defs: defs.clone(),
+                entry_point: Some(entry.into()),
+                zero_initialize_workgroup_memory: false,
+            })
+        };
 
         Self {
             radial: queue("example_pattern_radial", "generate_concentric_circles"),

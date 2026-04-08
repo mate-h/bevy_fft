@@ -2,15 +2,17 @@
 
 This crate is a small GPU **FFT library** for [Bevy](https://bevyengine.org). It includes a 2D forward and inverse path with ping-pong buffers, plus a place to run spectrum-domain compute between the two passes. It ships with a sample app that applies a radial band-pass on the spectrum in the middle of the pipeline.
 
-<img src="./assets/showcase.png" alt="FFT demo showcase" width="600"/>
+<img src="./assets/showcase.jpg" alt="FFT ocean simulation demo showcase" width="600"/>
+
+<img src="./assets/showcase2.jpg" alt="FFT round-trip band pass filter demo showcase" width="600"/>
 
 ## What it includes
 
 The stock pipeline is built around a **256×256** complex transform with workspace tiles labeled **A** through **D**. After the graph finishes, resolved images **`spatial_output`** and **`power_spectrum`** are available for sampling. The Rust API exposes **`FftPlugin`**, **`FftSource`**, **`FftSchedule`**, **`FftInputTexture`**, **`FftInputDomain`**, and **`FftPatternTarget`**. Run `cargo doc --open` for generated API documentation, or open [`src/fft/mod.rs`](src/fft/mod.rs) as the source of truth.
 
-Between **`ComputeFFT`** and **`ComputeIFFT`** the graph visits **`SpectrumPass`**, which is a no-op until something is wired in. Call **`splice_spectrum_pass`** after registering your own Core2d compute node, and reuse **`FftBindGroupLayouts::common`** to match FFT bindings.
+FFT compute runs on the **root** [`RenderGraph`](https://docs.rs/bevy_render/latest/bevy_render/render_graph/graph/struct.RenderGraph.html) so it executes **once per frame** before camera work (the graph edges **`ResolveOutputs`** → **`CameraDriverLabel`**). Between **`ComputeFFT`** and **`ComputeIFFT`** the root graph visits **`SpectrumPass`**, which is a no-op until something is wired in. Register your custom node on that same root graph, call **`splice_spectrum_pass`** from plugin **`finish`**, and reuse **`FftBindGroupLayouts::common`** to match FFT bindings.
 
-There is also an [**ocean**](src/ocean/mod.rs) entry point. **`OceanPlugin`** loads a vertex shader **`OCEAN_MESH`** that displaces a mesh using a height texture such as **`FftTextures::spatial_output`**. That shader is a building block, not a complete water renderer.
+There is also an [**ocean**](src/ocean/mod.rs) entry point. **`OceanPlugin`** splices ocean spectrum compute into the FFT graph and registers **`OceanSurfaceMaterial`**, which displaces a mesh using **`FftTextures::spatial_output`**. It is a building block, not a complete water renderer.
 
 Ambitious extras such as a full ocean sim or FFT bloom are sketched in [**`ROADMAP.md`**](ROADMAP.md).
 
@@ -27,9 +29,10 @@ Then run the demo. The **`file_watcher`** feature hot-reloads WGSL while you ite
 
 ```bash
 cargo run --example fft --features file_watcher
+cargo run --example ocean --features free_camera
 ```
 
-The **`fft`** example drives **`FftSchedule::ForwardThenInverse`**. Data starts in spatial **A**, moves to spectrum **C** for a radial band-pass tuned with the sliders at the top-left, then returns through IFFT to **B**.
+The **`fft`** example drives **`FftSchedule::ForwardThenInverse`**. Data starts in spatial **A**, moves to spectrum **C** for a radial band-pass tuned with the sliders at the top-left, then returns through IFFT to **B**. The **`ocean`** example uses **`FftSchedule::Inverse`** with **`OceanPlugin`**: a compute pass fills spectrum **C** each frame, then the same IFFT and resolve path writes **`spatial_output`** for the ocean material.
 
 ## A few types worth knowing
 

@@ -33,7 +33,8 @@ fn resolve_fft_outputs(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ip = vec2<i32>(i32(pos.x), i32(pos.y));
 
     let spatial = textureLoad(spatial_b_re, ip);
-    let s = vec4<f32>(spatial.xyz * settings.normalization, spatial.w);
+    let n = settings.normalization;
+    let s = vec4<f32>(spatial.x * n, spatial.y * n, spatial.z * n, spatial.w * n);
     textureStore(spatial_output_out, pos, s);
 
     let hx = dims.x >> 1u;

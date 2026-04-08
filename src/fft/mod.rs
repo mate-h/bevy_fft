@@ -1,10 +1,9 @@
 use bevy::{
     app::{App, Plugin, Update},
     asset::{Handle, load_internal_asset},
-    core_pipeline::core_2d::graph::{Core2d, Node2d},
     ecs::{
-        component::Component, query::QueryItem, schedule::IntoScheduleConfigs,
-        system::lifetimeless::Read,
+        change_detection::Mut, component::Component, query::QueryItem,
+        schedule::IntoScheduleConfigs, system::lifetimeless::Read, world::FromWorld,
     },
     math::UVec2,
     prelude::Image,
@@ -12,7 +11,8 @@ use bevy::{
     render::{
         Render, RenderApp, RenderSystems,
         extract_component::{ExtractComponent, ExtractComponentPlugin, UniformComponentPlugin},
-        render_graph::RenderGraphExt,
+        graph::CameraDriverLabel,
+        render_graph::RenderGraph,
         render_resource::*,
     },
     shader::Shader,
@@ -23,7 +23,7 @@ pub mod prelude;
 pub mod resources;
 
 pub use node::{FftNode, FftSpectrumPassthroughNode, splice_spectrum_pass};
-pub use resources::{prepare_fft_bind_groups, FftTextures, prepare_fft_textures};
+pub use resources::{FftTextures, prepare_fft_bind_groups, prepare_fft_textures};
 
 use node::{FftComputeNode, FftResolveOutputsNode};
 use resources::{
@@ -58,6 +58,7 @@ pub fn forward_fft_twiddle_table() -> [c32; 8192] {
 #[cfg(test)]
 mod layout_tests {
     use super::{FftSettings, forward_fft_twiddle_table};
+    use bevy::math::UVec2;
     use bevy::render::render_resource::ShaderType;
     use std::f32::consts::PI;
 
@@ -88,6 +89,14 @@ mod layout_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn grid_256_inverse_only_is_fixed_size_inverse() {
+        let s = super::FftSource::grid_256_inverse_only();
+        assert_eq!(s.size, UVec2::splat(256));
+        assert_eq!(s.orders, 8);
+        assert_eq!(s.schedule, super::FftSchedule::Inverse);
     }
 }
 
@@ -208,6 +217,22 @@ impl FftSource {
         }
     }
 
+    /// Inverse-only setup for **`Spectrum`** writers such as [`crate::ocean::OceanPlugin`].
+    ///
+    /// Omit `FftInputTexture` so nothing clears buffer **C** on the CPU each frame. Tune
+    /// [`Self::spatial_display_gain`] so [`FftTextures::spatial_output`] sits in a comfortable range for materials.
+    pub fn grid_256_inverse_only() -> Self {
+        Self {
+            size: UVec2::splat(256),
+            orders: 8,
+            padding: UVec2::ZERO,
+            roots: forward_fft_twiddle_table(),
+            schedule: FftSchedule::Inverse,
+            input_domain: FftInputDomain::Spatial,
+            pattern_target: FftPatternTarget::SpatialA,
+            spatial_display_gain: 1.0,
+        }
+    }
 }
 
 /// Hooks user images into the FFT path. The real handle is required, and a missing imaginary image is treated as zero.
@@ -337,15 +362,26 @@ impl Plugin for FftPlugin {
                         .in_set(RenderSystems::PrepareBindGroups)
                         .after(prepare_fft_bind_groups),
                 ),
-            )
-            .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeFFT)
-            .add_render_graph_node::<FftSpectrumPassthroughNode>(Core2d, FftNode::SpectrumPass)
-            .add_render_graph_node::<FftComputeNode>(Core2d, FftNode::ComputeIFFT)
-            .add_render_graph_node::<FftResolveOutputsNode>(Core2d, FftNode::ResolveOutputs)
-            .add_render_graph_edge(Core2d, FftNode::ComputeFFT, FftNode::SpectrumPass)
-            .add_render_graph_edge(Core2d, FftNode::SpectrumPass, FftNode::ComputeIFFT)
-            // Ordering ensures `spatial_output` and `power_spectrum` exist before the main 2D pass samples them.
-            .add_render_graph_edge(Core2d, FftNode::ComputeIFFT, FftNode::ResolveOutputs)
-            .add_render_graph_edge(Core2d, FftNode::ResolveOutputs, Node2d::MainOpaquePass);
+            );
+
+        // Root graph: one FFT+resolve run per frame before any camera subgraph (2D or 3D).
+        render_app
+            .world_mut()
+            .resource_scope(|world, mut graph: Mut<RenderGraph>| {
+                graph.add_node(FftNode::ComputeFFT, FftComputeNode::from_world(world));
+                graph.add_node(FftNode::SpectrumPass, FftSpectrumPassthroughNode::default());
+                graph.add_node(FftNode::ComputeIFFT, FftComputeNode::from_world(world));
+                graph.add_node(
+                    FftNode::ResolveOutputs,
+                    FftResolveOutputsNode::from_world(world),
+                );
+                graph.add_node_edges((
+                    FftNode::ComputeFFT,
+                    FftNode::SpectrumPass,
+                    FftNode::ComputeIFFT,
+                    FftNode::ResolveOutputs,
+                ));
+                graph.add_node_edge(FftNode::ResolveOutputs, CameraDriverLabel);
+            });
     }
 }
