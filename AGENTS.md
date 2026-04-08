@@ -2,7 +2,7 @@
 
 Source: https://gist.github.com/mate-h/3989935e364a501b2f855d0a08765ea8
 
-Refer to this guide for **Markdown** in-repo docs, **Inline Documentation**, **Code Comments**, and **UI copy**.
+Refer to this guide for Markdown in-repo docs, inline documentation, code comments, and UI copy.
 
 ## Tone
 
@@ -31,6 +31,7 @@ Refer to this guide for **Markdown** in-repo docs, **Inline Documentation**, **C
 
 ## Documentation structure
 
+- In README-style Markdown and other reader-facing docs, avoid leaning on bold for every API name, buffer label, or keyword. Prefer `inline code` when an identifier needs to stand out. Use bold sparingly for real emphasis, not as a way to decorate each important-looking word.
 - For document titles and major headings, prefer a **short connecting phrase** over a **parenthetical qualifier**. Example: *Agent notes on writing style* reads more naturally than *Agent notes (writing style)*, which looks like a filed label. Same idea as *Guide to X*, *Notes on Y*, *Z for this repo*.
 - Section headings can be neutral (**What it includes**, **Try it**) instead of marketing-style lead-ins.
 - For **public APIs**, weave identifiers into sentences instead of serial **`Name`**: behavior bullets, unless a tight reference table is really needed.
