@@ -25,7 +25,9 @@ use bevy::{
 mod node;
 pub mod resources;
 
-pub use node::{FftNode, FftSpectrumPassthroughNode, splice_spectrum_pass};
+pub use node::{
+    FftNode, FftSpectrumPassthroughNode, splice_after_resolve_outputs, splice_spectrum_pass,
+};
 pub use resources::{FftTextures, prepare_fft_bind_groups, prepare_fft_textures};
 
 use node::{FftComputeNode, FftResolveOutputsNode, FftResolveSpectrumNode};

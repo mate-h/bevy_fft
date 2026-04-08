@@ -1,7 +1,7 @@
 //! Tessendorf-style ocean: GPU spectrum into FFT buffer **C**, inverse FFT, mesh displacement.
 //!
 //! The egui window shows [`FftTextures::power_spectrum`] and [`FftTextures::spatial_output`]. `spatial_output`
-//! uses R, G, B for slopes and height and A for wind-along chop after the ocean pack.
+//! uses R, G, B for slopes and height and W for wind-along chop after the ocean pack.
 
 use bevy::{
     anti_alias::fxaa::Fxaa,
@@ -89,9 +89,6 @@ fn sync_free_camera_with_egui_focus(
     camera_state.enabled = !egui_wants.wants_any_input();
 }
 
-#[derive(Component)]
-struct OceanSurfaceTag;
-
 /// Y component of [`SunLight`] position before `looking_at` (0 is horizon along +X, 1 raises the light).
 #[derive(Resource)]
 struct SunLightSettings {
@@ -117,6 +114,8 @@ fn setup(mut commands: Commands, mut scattering_mediums: ResMut<Assets<Scatterin
         },
         OceanH0Uniform::default(),
         OceanDynamicUniform::default(),
+        OceanFoamUniform::default(),
+        OceanFoamPhase(0),
     ));
 
     // Match `examples/3d/atmosphere.rs` camera stack (HDR path is implicit; atmosphere adds SSR + FXAA there).
@@ -158,8 +157,10 @@ fn setup(mut commands: Commands, mut scattering_mediums: ResMut<Assets<Scatterin
 struct OceanFftPreviewEgui {
     spectrum: Option<egui::TextureId>,
     displacement: Option<egui::TextureId>,
+    foam: Option<egui::TextureId>,
     registered_sp: Option<AssetId<Image>>,
     registered_dp: Option<AssetId<Image>>,
+    registered_foam: Option<AssetId<Image>>,
 }
 
 fn spawn_ocean_when_ready(
@@ -168,11 +169,13 @@ fn spawn_ocean_when_ready(
     mut materials: ResMut<Assets<OceanSurfaceMaterial>>,
     mesh_sel: Res<OceanMeshSelection>,
     q: Query<
-        (&FftTextures, &OceanSimSettings),
+        (&FftTextures, &OceanFoamMask, &OceanSimSettings),
         (
             With<FftSource>,
             With<OceanH0Uniform>,
             With<OceanDynamicUniform>,
+            With<OceanFoamUniform>,
+            With<OceanFoamPhase>,
         ),
     >,
     existing: Query<Entity, With<OceanSurfaceTag>>,
@@ -181,7 +184,7 @@ fn spawn_ocean_when_ready(
         return;
     }
 
-    let Ok((tex, sim)) = q.single() else {
+    let Ok((tex, foam, sim)) = q.single() else {
         return;
     };
 
@@ -206,8 +209,13 @@ fn spawn_ocean_when_ready(
                 ocean_tile_world_size: tile,
                 grid_size: sim.texture_size as f32,
                 wind_direction: sim.wind_direction,
+                foam_intensity: 0.65,
+                foam_cutoff: 0.88,
+                foam_falloff: 0.22,
+                foam_trail_decay: 0.94,
             },
             displacement: tex.spatial_output.clone(),
+            foam_mask: foam.texture_a.clone(),
         },
     };
 
@@ -229,7 +237,12 @@ fn ocean_egui_panel(
     time: Res<Time>,
     mut sim: Query<
         (Entity, &mut FftSource, &mut OceanSimSettings),
-        (With<OceanH0Uniform>, With<OceanDynamicUniform>),
+        (
+            With<OceanH0Uniform>,
+            With<OceanDynamicUniform>,
+            With<OceanFoamUniform>,
+            With<OceanFoamPhase>,
+        ),
     >,
     mut materials: ResMut<Assets<OceanSurfaceMaterial>>,
     surface: Query<Entity, With<OceanSurfaceTag>>,
@@ -253,7 +266,6 @@ fn ocean_egui_panel(
             cache.registered_dp = Some(dp_id);
         }
     }
-
     let surface_ready = surface_mat.single().ok().and_then(|m| materials.get(&m.0));
     let mut mesh_amplitude = surface_ready
         .map(|m| m.extension.settings.amplitude)
@@ -261,9 +273,30 @@ fn ocean_egui_panel(
     let mut choppiness = surface_ready
         .map(|m| m.extension.settings.choppiness)
         .unwrap_or(0.35);
+    let mut foam_intensity = surface_ready
+        .map(|m| m.extension.settings.foam_intensity)
+        .unwrap_or(0.65);
+    let mut foam_cutoff = surface_ready
+        .map(|m| m.extension.settings.foam_cutoff)
+        .unwrap_or(0.88);
+    let mut foam_falloff = surface_ready
+        .map(|m| m.extension.settings.foam_falloff)
+        .unwrap_or(0.22);
+    let mut foam_trail_decay = surface_ready
+        .map(|m| m.extension.settings.foam_trail_decay)
+        .unwrap_or(0.94);
 
     let sp_tex = cache.spectrum;
     let dp_tex = cache.displacement;
+
+    if let Some(m) = surface_ready {
+        let fm_id = m.extension.foam_mask.id();
+        if cache.registered_foam != Some(fm_id) {
+            cache.foam = Some(contexts.add_image(EguiTextureHandle::Weak(fm_id)));
+            cache.registered_foam = Some(fm_id);
+        }
+    }
+    let fm_tex = cache.foam;
 
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -324,7 +357,9 @@ fn ocean_egui_panel(
             commands
                 .entity(sim_entity)
                 .remove::<FftTextures>()
-                .remove::<OceanH0Image>();
+                .remove::<OceanH0Image>()
+                .remove::<OceanFoamMask>()
+                .insert(OceanFoamPhase(0));
             *fft_source = FftSource::square_inverse_only(new_n);
             s.texture_size = new_n;
             s.h0_serial = s.h0_serial.wrapping_add(1);
@@ -357,6 +392,10 @@ fn ocean_egui_panel(
         ui.add(egui::Slider::new(&mut s.time_scale, 0.0..=3.0).text("Time scale"));
         ui.add(egui::Slider::new(&mut mesh_amplitude, 0.0..=4.0).text("Mesh amplitude"));
         ui.add(egui::Slider::new(&mut choppiness, 0.0..=2.0).text("Choppiness"));
+        ui.add(egui::Slider::new(&mut foam_intensity, 0.0..=1.5).text("Foam intensity"));
+        ui.add(egui::Slider::new(&mut foam_cutoff, 0.2..=1.2).text("Foam cutoff"));
+        ui.add(egui::Slider::new(&mut foam_falloff, 0.02..=0.8).text("Foam falloff"));
+        ui.add(egui::Slider::new(&mut foam_trail_decay, 0.85..=0.999).text("Foam trail decay"));
         ui.add(egui::Slider::new(&mut sun_settings.elevation, 0.0..=1.0).text("Sun light height"));
         if ui.button("Regenerate spectrum").clicked() {
             s.h0_serial = s.h0_serial.wrapping_add(1);
@@ -377,6 +416,12 @@ fn ocean_egui_panel(
                     ui.add(egui::Image::new(egui::load::SizedTexture::new(id, size)));
                 });
             }
+            if let Some(id) = fm_tex {
+                ui.vertical(|ui| {
+                    ui.label("foam mask");
+                    ui.add(egui::Image::new(egui::load::SizedTexture::new(id, size)));
+                });
+            }
         });
     });
 
@@ -391,6 +436,10 @@ fn ocean_egui_panel(
     mat.extension.settings.ocean_tile_world_size = s.tile_size;
     mat.extension.settings.grid_size = s.texture_size as f32;
     mat.extension.settings.wind_direction = s.wind_direction;
+    mat.extension.settings.foam_intensity = foam_intensity;
+    mat.extension.settings.foam_cutoff = foam_cutoff;
+    mat.extension.settings.foam_falloff = foam_falloff;
+    mat.extension.settings.foam_trail_decay = foam_trail_decay;
 
     let Ok(mut tf) = sun_transform.single_mut() else {
         return;

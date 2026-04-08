@@ -5,6 +5,7 @@ use bevy::{
     },
     log::{error, info},
     render::{
+        graph::CameraDriverLabel,
         render_graph::{Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel},
         render_resource::{ComputePass, ComputePassDescriptor, PipelineCache},
         renderer::RenderContext,
@@ -81,6 +82,28 @@ pub fn splice_spectrum_pass(world: &mut World, user_pass: impl RenderLabel) {
     let user = user_pass.intern();
     graph.add_node_edge(FftNode::ComputeFFT, user);
     graph.add_node_edge(user, FftNode::ResolveSpectrum);
+}
+
+/// Runs `user_pass` after [`FftNode::ResolveOutputs`] and before [`CameraDriverLabel`].
+///
+/// Call from `RenderApp` after [`FftPlugin`] registers the `ResolveOutputs` → `CameraDriver` edge,
+/// and after registering `user_pass` on the root [`RenderGraph`].
+pub fn splice_after_resolve_outputs(world: &mut World, user_pass: impl RenderLabel) {
+    let Some(mut graph) = world.get_resource_mut::<RenderGraph>() else {
+        return;
+    };
+    if graph
+        .remove_node_edge(FftNode::ResolveOutputs, CameraDriverLabel)
+        .is_err()
+    {
+        bevy::log::warn!(
+            "splice_after_resolve_outputs: could not remove ResolveOutputs → CameraDriver edge. Register FftPlugin before OceanPlugin."
+        );
+        return;
+    }
+    let user = user_pass.intern();
+    graph.add_node_edge(FftNode::ResolveOutputs, user);
+    graph.add_node_edge(user, CameraDriverLabel);
 }
 
 pub(super) struct FftComputeNode {

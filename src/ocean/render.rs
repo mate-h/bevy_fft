@@ -10,6 +10,7 @@ use bevy::{
         world::{FromWorld, World},
     },
     image::Image,
+    pbr::MeshMaterial3d,
     prelude::*,
     reflect::Reflect,
     render::{
@@ -130,6 +131,118 @@ pub struct OceanComputeBindGroups {
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
 pub struct OceanSpectrumLabel;
+
+#[repr(C)]
+#[derive(Component, Clone, Copy, Default, Reflect, ShaderType)]
+pub struct OceanFoamUniform {
+    pub texture_size: u32,
+    pub _pad0: u32,
+    pub tile_size: f32,
+    pub _pad1: f32,
+    pub amplitude: f32,
+    pub choppiness: f32,
+    pub wind_direction: f32,
+    pub foam_cutoff: f32,
+    pub foam_falloff: f32,
+    pub foam_trail_decay: f32,
+    pub _foam_uniform_pad2: f32,
+    pub _foam_uniform_pad3: f32,
+    pub _foam_uniform_pad4: f32,
+}
+
+impl ExtractComponent for OceanFoamUniform {
+    type QueryData = Read<Self>;
+    type QueryFilter = ();
+    type Out = Self;
+
+    fn extract_component(
+        item: bevy::ecs::query::QueryItem<'_, '_, Self::QueryData>,
+    ) -> Option<Self::Out> {
+        Some(*item)
+    }
+}
+
+/// GPU foam history ping-pong targets written after [`crate::fft::FftNode::ResolveOutputs`].
+///
+/// The material samples whichever half was written last; see [`sync_ocean_foam_display`] and [`OceanFoamPhase`].
+#[derive(Component, Clone, Reflect)]
+pub struct OceanFoamMask {
+    pub texture_a: Handle<Image>,
+    pub texture_b: Handle<Image>,
+}
+
+impl ExtractComponent for OceanFoamMask {
+    type QueryData = Read<Self>;
+    type QueryFilter = ();
+    type Out = Self;
+
+    fn extract_component(
+        item: bevy::ecs::query::QueryItem<'_, '_, Self::QueryData>,
+    ) -> Option<Self::Out> {
+        Some(item.clone())
+    }
+}
+
+/// Advances once per main-world frame so render prep picks read/write halves consistently.
+#[derive(Component, Clone, Copy, Default, Reflect)]
+pub struct OceanFoamPhase(pub u32);
+
+impl ExtractComponent for OceanFoamPhase {
+    type QueryData = Read<Self>;
+    type QueryFilter = ();
+    type Out = Self;
+
+    fn extract_component(
+        item: bevy::ecs::query::QueryItem<'_, '_, Self::QueryData>,
+    ) -> Option<Self::Out> {
+        Some(*item)
+    }
+}
+
+#[derive(Component)]
+pub struct OceanFoamBindGroups {
+    pub group: BindGroup,
+}
+
+#[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
+pub struct OceanFoamLabel;
+
+#[derive(Resource)]
+pub struct OceanFoamPipelines {
+    pub layout: BindGroupLayoutDescriptor,
+    pub foam: CachedComputePipelineId,
+}
+
+impl FromWorld for OceanFoamPipelines {
+    fn from_world(world: &mut World) -> Self {
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let asset_server = world.resource::<AssetServer>();
+
+        let entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                uniform_buffer::<OceanFoamUniform>(false),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadOnly),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadOnly),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
+            ),
+        );
+        let layout = BindGroupLayoutDescriptor::new("ocean_foam_layout", &entries);
+
+        let shader = asset_server.load("ocean/ocean_foam.wgsl");
+        let foam = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("ocean_jacobian_foam".into()),
+            layout: vec![layout.clone()],
+            push_constant_ranges: vec![],
+            shader,
+            shader_defs: vec![],
+            entry_point: Some("ocean_jacobian_foam".into()),
+            zero_initialize_workgroup_memory: false,
+        });
+
+        Self { layout, foam }
+    }
+}
 
 #[derive(Resource)]
 pub struct OceanComputePipelines {
@@ -268,6 +381,92 @@ pub(super) fn sync_ocean_dynamic_uniform(
     }
 }
 
+pub(super) fn prepare_ocean_foam_mask_image(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    query: Query<
+        (Entity, &FftSource),
+        (With<crate::ocean::OceanSimSettings>, Without<OceanFoamMask>),
+    >,
+) {
+    for (entity, source) in &query {
+        let extent = Extent3d {
+            width: source.size.x,
+            height: source.size.y,
+            depth_or_array_layers: 1,
+        };
+        let mut make_tex = || {
+            let mut image = Image::new_fill(
+                extent,
+                TextureDimension::D2,
+                &[0; 16],
+                TextureFormat::Rgba32Float,
+                RenderAssetUsages::default(),
+            );
+            image.texture_descriptor.usage =
+                TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING;
+            images.add(image)
+        };
+        let texture_a = make_tex();
+        let texture_b = make_tex();
+        commands.entity(entity).insert(OceanFoamMask {
+            texture_a,
+            texture_b,
+        });
+    }
+}
+
+pub(super) fn sync_ocean_foam_uniform(
+    mut q: Query<(&crate::ocean::OceanSimSettings, &mut OceanFoamUniform)>,
+    surface: Query<
+        &MeshMaterial3d<crate::ocean::OceanSurfaceMaterial>,
+        With<crate::ocean::OceanSurfaceTag>,
+    >,
+    materials: Res<Assets<crate::ocean::OceanSurfaceMaterial>>,
+) {
+    let mat = surface.iter().next().and_then(|m| materials.get(&m.0));
+    for (s, mut u) in &mut q {
+        u.texture_size = s.texture_size;
+        u.tile_size = s.tile_size;
+        u.wind_direction = s.wind_direction;
+        if let Some(m) = mat {
+            u.amplitude = m.extension.settings.amplitude;
+            u.choppiness = m.extension.settings.choppiness;
+            u.foam_cutoff = m.extension.settings.foam_cutoff;
+            u.foam_falloff = m.extension.settings.foam_falloff;
+            u.foam_trail_decay = m.extension.settings.foam_trail_decay;
+        }
+    }
+}
+
+pub(super) fn sync_ocean_foam_display(
+    mut phase_q: Query<&mut OceanFoamPhase, With<FftSource>>,
+    mask: Query<&OceanFoamMask, With<FftSource>>,
+    surface: Query<
+        &MeshMaterial3d<crate::ocean::OceanSurfaceMaterial>,
+        With<crate::ocean::OceanSurfaceTag>,
+    >,
+    mut materials: ResMut<Assets<crate::ocean::OceanSurfaceMaterial>>,
+) {
+    let Ok(mask) = mask.single() else {
+        return;
+    };
+    let Ok(mut phase) = phase_q.single_mut() else {
+        return;
+    };
+    phase.0 = phase.0.wrapping_add(1);
+    let k = phase.0;
+    if let Ok(mh) = surface.single()
+        && let Some(mat) = materials.get_mut(mh)
+    {
+        mat.extension.foam_mask = if k % 2 == 0 {
+            mask.texture_b.clone()
+        } else {
+            mask.texture_a.clone()
+        };
+    }
+}
+
 type PrepareOceanBgQuery<'w, 's> = Query<
     'w,
     's,
@@ -333,6 +532,69 @@ pub(super) fn prepare_ocean_compute_bind_groups(
             spectrum_dynamic,
             spectrum_h0_read,
         });
+    }
+}
+
+type PrepareOceanFoamBgQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static FftTextures,
+        &'static OceanFoamMask,
+        &'static OceanFoamPhase,
+    ),
+    (With<FftBindGroups>, With<OceanFoamUniform>),
+>;
+
+pub(super) fn prepare_ocean_foam_bind_groups(
+    mut commands: Commands,
+    render_device: Res<RenderDevice>,
+    pipeline_cache: Res<PipelineCache>,
+    foam_pipelines: Res<OceanFoamPipelines>,
+    foam_uniforms: Res<ComponentUniforms<OceanFoamUniform>>,
+    gpu_images: Res<RenderAssets<GpuImage>>,
+    query: PrepareOceanFoamBgQuery,
+) {
+    let Some(foam_binding) = foam_uniforms.binding() else {
+        return;
+    };
+
+    let layout = pipeline_cache.get_bind_group_layout(&foam_pipelines.layout);
+
+    for (entity, textures, foam_mask, phase) in &query {
+        let Some(spatial) = gpu_images
+            .get(&textures.spatial_output)
+            .map(|g| &g.texture_view)
+        else {
+            continue;
+        };
+        let read_handle = if phase.0 % 2 == 0 {
+            &foam_mask.texture_a
+        } else {
+            &foam_mask.texture_b
+        };
+        let write_handle = if phase.0 % 2 == 0 {
+            &foam_mask.texture_b
+        } else {
+            &foam_mask.texture_a
+        };
+        let Some(foam_read) = gpu_images.get(read_handle).map(|g| &g.texture_view) else {
+            continue;
+        };
+        let Some(foam_write) = gpu_images.get(write_handle).map(|g| &g.texture_view) else {
+            continue;
+        };
+
+        let group = render_device.create_bind_group(
+            "ocean_foam_bind_group",
+            &layout,
+            &BindGroupEntries::sequential((foam_binding.clone(), spatial, foam_read, foam_write)),
+        );
+
+        commands
+            .entity(entity)
+            .insert(OceanFoamBindGroups { group });
     }
 }
 
@@ -411,6 +673,56 @@ impl Node for OceanSpectrumNode {
                 pass.set_bind_group(2, &ocean_bg.spectrum_h0_read, &[]);
                 pass.dispatch_workgroups(nx, ny, 1);
             }
+        }
+
+        Ok(())
+    }
+}
+
+pub struct OceanFoamNode {
+    query: QueryState<(&'static OceanFoamBindGroups, &'static FftSettings)>,
+}
+
+impl FromWorld for OceanFoamNode {
+    fn from_world(world: &mut World) -> Self {
+        Self {
+            query: world.query(),
+        }
+    }
+}
+
+impl Node for OceanFoamNode {
+    fn update(&mut self, world: &mut World) {
+        self.query.update_archetypes(world);
+    }
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut bevy::render::renderer::RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let pl = world.resource::<OceanFoamPipelines>();
+        let cache = world.resource::<PipelineCache>();
+
+        let Some(foam_pl) = cache.get_compute_pipeline(pl.foam) else {
+            return Ok(());
+        };
+
+        let wg = 8u32;
+        let enc = render_context.command_encoder();
+
+        for (foam_bg, settings) in self.query.iter_manual(world) {
+            let nx = settings.size.x.div_ceil(wg);
+            let ny = settings.size.y.div_ceil(wg);
+
+            let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("ocean_jacobian_foam_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(foam_pl);
+            pass.set_bind_group(0, &foam_bg.group, &[]);
+            pass.dispatch_workgroups(nx, ny, 1);
         }
 
         Ok(())

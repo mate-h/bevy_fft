@@ -12,11 +12,16 @@ struct OceanExtensionUniform {
     ocean_tile_world_size: f32,
     grid_size: f32,
     wind_direction: f32,
+    foam_intensity: f32,
+    foam_cutoff: f32,
+    foam_falloff: f32,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> ocean_ext: OceanExtensionUniform;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var displacement_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var displacement_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(103) var foam_mask_texture: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(104) var foam_mask_sampler: sampler;
 
 fn ocean_load_disp(tex: texture_2d<f32>, cx: i32, cz: i32, dims: i32) -> vec4<f32> {
     let ii = clamp(cx, 0, dims - 1);
@@ -98,6 +103,20 @@ fn ocean_highres_world_normal(instance_index: u32, mesh_uv: vec2<f32>) -> vec3<f
     let len2 = dot(n_raw, n_raw);
     let local_n = select(normalize(n_raw), vec3(0.0, 1.0, 0.0), len2 < 1e-12);
     return mesh_normal_local_to_world(local_n, instance_index);
+}
+
+fn ocean_foam_coverage(mesh_uv: vec2<f32>) -> f32 {
+    let size = ocean_ext.grid_size;
+    let n_tex = max(size, 1.0);
+    let uv_tex = mesh_uv * (n_tex - 1.0) / n_tex + vec2<f32>(0.5 / n_tex);
+    return textureSampleLevel(foam_mask_texture, foam_mask_sampler, uv_tex, 0.0).r;
+}
+
+fn ocean_mix_foam_into_base_color(mesh_uv: vec2<f32>, base_color: vec4<f32>) -> vec4<f32> {
+    let foam_cov = ocean_foam_coverage(mesh_uv);
+    let foam_mix = saturate(foam_cov * ocean_ext.foam_intensity);
+    let foam_white = vec3<f32>(1.0, 1.0, 1.0);
+    return vec4<f32>(mix(base_color.rgb, foam_white, foam_mix), base_color.a);
 }
 
 // `PREPASS_PIPELINE` is only set for actual prepass draw pipelines. The main mesh pipeline can still
@@ -240,6 +259,7 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     let n_world = ocean_highres_world_normal(in.instance_index, in.uv);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
+    pbr_input.material.base_color = ocean_mix_foam_into_base_color(in.uv, pbr_input.material.base_color);
 #endif
 #endif
     var out: FragmentOutput;
@@ -273,6 +293,7 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     let n_world = ocean_highres_world_normal(in.instance_index, in.uv);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
+    pbr_input.material.base_color = ocean_mix_foam_into_base_color(in.uv, pbr_input.material.base_color);
 #endif
 #endif
     return deferred_output(in, pbr_input);
