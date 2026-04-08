@@ -1,6 +1,8 @@
 # bevy_fft
 
-This crate is a small GPU FFT library for [Bevy](https://bevyengine.org). It runs a 256×256 complex 2D transform with ping-pong workspace buffers, and leaves a spectrum slot between forward and inverse passes for your own compute. The fft example applies a radial band-pass on spectrum buffer C in the middle of the pipeline; the ocean example fills C each frame and displaces a mesh using `FftTextures::spatial_output`.
+This crate is a small GPU FFT library for [Bevy](https://bevyengine.org). It runs a 256×256 complex 2D transform with ping-pong workspace buffers, and leaves a spectrum slot between forward and inverse passes for your own compute.
+
+The fft example applies a radial band-pass in that spectrum stage. The ocean example runs an inverse-only path each frame and displaces a mesh from the resolved spatial height and slopes.
 
 <img src="./assets/showcase.jpg" alt="FFT ocean simulation demo showcase" width="600"/>
 

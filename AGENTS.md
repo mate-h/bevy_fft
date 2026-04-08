@@ -12,7 +12,7 @@ Refer to this guide for Markdown in-repo docs, inline documentation, code commen
 
 ## Punctuation
 
-- Use **periods and new sentences** instead of stringing thoughts together with **semicolons**. Multiple `;` in one line often reads like stacked AI clauses. Break them apart.
+- Use **periods and new sentences** instead of stringing thoughts together with **semicolons**. Multiple `;` in one line often reads like stacked AI clauses. Break them apart. When two ideas could each stand alone, prefer two sentences over `clause one; clause two`, including in README and other short reader-facing blurbs.
 - Do not lean on **em dashes (—)** or **hyphen-style pauses** to splice extra ideas into a sentence. If it feels like an aside or a second thought, make it the **next sentence**.
 
 ## Avoid “AI default” patterns
