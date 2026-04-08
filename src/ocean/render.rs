@@ -118,6 +118,9 @@ impl ExtractComponent for OceanH0Image {
 }
 
 /// Per-entity bind groups for ocean compute.
+///
+/// The prepare system overwrites this each frame so bindings track the current [`GpuImage`] views
+/// after a resize or other asset refresh (same idea as [`crate::fft::prepare_fft_bind_groups`]).
 #[derive(Component)]
 pub struct OceanComputeBindGroups {
     pub init: BindGroup,
@@ -278,7 +281,6 @@ type PrepareOceanBgQuery<'w, 's> = Query<
         With<FftBindGroups>,
         With<OceanH0Uniform>,
         With<OceanDynamicUniform>,
-        Without<OceanComputeBindGroups>,
     ),
 >;
 

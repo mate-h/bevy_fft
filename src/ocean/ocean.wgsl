@@ -31,10 +31,11 @@ struct DisplacedSurface {
 }
 
 /// `spatial_output`: R/G/B = height slopes X and Z and elevation; A = wind-along chop scalar (before amplitude and choppiness).
-fn ocean_displace_surface(instance_index: u32, position_local: vec3<f32>, uv: vec2<f32>) -> DisplacedSurface {
+fn ocean_displace_surface(instance_index: u32, position_local: vec3<f32>, mesh_uv: vec2<f32>) -> DisplacedSurface {
     let size = ocean_ext.grid_size;
-    let x = (position_local.x / ocean_ext.ocean_tile_world_size + 0.5) * (size - 1.0);
-    let z = (position_local.z / ocean_ext.ocean_tile_world_size + 0.5) * (size - 1.0);
+    // Plane UVs match the undistorted patch; using them avoids chop / interpolation pushing lookups past the tile edge.
+    let x = mesh_uv.x * (size - 1.0);
+    let z = mesh_uv.y * (size - 1.0);
 
     let dims = i32(size);
     let ix = clamp(i32(round(x)), 0, dims - 1);
@@ -73,6 +74,30 @@ fn ocean_displace_surface(instance_index: u32, position_local: vec3<f32>, uv: ve
     out.world_position = mesh_position_local_to_world(world_from_local, vec4<f32>(displaced_position, 1.0));
     out.world_normal = mesh_normal_local_to_world(local_n, instance_index);
     return out;
+}
+
+/// Slopes from bilinear fetch on the FFT grid (mip 0), then the same local normal as the vertex path.
+/// `mesh_uv` is the plane attribute UV (0..1); we map to texel-centered coordinates so clamp-to-edge never pins the seam.
+fn ocean_highres_world_normal(instance_index: u32, mesh_uv: vec2<f32>) -> vec3<f32> {
+    let size = ocean_ext.grid_size;
+    let amp = ocean_ext.amplitude;
+    let tile = ocean_ext.ocean_tile_world_size;
+
+    let n_tex = max(size, 1.0);
+    let uv_tex = mesh_uv * (n_tex - 1.0) / n_tex + vec2<f32>(0.5 / n_tex);
+    let disp = textureSampleLevel(displacement_texture, displacement_sampler, uv_tex, 0.0);
+
+    let deta_dx = disp.r * amp;
+    let deta_dz = disp.g * amp;
+
+    let dx_cell = tile / max(size - 1.0, 1.0);
+    let dz_cell = dx_cell;
+    let tu = vec3<f32>(2.0 * dx_cell, deta_dx * 2.0 * dx_cell, 0.0);
+    let tv = vec3<f32>(0.0, deta_dz * 2.0 * dz_cell, 2.0 * dz_cell);
+    let n_raw = cross(tv, tu);
+    let len2 = dot(n_raw, n_raw);
+    let local_n = select(normalize(n_raw), vec3(0.0, 1.0, 0.0), len2 < 1e-12);
+    return mesh_normal_local_to_world(local_n, instance_index);
 }
 
 // `PREPASS_PIPELINE` is only set for actual prepass draw pipelines. The main mesh pipeline can still
@@ -179,6 +204,9 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
+    pbr_functions::prepare_world_normal,
+    pbr_types,
+    pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT,
     pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT,
     forward_io::{VertexOutput as FragVertexOutput, FragmentOutput},
     pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
@@ -192,7 +220,9 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
+    pbr_functions::prepare_world_normal,
     pbr_deferred_functions::deferred_output,
+    pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT,
 }
 #endif
 #endif
@@ -203,6 +233,15 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+#ifdef VERTEX_UVS_A
+    let double_sided =
+        (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
+    let n_world = ocean_highres_world_normal(in.instance_index, in.uv);
+    pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
+    pbr_input.N = normalize(pbr_input.world_normal);
+#endif
+#endif
     var out: FragmentOutput;
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
         out.color = apply_pbr_lighting(pbr_input);
@@ -227,6 +266,15 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
 #else
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+#ifdef VERTEX_UVS_A
+    let double_sided =
+        (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
+    let n_world = ocean_highres_world_normal(in.instance_index, in.uv);
+    pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
+    pbr_input.N = normalize(pbr_input.world_normal);
+#endif
+#endif
     return deferred_output(in, pbr_input);
 #endif
 }

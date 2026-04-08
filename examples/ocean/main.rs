@@ -26,9 +26,34 @@ use bevy_egui::{
 };
 use bevy_fft::fft::prelude::*;
 use bevy_fft::ocean::{
-    OceanDynamicUniform, OceanH0Uniform, OceanMaterialUniform, OceanPlugin, OceanSimSettings,
-    OceanSurfaceExtension, OceanSurfaceMaterial,
+    OceanDynamicUniform, OceanH0Image, OceanH0Uniform, OceanMaterialUniform, OceanPlugin,
+    OceanSimSettings, OceanSurfaceExtension, OceanSurfaceMaterial,
 };
+
+/// Grid edge lengths for the ocean FFT (powers of two).
+const OCEAN_GRID_SIZES: [u32; 4] = [128, 256, 512, 1024];
+
+/// Vertices per axis on the ocean plane (`Plane3d` uses `subdivisions + 2` vertices).
+const OCEAN_MESH_VERTEX_OPTIONS: [u32; 6] = [16, 32, 64, 128, 256, 512];
+
+#[derive(Resource, Clone, Copy)]
+struct OceanMeshSelection {
+    vertices_per_edge: u32,
+}
+
+impl Default for OceanMeshSelection {
+    fn default() -> Self {
+        Self {
+            vertices_per_edge: 128,
+        }
+    }
+}
+
+impl OceanMeshSelection {
+    fn plane_subdivisions(self) -> u32 {
+        self.vertices_per_edge.saturating_sub(2)
+    }
+}
 
 fn main() {
     App::new()
@@ -37,6 +62,7 @@ fn main() {
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(GlobalAmbientLight::NONE)
         .init_resource::<SunLightSettings>()
+        .init_resource::<OceanMeshSelection>()
         .add_plugins((
             DefaultPlugins,
             FreeCameraPlugin,
@@ -141,13 +167,13 @@ fn spawn_ocean_when_ready(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<OceanSurfaceMaterial>>,
+    mesh_sel: Res<OceanMeshSelection>,
     q: Query<
         (&FftTextures, &OceanSimSettings),
         (
             With<FftSource>,
             With<OceanH0Uniform>,
             With<OceanDynamicUniform>,
-            Without<OceanSurfaceTag>,
         ),
     >,
     existing: Query<Entity, With<OceanSurfaceTag>>,
@@ -163,7 +189,7 @@ fn spawn_ocean_when_ready(
     let tile = sim.tile_size;
     let mesh = Plane3d::new(Vec3::Y, Vec2::splat(tile * 0.5))
         .mesh()
-        .subdivisions(sim.texture_size.saturating_sub(1))
+        .subdivisions(mesh_sel.plane_subdivisions())
         .build();
 
     let material = OceanSurfaceMaterial {
@@ -197,14 +223,22 @@ fn spawn_ocean_when_ready(
 fn ocean_egui_panel(
     fft_textures: Query<&FftTextures, With<FftSource>>,
     mut contexts: EguiContexts,
+    mut commands: Commands,
+    mut mesh_sel: ResMut<OceanMeshSelection>,
     mut cache: Local<OceanFftPreviewEgui>,
-    mut sim: Query<&mut OceanSimSettings>,
+    mut smoothed_frame_ms: Local<Option<f32>>,
+    time: Res<Time>,
+    mut sim: Query<
+        (Entity, &mut FftSource, &mut OceanSimSettings),
+        (With<OceanH0Uniform>, With<OceanDynamicUniform>),
+    >,
     mut materials: ResMut<Assets<OceanSurfaceMaterial>>,
-    surface: Query<&MeshMaterial3d<OceanSurfaceMaterial>, With<OceanSurfaceTag>>,
+    surface: Query<Entity, With<OceanSurfaceTag>>,
+    surface_mat: Query<&MeshMaterial3d<OceanSurfaceMaterial>, With<OceanSurfaceTag>>,
     mut sun_settings: ResMut<SunLightSettings>,
     mut sun_transform: Query<&mut Transform, With<SunLight>>,
 ) {
-    let Ok(mut s) = sim.single_mut() else {
+    let Ok((sim_entity, mut fft_source, mut s)) = sim.single_mut() else {
         return;
     };
 
@@ -221,7 +255,10 @@ fn ocean_egui_panel(
         }
     }
 
-    let surface_ready = surface.single().ok().and_then(|m| materials.get(&m.0));
+    let surface_ready = surface_mat
+        .single()
+        .ok()
+        .and_then(|m| materials.get(&m.0));
     let mut mesh_amplitude = surface_ready
         .map(|m| m.extension.settings.amplitude)
         .unwrap_or(1.0);
@@ -236,10 +273,81 @@ fn ocean_egui_panel(
         return;
     };
 
+    let size_idx = OCEAN_GRID_SIZES
+        .iter()
+        .position(|&n| n == s.texture_size)
+        .unwrap_or(2);
+    let mut new_idx = size_idx;
+
+    let mesh_idx = OCEAN_MESH_VERTEX_OPTIONS
+        .iter()
+        .position(|&n| n == mesh_sel.vertices_per_edge)
+        .unwrap_or(3);
+    let mut new_mesh_idx = mesh_idx;
+
+    let dt = time.delta_secs();
+    let inst_ms = dt * 1000.0;
+    let tau = 0.25_f32;
+    let alpha = 1.0 - (-dt / tau).exp();
+    let smooth_ms = smoothed_frame_ms.map_or(inst_ms, |s| s + (inst_ms - s) * alpha);
+    *smoothed_frame_ms = Some(smooth_ms);
+
     egui::Window::new("Ocean").show(ctx, |ui| {
         if surface_ready.is_none() {
             ui.label("Spawning ocean mesh after GPU init…");
         }
+        ui.label(
+            egui::RichText::new(format!("{smooth_ms:.2} ms/frame")).weak(),
+        );
+        ui.add_space(2.0);
+        ui.label("FFT resolution");
+        egui::ComboBox::from_id_salt("ocean_fft_resolution")
+            .selected_text(format!(
+                "{} × {}",
+                OCEAN_GRID_SIZES[new_idx], OCEAN_GRID_SIZES[new_idx]
+            ))
+            .show_ui(ui, |ui| {
+                for (i, n) in OCEAN_GRID_SIZES.iter().enumerate() {
+                    ui.selectable_value(&mut new_idx, i, format!("{n} × {n}"));
+                }
+            });
+
+        ui.add_space(4.0);
+        ui.label("Mesh vertices");
+        egui::ComboBox::from_id_salt("ocean_mesh_subdivisions")
+            .selected_text(format!(
+                "{} × {}",
+                OCEAN_MESH_VERTEX_OPTIONS[new_mesh_idx], OCEAN_MESH_VERTEX_OPTIONS[new_mesh_idx]
+            ))
+            .show_ui(ui, |ui| {
+                for (i, &v) in OCEAN_MESH_VERTEX_OPTIONS.iter().enumerate() {
+                    ui.selectable_value(&mut new_mesh_idx, i, format!("{v} × {v}"));
+                }
+            });
+
+        let new_n = OCEAN_GRID_SIZES[new_idx];
+        if new_n != s.texture_size {
+            commands
+                .entity(sim_entity)
+                .remove::<FftTextures>()
+                .remove::<OceanH0Image>();
+            *fft_source = FftSource::square_inverse_only(new_n);
+            s.texture_size = new_n;
+            s.h0_serial = s.h0_serial.wrapping_add(1);
+            for entity in &surface {
+                commands.entity(entity).despawn();
+            }
+            *cache = OceanFftPreviewEgui::default();
+        }
+
+        let new_mesh_vertices = OCEAN_MESH_VERTEX_OPTIONS[new_mesh_idx];
+        if new_mesh_vertices != mesh_sel.vertices_per_edge {
+            mesh_sel.vertices_per_edge = new_mesh_vertices;
+            for entity in &surface {
+                commands.entity(entity).despawn();
+            }
+        }
+
         ui.add(egui::Slider::new(&mut s.wind_speed, 0.0..=6.0).text("Wind speed"));
         ui.add(
             egui::Slider::new(
@@ -280,7 +388,7 @@ fn ocean_egui_panel(
         });
     });
 
-    let Ok(handle) = surface.single() else {
+    let Ok(handle) = surface_mat.single() else {
         return;
     };
     let Some(mat) = materials.get_mut(handle) else {
