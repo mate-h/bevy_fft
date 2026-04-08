@@ -21,10 +21,7 @@ use bevy::{
     },
     shader::ShaderDefVal,
 };
-use bevy_fft::fft::{
-    FftInputTexture, FftNode, FftSettings, FftSource, FftTextures,
-    resources::{FftBindGroupLayouts, FftBindGroups},
-};
+use bevy_fft::prelude::*;
 use bytemuck::cast_slice;
 use image::imageops::FilterType;
 

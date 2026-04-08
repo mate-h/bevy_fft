@@ -2,8 +2,12 @@ use bevy::{
     app::{App, Plugin, Update},
     asset::{Handle, load_internal_asset},
     ecs::{
-        change_detection::Mut, component::Component, query::QueryItem,
-        schedule::IntoScheduleConfigs, system::lifetimeless::Read, world::FromWorld,
+        change_detection::Mut,
+        component::Component,
+        query::QueryItem,
+        schedule::{IntoScheduleConfigs, SystemSet},
+        system::lifetimeless::Read,
+        world::FromWorld,
     },
     math::UVec2,
     prelude::Image,
@@ -19,7 +23,6 @@ use bevy::{
 };
 
 mod node;
-pub mod prelude;
 pub mod resources;
 
 pub use node::{FftNode, FftSpectrumPassthroughNode, splice_spectrum_pass};
@@ -61,6 +64,26 @@ pub fn fft_orders_for_size(n: u32) -> Option<u32> {
         return None;
     }
     Some(n.trailing_zeros())
+}
+
+/// Error returned by [`FftSource::try_square_forward_then_inverse`] and
+/// [`FftSource::try_square_inverse_only`] when the edge length is not a non-zero power of two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FftInvalidSize;
+
+impl std::fmt::Display for FftInvalidSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FFT size must be a non-zero power of two")
+    }
+}
+
+impl std::error::Error for FftInvalidSize {}
+
+/// Systems that run on the main [`App`] while setting up FFT entities.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FftSystemSet {
+    /// Creates [`FftTextures`] and copies CPU [`FftInputTexture`] data into buffer **A** when configured.
+    PrepareTextures,
 }
 
 #[cfg(test)]
@@ -115,6 +138,15 @@ mod layout_tests {
         assert_eq!(super::fft_orders_for_size(1), Some(0));
         assert_eq!(super::fft_orders_for_size(0), None);
         assert_eq!(super::fft_orders_for_size(3), None);
+    }
+
+    #[test]
+    fn try_square_constructors_reject_invalid_sizes() {
+        assert!(super::FftSource::try_square_forward_then_inverse(0).is_err());
+        assert!(super::FftSource::try_square_forward_then_inverse(3).is_err());
+        assert!(super::FftSource::try_square_forward_then_inverse(256).is_ok());
+        assert!(super::FftSource::try_square_inverse_only(0).is_err());
+        assert!(super::FftSource::try_square_inverse_only(512).is_ok());
     }
 }
 
@@ -184,6 +216,8 @@ pub enum FftPatternTarget {
     SpectrumC = 1,
 }
 
+/// Main-world FFT configuration. The render world mirrors this into [`FftSettings`], [`FftRoots`],
+/// and related extracted components each frame.
 #[derive(Component, Clone, Reflect)]
 pub struct FftSource {
     /// Grid width and height for this FFT entity.
@@ -222,8 +256,13 @@ impl Default for FftSource {
 impl FftSource {
     /// Square `n`×`n` grid with [`Self::schedule`] set to [`FftSchedule::ForwardThenInverse`].
     pub fn square_forward_then_inverse(n: u32) -> Self {
-        let orders = fft_orders_for_size(n).expect("FFT size must be a non-zero power of two");
-        Self {
+        Self::try_square_forward_then_inverse(n).expect("FFT size must be a non-zero power of two")
+    }
+
+    /// Like [`Self::square_forward_then_inverse`], but returns an error when `n` is not a non-zero power of two.
+    pub fn try_square_forward_then_inverse(n: u32) -> Result<Self, FftInvalidSize> {
+        let orders = fft_orders_for_size(n).ok_or(FftInvalidSize)?;
+        Ok(Self {
             size: UVec2::splat(n),
             orders,
             padding: UVec2::ZERO,
@@ -232,14 +271,19 @@ impl FftSource {
             input_domain: FftInputDomain::Spatial,
             pattern_target: FftPatternTarget::SpatialA,
             spatial_display_gain: 1.0,
-        }
+        })
     }
 
     /// Square grid that only runs the inverse transform each frame (spectrum writers such as
     /// [`crate::ocean::OceanPlugin`]). Data ends in buffer **B** as spatial output.
     pub fn square_inverse_only(n: u32) -> Self {
-        let orders = fft_orders_for_size(n).expect("FFT size must be a non-zero power of two");
-        Self {
+        Self::try_square_inverse_only(n).expect("FFT size must be a non-zero power of two")
+    }
+
+    /// Like [`Self::square_inverse_only`], but returns an error when `n` is not a non-zero power of two.
+    pub fn try_square_inverse_only(n: u32) -> Result<Self, FftInvalidSize> {
+        let orders = fft_orders_for_size(n).ok_or(FftInvalidSize)?;
+        Ok(Self {
             size: UVec2::splat(n),
             orders,
             padding: UVec2::ZERO,
@@ -248,7 +292,7 @@ impl FftSource {
             input_domain: FftInputDomain::Spatial,
             pattern_target: FftPatternTarget::SpatialA,
             spatial_display_gain: 1.0,
-        }
+        })
     }
 
     /// Builds the usual 256×256 setup that runs a forward FFT and inverse FFT each frame.
@@ -279,6 +323,9 @@ impl ExtractComponent for FftInputTexture {
     }
 }
 
+/// GPU uniform layout extracted from [`FftSource`] for the render sub-app. The `normalization`
+/// field carries [`FftSource::spatial_display_gain`]. Prefer querying this type (not `FftSource`)
+/// in render-world systems and compute nodes.
 #[derive(Component, Clone, Copy, Reflect, ShaderType)]
 #[repr(C)]
 pub struct FftSettings {
@@ -339,7 +386,12 @@ impl Plugin for FftPlugin {
         load_internal_asset!(app, shaders::BINDINGS, "bindings.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::C32, "../complex/c32.wgsl", Shader::from_wgsl);
         load_internal_asset!(app, shaders::PLOT, "plot.wgsl", Shader::from_wgsl);
-        load_internal_asset!(app, shaders::FFT_COMMON, "fft_common.wgsl", Shader::from_wgsl);
+        load_internal_asset!(
+            app,
+            shaders::FFT_COMMON,
+            "fft_common.wgsl",
+            Shader::from_wgsl
+        );
         load_internal_asset!(
             app,
             shaders::RESOLVE_OUTPUTS,
@@ -354,11 +406,14 @@ impl Plugin for FftPlugin {
             .register_type::<FftPatternTarget>()
             .register_type::<FftRoots>()
             .register_type::<FftInputTexture>()
+            .configure_sets(Update, FftSystemSet::PrepareTextures)
             .add_systems(
                 Update,
                 (
-                    resources::prepare_fft_textures,
-                    copy_input_textures_to_fft_buffers.after(resources::prepare_fft_textures),
+                    resources::prepare_fft_textures.in_set(FftSystemSet::PrepareTextures),
+                    copy_input_textures_to_fft_buffers
+                        .after(resources::prepare_fft_textures)
+                        .in_set(FftSystemSet::PrepareTextures),
                 ),
             )
             .add_plugins((

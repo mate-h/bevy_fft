@@ -41,7 +41,7 @@ use render::{
     prepare_ocean_h0_image, sync_ocean_dynamic_uniform, sync_ocean_h0_uniform,
 };
 
-use crate::fft::{prepare_fft_bind_groups, prepare_fft_textures, splice_spectrum_pass};
+use crate::fft::{FftSystemSet, prepare_fft_bind_groups, splice_spectrum_pass};
 
 /// Same factor as `PM_PEAK_COEFF` in `assets/ocean/init_h0.wgsl` (`ω_pm ≈ this * g / U` in rad/s).
 pub const OCEAN_PM_PEAK_COEFF: f32 = 0.87;
@@ -171,7 +171,10 @@ impl Plugin for OceanPlugin {
             .add_plugins(ExtractComponentPlugin::<OceanDynamicUniform>::default())
             .add_plugins(UniformComponentPlugin::<OceanDynamicUniform>::default())
             .add_plugins(MaterialPlugin::<OceanSurfaceMaterial>::default())
-            .add_systems(Update, prepare_ocean_h0_image.after(prepare_fft_textures))
+            .add_systems(
+                Update,
+                prepare_ocean_h0_image.after(FftSystemSet::PrepareTextures),
+            )
             .add_systems(Update, sync_ocean_h0_uniform.after(prepare_ocean_h0_image))
             .add_systems(
                 Update,

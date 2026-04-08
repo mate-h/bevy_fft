@@ -24,11 +24,7 @@ use bevy_egui::{
     EguiContexts, EguiPlugin, EguiPrimaryContextPass, EguiTextureHandle, egui,
     input::{EguiWantsInput, write_egui_wants_input_system},
 };
-use bevy_fft::fft::prelude::*;
-use bevy_fft::ocean::{
-    OceanDynamicUniform, OceanH0Image, OceanH0Uniform, OceanMaterialUniform, OceanPlugin,
-    OceanSimSettings, OceanSurfaceExtension, OceanSurfaceMaterial,
-};
+use bevy_fft::prelude::*;
 
 /// Grid edge lengths for the ocean FFT (powers of two).
 const OCEAN_GRID_SIZES: [u32; 4] = [128, 256, 512, 1024];
@@ -71,7 +67,10 @@ fn main() {
             EguiPlugin::default(),
         ))
         .add_systems(Startup, setup)
-        .add_systems(Update, spawn_ocean_when_ready.after(prepare_fft_textures))
+        .add_systems(
+            Update,
+            spawn_ocean_when_ready.after(FftSystemSet::PrepareTextures),
+        )
         .add_systems(EguiPrimaryContextPass, ocean_egui_panel)
         .add_systems(
             PostUpdate,
@@ -255,10 +254,7 @@ fn ocean_egui_panel(
         }
     }
 
-    let surface_ready = surface_mat
-        .single()
-        .ok()
-        .and_then(|m| materials.get(&m.0));
+    let surface_ready = surface_mat.single().ok().and_then(|m| materials.get(&m.0));
     let mut mesh_amplitude = surface_ready
         .map(|m| m.extension.settings.amplitude)
         .unwrap_or(1.0);
@@ -296,9 +292,7 @@ fn ocean_egui_panel(
         if surface_ready.is_none() {
             ui.label("Spawning ocean mesh after GPU init…");
         }
-        ui.label(
-            egui::RichText::new(format!("{smooth_ms:.2} ms/frame")).weak(),
-        );
+        ui.label(egui::RichText::new(format!("{smooth_ms:.2} ms/frame")).weak());
         ui.add_space(2.0);
         ui.label("FFT resolution");
         egui::ComboBox::from_id_salt("ocean_fft_resolution")
@@ -363,9 +357,7 @@ fn ocean_egui_panel(
         ui.add(egui::Slider::new(&mut s.time_scale, 0.0..=3.0).text("Time scale"));
         ui.add(egui::Slider::new(&mut mesh_amplitude, 0.0..=4.0).text("Mesh amplitude"));
         ui.add(egui::Slider::new(&mut choppiness, 0.0..=2.0).text("Choppiness"));
-        ui.add(
-            egui::Slider::new(&mut sun_settings.elevation, 0.0..=1.0).text("Sun light height"),
-        );
+        ui.add(egui::Slider::new(&mut sun_settings.elevation, 0.0..=1.0).text("Sun light height"));
         if ui.button("Regenerate spectrum").clicked() {
             s.h0_serial = s.h0_serial.wrapping_add(1);
         }

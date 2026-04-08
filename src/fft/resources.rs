@@ -98,25 +98,27 @@ impl FromWorld for FftPipelines {
             range: 0..20,
         };
 
-        let forward_br_horizontal = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("fft_forward_br_horizontal".into()),
-            layout: vec![layouts.common.clone()],
-            push_constant_ranges: vec![],
-            shader: fft.clone(),
-            shader_defs: base_shader_defs.clone(),
-            entry_point: Some("fft_forward_br_horizontal".into()),
-            zero_initialize_workgroup_memory: false,
-        });
+        let forward_br_horizontal =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("fft_forward_br_horizontal".into()),
+                layout: vec![layouts.common.clone()],
+                push_constant_ranges: vec![],
+                shader: fft.clone(),
+                shader_defs: base_shader_defs.clone(),
+                entry_point: Some("fft_forward_br_horizontal".into()),
+                zero_initialize_workgroup_memory: false,
+            });
 
-        let forward_br_vertical = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("fft_forward_br_vertical".into()),
-            layout: vec![layouts.common.clone()],
-            push_constant_ranges: vec![],
-            shader: fft.clone(),
-            shader_defs: base_shader_defs.clone(),
-            entry_point: Some("fft_forward_br_vertical".into()),
-            zero_initialize_workgroup_memory: false,
-        });
+        let forward_br_vertical =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("fft_forward_br_vertical".into()),
+                layout: vec![layouts.common.clone()],
+                push_constant_ranges: vec![],
+                shader: fft.clone(),
+                shader_defs: base_shader_defs.clone(),
+                entry_point: Some("fft_forward_br_vertical".into()),
+                zero_initialize_workgroup_memory: false,
+            });
 
         let radix2_dit = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("fft_radix2_dit".into()),
@@ -138,25 +140,27 @@ impl FromWorld for FftPipelines {
             zero_initialize_workgroup_memory: false,
         });
 
-        let inverse_br_horizontal = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("ifft_br_horizontal".into()),
-            layout: vec![layouts.common.clone()],
-            push_constant_ranges: vec![],
-            shader: ifft.clone(),
-            shader_defs: base_shader_defs.clone(),
-            entry_point: Some("ifft_br_horizontal".into()),
-            zero_initialize_workgroup_memory: false,
-        });
+        let inverse_br_horizontal =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("ifft_br_horizontal".into()),
+                layout: vec![layouts.common.clone()],
+                push_constant_ranges: vec![],
+                shader: ifft.clone(),
+                shader_defs: base_shader_defs.clone(),
+                entry_point: Some("ifft_br_horizontal".into()),
+                zero_initialize_workgroup_memory: false,
+            });
 
-        let inverse_br_vertical = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("ifft_br_vertical".into()),
-            layout: vec![layouts.common.clone()],
-            push_constant_ranges: vec![],
-            shader: ifft.clone(),
-            shader_defs: base_shader_defs,
-            entry_point: Some("ifft_br_vertical".into()),
-            zero_initialize_workgroup_memory: false,
-        });
+        let inverse_br_vertical =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("ifft_br_vertical".into()),
+                layout: vec![layouts.common.clone()],
+                push_constant_ranges: vec![],
+                shader: ifft.clone(),
+                shader_defs: base_shader_defs,
+                entry_point: Some("ifft_br_vertical".into()),
+                zero_initialize_workgroup_memory: false,
+            });
 
         let resolve_spectrum = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("fft_resolve_spectrum_pipeline".into()),

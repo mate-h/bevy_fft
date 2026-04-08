@@ -6,7 +6,7 @@ use bevy::{
     prelude::*,
     ui::{FocusPolicy, RelativeCursorPosition},
 };
-use bevy_fft::fft::FftSource;
+use bevy_fft::prelude::FftSource;
 
 pub const BRIGHTNESS_MIN: f32 = 0.25;
 pub const BRIGHTNESS_MAX: f32 = 10.0;

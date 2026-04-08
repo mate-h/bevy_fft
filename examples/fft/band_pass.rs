@@ -23,11 +23,7 @@ use bevy::{
     },
     shader::ShaderDefVal,
 };
-use bevy_fft::fft::{
-    FftSettings, prepare_fft_bind_groups,
-    resources::{FftBindGroupLayouts, FftBindGroups},
-    splice_spectrum_pass,
-};
+use bevy_fft::prelude::*;
 
 /// Parameters for [`radial_band_pass`] in `assets/examples/band_pass.wgsl`.
 ///

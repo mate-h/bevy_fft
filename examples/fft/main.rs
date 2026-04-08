@@ -11,7 +11,7 @@ use bevy::{
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
 };
-use bevy_fft::fft::prelude::*;
+use bevy_fft::prelude::*;
 use pattern::{InputPatternTextures, PatternPlugin, switch_pattern};
 use ui::{BandPassUiPlugin, FftDemoStartup};
 
@@ -28,7 +28,7 @@ fn main() {
         .add_systems(
             Update,
             (
-                attach_input_preview.after(prepare_fft_textures),
+                attach_input_preview.after(FftSystemSet::PrepareTextures),
                 bind_demo_sprites.after(attach_input_preview),
                 switch_pattern,
             ),
