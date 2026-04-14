@@ -16,6 +16,8 @@ FFT compute runs on the root [`RenderGraph`](https://docs.rs/bevy_render/latest/
 
 There is also an [ocean](src/ocean/mod.rs) entry point. `OceanPlugin` splices ocean spectrum compute into the FFT graph and registers `OceanSurfaceMaterial`, which displaces a mesh using `FftTextures::spatial_output`. It is a building block, not a complete water renderer.
 
+The [shallow_water](src/shallow_water/mod.rs) module is separate from the FFT graph: GPU shallow water from the virtual-pipe model (see [docs/shallow_water.md](docs/shallow_water.md)), with a PBR surface example.
+
 Ambitious extras such as a full ocean sim or FFT bloom are sketched in [`ROADMAP.md`](ROADMAP.md).
 
 ## Try it
@@ -32,6 +34,7 @@ Then run the demo. The `file_watcher` feature hot-reloads WGSL while you iterate
 ```bash
 cargo run --example fft --features file_watcher
 cargo run --example ocean --features free_camera
+cargo run --example shallow_water --features free_camera
 ```
 
 The `fft` example drives `FftSchedule::ForwardThenInverse`. Data starts in spatial A, moves to spectrum C for a radial band-pass tuned with the sliders at the top-left, then returns through IFFT to B. The `ocean` example uses `FftSchedule::Inverse` with `OceanPlugin`: a compute pass fills spectrum C each frame, then the same IFFT and resolve path writes `spatial_output` for the ocean material.

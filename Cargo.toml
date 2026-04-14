@@ -17,6 +17,11 @@ name = "ocean"
 path = "examples/ocean/main.rs"
 required-features = ["free_camera"]
 
+[[example]]
+name = "shallow_water"
+path = "examples/shallow_water/main.rs"
+required-features = ["free_camera"]
+
 [dev-dependencies]
 bevy_egui = "0.39"
 
