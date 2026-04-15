@@ -1,16 +1,22 @@
 # Shallow water in bevy_fft
 
-The [shallow_water module](../src/shallow_water/mod.rs) runs a **virtual-pipe** shallow water model on the GPU: bed height and water depth share a 2D field, fluxes live on staggered edges, and each step does accelerate → mass-limited scale → move, with optional particles and brush-style interaction. A **root render-graph compute** pass runs before the camera so the simulation textures stay in sync when the PBR surface samples them.
+The [shallow_water module](../src/shallow_water/mod.rs) runs a **staggered shallow water** solver on the GPU in the CMF10 spirit (Chentanez and Müller): MacCormack advection on staggered face velocities, upwind mass flux for depth `h`, η = H + h for the pressure term, wet–dry reflective faces, optional depth limiting (`h_avgmax`), velocity capping, PML-style edge absorption with auxiliary state, and optional overshoot limiting near steep η. Brush interaction and passive particles match the style of [webgpu-shallow-water](https://github.com/mate-h/webgpu-shallow-water); the numerics are SWE, not that repo’s pipe network.
 
-The **example** (`examples/shallow_water/main.rs`) adds atmosphere-style lighting, an environment map light, and egui controls. It does not use the FFT pipeline; `ShallowWaterPlugin` is standalone.
+Textures: `bed_water` is `Rgba32Float` per cell (`.x` bed H, `.y` water h, η = sum). `flow_x` and `flow_y` are `R32Float` grids for face u and w. `mac_u_temps` and `mac_w_temps` are `Rgba32Float` at the same sizes as `flow_x` / `flow_y` (MacCormack uses `.x` and `.y`). `pml_state` is `Rgba32Float` on cells (four auxiliary channels in the strip). `velocity` stores cell-centered `.xy` for tracers. The compute bind group uses seven `read_write` 2D textures so it stays within Metal’s eight-texture limit per kernel.
+
+Domain edges: `applyDomainBoundaries` runs after pressure and integration, then again after PML face damping, so wall / source / drain / waves are not overwritten by the sponge.
+
+The example (`examples/shallow_water/main.rs`) adds lighting and egui controls and does not use the FFT graph; `ShallowWaterPlugin` is standalone.
 
 ## Bevy integration
 
-Simulation WGSL is in [`assets/shallow_water/simulator.wgsl`](../assets/shallow_water/simulator.wgsl). State is a [`ShallowWaterController`](../src/shallow_water/mod.rs) resource extracted to the render world, with GPU buffers and bind groups prepared each frame. The example uses bevy_egui on `EguiPrimaryContextPass` so panels run after egui’s context is ready.
+Simulation WGSL lives in [`assets/shallow_water/simulator.wgsl`](../assets/shallow_water/simulator.wgsl). [`ShallowWaterController`](../src/shallow_water/mod.rs) is extracted to the render world; bind groups are built each frame in `prepare_shallow_water_gpu`. The example schedules egui on `EguiPrimaryContextPass`.
 
-**Storage.** Read-write storage on `Rg32Float` is not available on some GPUs (notably Metal). This crate uses `Rgba32Float` for the bed or water and velocity textures and only uses the **R** and **G** channels. Flow textures stay `R32Float`.
+`Rg32Float` storage is unreliable on Metal, so this module uses `Rgba32Float` where multi-channel or packed storage is needed, as above.
 
-**Rendering.** [`ShallowWaterSurfaceMaterial`](../src/shallow_water/mod.rs) is an `ExtendedMaterial<StandardMaterial, ShallowWaterSurfaceExtension>` in the same style as the ocean surface: `StandardMaterial` carries the dark teal base and low roughness for strong specular and environment reflections. The extension displaces Y from filtered bed + water height, recomputes smooth world normals from bilinear height samples, and only nudges albedo toward sand in a thin shallow band.
+[`ShallowWaterSurfaceMaterial`](../src/shallow_water/mod.rs) is an `ExtendedMaterial<StandardMaterial, ShallowWaterSurfaceExtension>`: the extension displaces Y from filtered bed + water height and updates normals from height samples.
+
+Default `dt` is **0.08**. Optional PML: set `ShallowWaterController::pml_width` (for example 10) and `pml_h_rest`.
 
 ## Try it
 
@@ -18,6 +24,4 @@ Simulation WGSL is in [`assets/shallow_water/simulator.wgsl`](../assets/shallow_
 cargo run --example shallow_water --features free_camera
 ```
 
-The example enables `FLOAT32_FILTERABLE` where supported so linear sampling on the simulation textures is valid.
-
-Based on [webgpu-shallow-water](https://github.com/mate-h/webgpu-shallow-water).
+The example requests `FLOAT32_FILTERABLE` where supported so linear sampling on simulation textures is valid.

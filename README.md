@@ -16,7 +16,7 @@ FFT compute runs on the root [`RenderGraph`](https://docs.rs/bevy_render/latest/
 
 There is also an [ocean](src/ocean/mod.rs) entry point. `OceanPlugin` splices ocean spectrum compute into the FFT graph and registers `OceanSurfaceMaterial`, which displaces a mesh using `FftTextures::spatial_output`. It is a building block, not a complete water renderer.
 
-The [shallow_water](src/shallow_water/mod.rs) module is separate from the FFT graph: GPU shallow water from the virtual-pipe model (see [docs/shallow_water.md](docs/shallow_water.md)), with a PBR surface example.
+The [shallow_water](src/shallow_water/mod.rs) module is separate from the FFT graph: GPU staggered shallow water (see [docs/shallow_water.md](docs/shallow_water.md)) with a PBR surface example.
 
 Ambitious extras such as a full ocean sim or FFT bloom are sketched in [`ROADMAP.md`](ROADMAP.md).
 

@@ -1,7 +1,6 @@
-//! Interactive shallow water on a heightfield using the **virtual-pipe** model (WGSL in
-//! `assets/shallow_water/simulator.wgsl`).
-//!
-//! Overview and integration notes: **`docs/shallow_water.md`**. Based on [webgpu-shallow-water](https://github.com/mate-h/webgpu-shallow-water).
+//! Staggered shallow water on a heightfield (CMF10-style MacCormack on face velocities, upwind `h`,
+//! wet–dry, PML, overshoot limiter). See `docs/shallow_water.md` and `assets/shallow_water/simulator.wgsl`.
+//! Brush and presets mirror [webgpu-shallow-water](https://github.com/mate-h/webgpu-shallow-water) UX only.
 //!
 //! Add [`ShallowWaterPlugin`], insert [`ShallowWaterController`] as a resource with GPU images, and use
 //! [`ShallowWaterSurfaceMaterial`] on an XZ plane. The compute pass runs on the root [`RenderGraph`]
@@ -72,9 +71,22 @@ pub struct ShallowWaterController {
     /// Terrain preset index for `loadPreset` (0–3).
     pub preset_index: u32,
     pub bed_water: Handle<Image>,
+    /// Cell-centered velocity (.xy) for particles and diagnostics; .zw unused.
     pub velocity: Handle<Image>,
+    /// Staggered face velocity **u** at vertical faces: `(cells_x + 1) × cells_y`.
     pub flow_x: Handle<Image>,
+    /// Staggered face velocity **w** at horizontal faces: `cells_x × (cells_y + 1)`.
     pub flow_y: Handle<Image>,
+    /// MacCormack temps for u (same layout as `flow_x`): `.x` / `.y` = saved face value and reverse sample.
+    pub mac_u_temps: Handle<Image>,
+    /// Same for w (layout as `flow_y`).
+    pub mac_w_temps: Handle<Image>,
+    /// PML auxiliary field per cell, `Rgba32Float` (four channels used in the strip).
+    pub pml_state: Handle<Image>,
+    /// PML strip width in cells (0 = off).
+    pub pml_width: u32,
+    /// Target water depth **h** in the PML strip (rest depth).
+    pub pml_h_rest: f32,
     /// Increment to re-run `clearBuffers` + `loadPreset` on the GPU.
     pub sim_apply_serial: u32,
 }
@@ -94,9 +106,14 @@ impl ShallowWaterController {
             cells_y,
             bed_water: images.add(shallow_rg32_image(cells_x, cells_y)),
             velocity: images.add(shallow_rg32_image(cells_x, cells_y)),
-            flow_x: images.add(shallow_r32_image(cells_x + 1, cells_y + 1)),
-            flow_y: images.add(shallow_r32_image(cells_x + 1, cells_y + 1)),
-            dt: 0.2,
+            flow_x: images.add(shallow_r32_image(cells_x + 1, cells_y)),
+            flow_y: images.add(shallow_r32_image(cells_x, cells_y + 1)),
+            mac_u_temps: images.add(shallow_rg32_image(cells_x + 1, cells_y)),
+            mac_w_temps: images.add(shallow_rg32_image(cells_x, cells_y + 1)),
+            pml_state: images.add(shallow_rg32_image(cells_x, cells_y)),
+            pml_width: 0,
+            pml_h_rest: 2.0,
+            dt: 0.08,
             gravity: 10.0,
             friction: 0.0,
             paused: false,
@@ -122,13 +139,16 @@ impl ShallowWaterController {
         self.cells_y = cells_y;
         self.bed_water = images.add(shallow_rg32_image(cells_x, cells_y));
         self.velocity = images.add(shallow_rg32_image(cells_x, cells_y));
-        self.flow_x = images.add(shallow_r32_image(cells_x + 1, cells_y + 1));
-        self.flow_y = images.add(shallow_r32_image(cells_x + 1, cells_y + 1));
+        self.flow_x = images.add(shallow_r32_image(cells_x + 1, cells_y));
+        self.flow_y = images.add(shallow_r32_image(cells_x, cells_y + 1));
+        self.mac_u_temps = images.add(shallow_rg32_image(cells_x + 1, cells_y));
+        self.mac_w_temps = images.add(shallow_rg32_image(cells_x, cells_y + 1));
+        self.pml_state = images.add(shallow_rg32_image(cells_x, cells_y));
         self.sim_apply_serial = self.sim_apply_serial.wrapping_add(1);
     }
 }
 
-/// Rgba32Float grid for GPU storage read-write on Metal (only R and G carry sim data).
+/// Empty `Rgba32Float` image for GPU storage (channel meaning is per-field on [`ShallowWaterController`]).
 pub fn shallow_rg32_image(width: u32, height: u32) -> Image {
     let mut image = Image::new_fill(
         Extent3d {
@@ -183,6 +203,18 @@ pub struct GpuSimulationUniform {
     pub friction_factor: f32,
     pub timestamp: u32,
     pub border_mask: u32,
+    pub pml_width: u32,
+    /// Bit 0: enable overshoot reduction in WGSL (other bits reserved).
+    pub flags: u32,
+    pub pml_h_rest: f32,
+    pub vel_clamp_alpha: f32,
+    pub h_avgmax_beta: f32,
+    pub eps_wet: f32,
+    pub pml_lambda_decay: f32,
+    pub pml_lambda_update: f32,
+    pub pml_sigma_max: f32,
+    pub overshoot_alpha: f32,
+    pub overshoot_lambda_edge: f32,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]

@@ -1,4 +1,4 @@
-//! Shallow water on a displaced PBR plane: GPU pipe model plus brush interaction.
+//! Shallow water on a displaced PBR plane: staggered SWE on the GPU plus brush interaction.
 
 use bevy::{
     camera::Exposure,
@@ -260,6 +260,10 @@ fn shallow_water_egui_panel(
             controller.preset_index = 3;
             controller.sim_apply_serial = controller.sim_apply_serial.wrapping_add(1);
         }
+        ui.separator();
+        ui.label("PML (open edges)");
+        ui.add(egui::Slider::new(&mut controller.pml_width, 0u32..=32u32).text("width (0=off)"));
+        ui.add(egui::Slider::new(&mut controller.pml_h_rest, 0.0..=8.0).text("h rest in strip"));
         ui.separator();
         ui.label("Border behavior");
         border_combo(ui, "Left", &mut controller.left_border);
