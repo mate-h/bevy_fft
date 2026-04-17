@@ -222,6 +222,9 @@ fn shallow_water_egui_panel(
     };
     egui::Window::new("Shallow water").show(ctx, |ui| {
         ui.checkbox(&mut controller.paused, "Paused");
+        if ui.button("Reset simulation").clicked() {
+            controller.sim_apply_serial = controller.sim_apply_serial.wrapping_add(1);
+        }
         ui.add(egui::Slider::new(&mut controller.dt, 0.05..=0.5).text("dt"));
         ui.add(egui::Slider::new(&mut controller.gravity, 1.0..=25.0).text("gravity"));
         ui.add(egui::Slider::new(&mut controller.friction, 0.0..=0.5).text("friction"));
@@ -241,7 +244,7 @@ fn shallow_water_egui_panel(
         ui.radio_value(&mut controller.interaction_mode, 2u32, "Remove bed");
         ui.radio_value(&mut controller.interaction_mode, 3u32, "Add water");
         ui.radio_value(&mut controller.interaction_mode, 4u32, "Remove water");
-        ui.radio_value(&mut controller.interaction_mode, 5u32, "Push water (drag)");
+        ui.radio_value(&mut controller.interaction_mode, 5u32, "Drag water");
         ui.separator();
         ui.label("Terrain preset");
         if ui.button("Islands").clicked() {
@@ -262,8 +265,12 @@ fn shallow_water_egui_panel(
         }
         ui.separator();
         ui.label("PML (open edges)");
-        ui.add(egui::Slider::new(&mut controller.pml_width, 0u32..=32u32).text("width (0=off)"));
-        ui.add(egui::Slider::new(&mut controller.pml_h_rest, 0.0..=8.0).text("h rest in strip"));
+        ui.add(egui::Slider::new(&mut controller.pml_width, 0u32..=32u32).text("width"));
+        ui.add(egui::Slider::new(&mut controller.pml_eta_rest, 0.0..=8.0).text("Rest depth"));
+        ui.add(
+            egui::Slider::new(&mut controller.pml_sigma_exponent, 2.0..=3.0).text("Blend sigma"),
+        );
+        ui.add(egui::Slider::new(&mut controller.pml_cosine_blend, 0.0..=1.0).text("Cosine blend"));
         ui.separator();
         ui.label("Border behavior");
         border_combo(ui, "Left", &mut controller.left_border);

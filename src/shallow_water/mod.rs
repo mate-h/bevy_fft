@@ -85,8 +85,12 @@ pub struct ShallowWaterController {
     pub pml_state: Handle<Image>,
     /// PML strip width in cells (0 = off).
     pub pml_width: u32,
-    /// Target water depth **h** in the PML strip (rest depth).
-    pub pml_h_rest: f32,
+    /// Target free-surface height **η** in the PML strip (same units as bed + water in the sim).
+    pub pml_eta_rest: f32,
+    /// PML absorption ramp: **2** = quadratic ([Joh08] / CMF10 default), **3** = cubic.
+    pub pml_sigma_exponent: f32,
+    /// **0** = uniform damping in each strip; **1** = full [Joh08] style scaling by **|u|/|v|** (x strip) and **|w|/|v|** (y strip) from cell-centered velocity.
+    pub pml_cosine_blend: f32,
     /// Increment to re-run `clearBuffers` + `loadPreset` on the GPU.
     pub sim_apply_serial: u32,
 }
@@ -112,7 +116,9 @@ impl ShallowWaterController {
             mac_w_temps: images.add(shallow_rg32_image(cells_x, cells_y + 1)),
             pml_state: images.add(shallow_rg32_image(cells_x, cells_y)),
             pml_width: 0,
-            pml_h_rest: 2.0,
+            pml_eta_rest: 2.0,
+            pml_sigma_exponent: 2.0,
+            pml_cosine_blend: 0.0,
             dt: 0.08,
             gravity: 10.0,
             friction: 0.0,
@@ -206,7 +212,7 @@ pub struct GpuSimulationUniform {
     pub pml_width: u32,
     /// Bit 0: enable overshoot reduction in WGSL (other bits reserved).
     pub flags: u32,
-    pub pml_h_rest: f32,
+    pub pml_eta_rest: f32,
     pub vel_clamp_alpha: f32,
     pub h_avgmax_beta: f32,
     pub eps_wet: f32,
@@ -215,6 +221,8 @@ pub struct GpuSimulationUniform {
     pub pml_sigma_max: f32,
     pub overshoot_alpha: f32,
     pub overshoot_lambda_edge: f32,
+    pub pml_sigma_exponent: f32,
+    pub pml_cosine_blend: f32,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]

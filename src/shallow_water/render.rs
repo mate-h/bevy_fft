@@ -213,7 +213,10 @@ impl SimWorkgroups {
     }
 }
 
-fn build_simulation_uniform(controller: &ShallowWaterController, timestamp: u32) -> GpuSimulationUniform {
+fn build_simulation_uniform(
+    controller: &ShallowWaterController,
+    timestamp: u32,
+) -> GpuSimulationUniform {
     let dx = 1.0_f32;
     let friction_factor = (1.0 - controller.friction.clamp(0.0, 1.0)).powf(controller.dt);
     GpuSimulationUniform {
@@ -226,7 +229,7 @@ fn build_simulation_uniform(controller: &ShallowWaterController, timestamp: u32)
         border_mask: controller.packed_border_mask(),
         pml_width: controller.pml_width,
         flags: 1,
-        pml_h_rest: controller.pml_h_rest,
+        pml_eta_rest: controller.pml_eta_rest,
         vel_clamp_alpha: 0.5,
         h_avgmax_beta: 2.0,
         eps_wet: 1e-4 * dx,
@@ -235,6 +238,8 @@ fn build_simulation_uniform(controller: &ShallowWaterController, timestamp: u32)
         pml_sigma_max: 6.0,
         overshoot_alpha: 0.25,
         overshoot_lambda_edge: 2.0 * dx,
+        pml_sigma_exponent: controller.pml_sigma_exponent.clamp(1.0, 4.0),
+        pml_cosine_blend: controller.pml_cosine_blend.clamp(0.0, 1.0),
     }
 }
 
@@ -305,10 +310,8 @@ pub fn prepare_shallow_water_gpu(
     };
     write_uniform(&render_queue, interaction_buf, &interaction);
 
-    let simulation = build_simulation_uniform(
-        controller.as_ref(),
-        timestamp.0.load(Ordering::Relaxed),
-    );
+    let simulation =
+        build_simulation_uniform(controller.as_ref(), timestamp.0.load(Ordering::Relaxed));
     write_uniform(&render_queue, simulation_buf, &simulation);
 
     let Some(bed) = gpu_images.get(&controller.bed_water) else {

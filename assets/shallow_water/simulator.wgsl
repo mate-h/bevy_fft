@@ -20,7 +20,7 @@ struct SimulationSettings {
     border_mask : u32,
     pml_width : u32,
     flags : u32,
-    pml_h_rest : f32,
+    pml_eta_rest : f32,
     vel_clamp_alpha : f32,
     h_avgmax_beta : f32,
     eps_wet : f32,
@@ -29,6 +29,8 @@ struct SimulationSettings {
     pml_sigma_max : f32,
     overshoot_alpha : f32,
     overshoot_lambda_edge : f32,
+    pml_sigma_exponent : f32,
+    pml_cosine_blend : f32,
 }
 
 struct Particle {
@@ -557,12 +559,15 @@ fn integrateVelocityW(@builtin(global_invocation_id) id: vec3u) {
     textureStore(faceWTexture, id.xy, vec4f(wv, 0.0, 0.0, 0.0));
 }
 
-fn border_u_value(borderType : u32, bed : f32) -> f32 {
+/// `sign` is +1 on the left or bottom domain edge, -1 on the right or top.
+/// Positive face velocity is along +x for u and +y for w. Source is inflow from outside; drain is outflow to outside.
+fn border_velocity(borderType : u32, bed : f32, sign : f32) -> f32 {
     if (bed > 1.0) { return 0.0; }
     if (borderType == 0u) { return 0.0; }
-    else if (borderType == 1u) { return 3.0; }
-    else if (borderType == 2u) { return -3.0; }
-    else { return 3.0 * sin(f32(simulationSettings.timestamp) / 30.0); }
+    let mag = 3.0;
+    if (borderType == 1u) { return sign * mag; }
+    if (borderType == 2u) { return -sign * mag; }
+    return sign * mag * sin(f32(simulationSettings.timestamp) / 30.0);
 }
 
 @compute @workgroup_size(16, 16)
@@ -575,22 +580,22 @@ fn applyDomainBoundaries(@builtin(global_invocation_id) id: vec3u) {
     let sx = simulationSettings.size.x;
     if (id.x == 0u && id.y < sy) {
         let bed = textureLoad(bedWaterTexture, vec2u(0u, id.y)).x;
-        let v = border_u_value(leftBorder, bed);
+        let v = border_velocity(leftBorder, bed, 1.0);
         textureStore(faceUTexture, vec2u(0u, id.y), vec4f(clamp_face_vel(v), 0.0, 0.0, 0.0));
     }
     if (id.x == sx && id.y < sy) {
         let bed = textureLoad(bedWaterTexture, vec2u(sx - 1u, id.y)).x;
-        let v = border_u_value(rightBorder, bed);
+        let v = border_velocity(rightBorder, bed, -1.0);
         textureStore(faceUTexture, vec2u(sx, id.y), vec4f(clamp_face_vel(v), 0.0, 0.0, 0.0));
     }
     if (id.y == 0u && id.x < sx) {
         let bed = textureLoad(bedWaterTexture, vec2u(id.x, 0u)).x;
-        let v = border_u_value(bottomBorder, bed);
+        let v = border_velocity(bottomBorder, bed, 1.0);
         textureStore(faceWTexture, vec2u(id.x, 0u), vec4f(clamp_face_vel(v), 0.0, 0.0, 0.0));
     }
     if (id.y == sy && id.x < sx) {
         let bed = textureLoad(bedWaterTexture, vec2u(id.x, sy - 1u)).x;
-        let v = border_u_value(topBorder, bed);
+        let v = border_velocity(topBorder, bed, -1.0);
         textureStore(faceWTexture, vec2u(id.x, sy), vec4f(clamp_face_vel(v), 0.0, 0.0, 0.0));
     }
 }
@@ -663,19 +668,24 @@ fn applyFrictionW(@builtin(global_invocation_id) id: vec3u) {
     textureStore(faceWTexture, id.xy, vec4f(wv, 0.0, 0.0, 0.0));
 }
 
+fn pml_ramp_t_to_sigma(t : f32) -> f32 {
+    let smax = simulationSettings.pml_sigma_max;
+    let e = clamp(simulationSettings.pml_sigma_exponent, 1.0, 4.0);
+    return smax * pow(clamp(t, 0.0, 1.0), e);
+}
+
 fn sigma_pml_x(i : i32) -> f32 {
     let w = i32(simulationSettings.pml_width);
     if (w <= 0) { return 0.0; }
     let nxv = nx();
     let ii = clamp(i, 0, nxv - 1);
-    let smax = simulationSettings.pml_sigma_max;
     var s = 0.0;
     if (ii < w) {
-        let t = (f32(w - ii) / f32(w));
-        s = smax * t * t;
+        let t = f32(w - ii) / f32(w);
+        s = pml_ramp_t_to_sigma(t);
     } else if (ii >= nxv - w) {
-        let t = (f32(ii - (nxv - w)) / f32(w));
-        s = smax * t * t;
+        let t = f32(ii - (nxv - w)) / f32(w);
+        s = pml_ramp_t_to_sigma(t);
     }
     return s;
 }
@@ -685,16 +695,33 @@ fn sigma_pml_y(j : i32) -> f32 {
     if (w <= 0) { return 0.0; }
     let nyv = ny();
     let jj = clamp(j, 0, nyv - 1);
-    let smax = simulationSettings.pml_sigma_max;
     var s = 0.0;
     if (jj < w) {
-        let t = (f32(w - jj) / f32(w));
-        s = smax * t * t;
+        let t = f32(w - jj) / f32(w);
+        s = pml_ramp_t_to_sigma(t);
     } else if (jj >= nyv - w) {
-        let t = (f32(jj - (nyv - w)) / f32(w));
-        s = smax * t * t;
+        let t = f32(jj - (nyv - w)) / f32(w);
+        s = pml_ramp_t_to_sigma(t);
     }
     return s;
+}
+
+fn cell_center_uv(ic : i32, jc : i32) -> vec2f {
+    let uc = 0.5 * (u_face_at(ic, jc) + u_face_at(ic + 1, jc));
+    let wc = 0.5 * (w_face_at(ic, jc) + w_face_at(ic, jc + 1));
+    return vec2f(uc, wc);
+}
+
+/// [Joh08] / CMF10 §2.1.4: scale x-strip strength by mix(1, |u|/|v|, blend), y-strip by mix(1, |w|/|v|, blend).
+fn pml_directional_scales(uv : vec2f) -> vec2f {
+    let b = clamp(simulationSettings.pml_cosine_blend, 0.0, 1.0);
+    if (b <= 0.0) {
+        return vec2f(1.0, 1.0);
+    }
+    let vm = max(1e-6, length(uv));
+    let ax = abs(uv.x) / vm;
+    let az = abs(uv.y) / vm;
+    return vec2f(mix(1.0, ax, b), mix(1.0, az, b));
 }
 
 fn sigma_u_face(fi : i32) -> f32 {
@@ -719,6 +746,8 @@ fn sigma_w_face(fj : i32) -> f32 {
     return 0.5 * (sigma_pml_y(fj - 1) + sigma_pml_y(fj));
 }
 
+/// CMF10 §2.1.4 and appendix 3.1: x-strip uses σ and φ (Eq. 10–13); y-strip uses γ and ψ (Eq. 21–24).
+/// `pml_eta_rest` gives a flat target surface; rest depth per cell is max(0, η_rest − H) so (h − h_rest) matches the paper form on varying terrain.
 @compute @workgroup_size(16, 16)
 fn pmlStep(@builtin(global_invocation_id) id: vec3u) {
     if (id.x >= simulationSettings.size.x || id.y >= simulationSettings.size.y) { return; }
@@ -728,32 +757,49 @@ fn pmlStep(@builtin(global_invocation_id) id: vec3u) {
     }
     let i = i32(id.x);
     let j = i32(id.y);
-    let sx = sigma_pml_x(i);
-    let sy = sigma_pml_y(j);
-    if (sx <= 0.0 && sy <= 0.0) {
+    let sigma0 = sigma_pml_x(i);
+    let gamma0 = sigma_pml_y(j);
+    if (sigma0 <= 0.0 && gamma0 <= 0.0) {
         textureStore(pmlStateTexture, id.xy, vec4f(0.0));
         return;
     }
     let dt = simulationSettings.dt;
-    let h_rest = simulationSettings.pml_h_rest;
-    let d = simulationSettings.pml_lambda_decay;
-    let g = simulationSettings.pml_lambda_update;
+    let dx = simulationSettings.dx;
+    let eta_rest = simulationSettings.pml_eta_rest;
+    let lam_decay = simulationSettings.pml_lambda_decay;
+    let lam_update = simulationSettings.pml_lambda_update;
     var bw = textureLoad(bedWaterTexture, id.xy);
+    let H = bw.x;
     let h = bw.y;
-    let dh = h - h_rest;
-    let uc = 0.5 * (u_face_at(i, j) + u_face_at(i + 1, j));
-    let wc = 0.5 * (w_face_at(i, j) + w_face_at(i, j + 1));
-    var p = textureLoad(pmlStateTexture, id.xy);
-    p.x = p.x * d + g * sx * dh * dt;
-    p.y = p.y * d + g * sy * dh * dt;
-    p.z = p.z * d + g * sx * uc * dt;
-    p.w = p.w * d + g * sy * wc * dt;
-    let sponge = -(sx + sy) * dh * dt;
-    let mem = -0.25 * g * (p.x + p.y) * dt;
-    let vel_coupling = -0.05 * g * (sx * p.z + sy * p.w) * dt;
-    bw.y = max(0.0, h + sponge + mem + vel_coupling);
+    let h_rest = max(0.0, eta_rest - H);
+    let h_ex = h - h_rest;
+    let p_old = textureLoad(pmlStateTexture, id.xy);
+    var phi = p_old.x;
+    var psi = p_old.y;
+    let uv_c = cell_center_uv(i, j);
+    let dscale = pml_directional_scales(uv_c);
+    let sigma = sigma0 * dscale.x;
+    let gamma = gamma0 * dscale.y;
+    let dwdx = (w_face_at(i, j + 1) - w_face_at(i, j)) / dx;
+    let dudx = (u_face_at(i + 1, j) - u_face_at(i, j)) / dx;
+    var phi_new = 0.0;
+    if (sigma0 > 0.0) {
+        phi_new = (phi - lam_update * sigma * dwdx * dt) * lam_decay;
+    }
+    var psi_new = 0.0;
+    if (gamma0 > 0.0) {
+        psi_new = (psi - lam_update * psi * dudx * dt) * lam_decay;
+    }
+    var dh = 0.0;
+    if (sigma0 > 0.0) {
+        dh += (-sigma * h_ex + phi_new) * dt;
+    }
+    if (gamma0 > 0.0) {
+        dh += (-gamma * h_ex + psi_new) * dt;
+    }
+    bw.y = max(0.0, h + dh);
     textureStore(bedWaterTexture, id.xy, bw);
-    textureStore(pmlStateTexture, id.xy, p);
+    textureStore(pmlStateTexture, id.xy, vec4f(phi_new, psi_new, 0.0, 0.0));
 }
 
 @compute @workgroup_size(16, 16)
@@ -764,11 +810,16 @@ fn pmlDampFaceU(@builtin(global_invocation_id) id: vec3u) {
     if (id.x >= sx || id.y >= sy) { return; }
     let fi = i32(id.x);
     let jc = i32(id.y);
-    let sig = sigma_u_face(fi);
-    if (sig <= 0.0) { return; }
+    let sig0 = sigma_u_face(fi);
+    if (sig0 <= 0.0) { return; }
+    let ic0 = clamp(fi - 1, 0, nx() - 1);
+    let ic1 = clamp(fi, 0, nx() - 1);
+    let uv = 0.5 * (cell_center_uv(ic0, jc) + cell_center_uv(ic1, jc));
+    let cx = pml_directional_scales(uv).x;
+    let sig = sig0 * cx;
     let dt = simulationSettings.dt;
     var u = textureLoad(faceUTexture, id.xy).r;
-    u += -0.5 * sig * u * dt;
+    u += -sig * u * dt;
     textureStore(faceUTexture, id.xy, vec4f(u, 0.0, 0.0, 0.0));
 }
 
@@ -780,11 +831,16 @@ fn pmlDampFaceW(@builtin(global_invocation_id) id: vec3u) {
     if (id.x >= sx || id.y >= sy) { return; }
     let ic = i32(id.x);
     let fj = i32(id.y);
-    let sig = sigma_w_face(fj);
-    if (sig <= 0.0) { return; }
+    let sig0 = sigma_w_face(fj);
+    if (sig0 <= 0.0) { return; }
+    let jc0 = clamp(fj - 1, 0, ny() - 1);
+    let jc1 = clamp(fj, 0, ny() - 1);
+    let uv = 0.5 * (cell_center_uv(ic, jc0) + cell_center_uv(ic, jc1));
+    let cz = pml_directional_scales(uv).y;
+    let sig = sig0 * cz;
     let dt = simulationSettings.dt;
     var wv = textureLoad(faceWTexture, id.xy).r;
-    wv += -0.5 * sig * wv * dt;
+    wv += -sig * wv * dt;
     textureStore(faceWTexture, id.xy, vec4f(wv, 0.0, 0.0, 0.0));
 }
 
