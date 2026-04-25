@@ -14,11 +14,11 @@ The stock pipeline uses your chosen grid edge length as long as it is a non-zero
 
 FFT compute runs on the root [`RenderGraph`](https://docs.rs/bevy_render/latest/bevy_render/render_graph/graph/struct.RenderGraph.html) so it executes once per frame before camera work (the graph ends with `ResolveOutputs` → `CameraDriverLabel`). The chain is `ComputeFFT` → `SpectrumPass` → `ResolveSpectrum` → `ComputeIFFT` → `ResolveOutputs`. Between forward and inverse FFT the graph visits `SpectrumPass`, which is a no-op until something is wired in. Register your custom node on that same root graph, call `splice_spectrum_pass` from plugin `finish`, and reuse `FftBindGroupLayouts::common` to match FFT bindings.
 
-There is also an [ocean](src/ocean/mod.rs) entry point. `OceanPlugin` splices ocean spectrum compute into the FFT graph and registers `OceanSurfaceMaterial`, which displaces a mesh using `FftTextures::spatial_output`. It is a building block, not a complete water renderer.
+There is also an [ocean](src/ocean/mod.rs) entry point. `OceanPlugin` splices ocean spectrum compute into the FFT graph and registers `OceanSurfaceMaterial`, which displaces a mesh using `FftTextures::spatial_output`. Register `FftPlugin` before `OceanPlugin` so plugin `finish` ordering is valid. It is a building block, not a complete water renderer.
 
 The [shallow_water](src/shallow_water/mod.rs) module is separate from the bulk FFT entity path: GPU staggered shallow water (see [docs/shallow_water.md](docs/shallow_water.md)) with a PBR surface example.
 
-The [ewave](src/ewave/mod.rs) module runs Tessendorf-style iWave in k-space with its own FFT buffers; `cargo run --example ewave` shows a periodic heightfield next to the same stock graph path.
+The [ewave](src/ewave/mod.rs) module runs Tessendorf-style iWave in k-space with its own FFT buffers; `cargo run --example ewave` shows a periodic heightfield next to the same stock graph path. Register `FftPlugin` before `EwavePlugin` for the same reason.
 
 ### FFT and k-space indexing
 
@@ -50,7 +50,7 @@ The `fft` example drives `FftSchedule::ForwardThenInverse`. Data starts in spati
 
 Pick `FftSchedule` to control how much runs each frame. `Forward` stops after the transform into C. `Inverse` assumes C is already filled and writes B. `ForwardThenInverse` runs both passes so spectrum buffer C can be edited on the GPU between them.
 
-`FftInputDomain` steers where `FftInputTexture` lands on the CPU each update, either spatial A in `Spatial` mode or spectrum C in `Spectrum` mode. `FftPatternTarget` tells procedural shaders whether to write A or C, in line with the uniform in [`bindings.wgsl`](src/fft/bindings.wgsl). Most apps import from `bevy_fft::prelude`, which also re-exports the common [`ocean`](src/ocean/mod.rs) types when you use the surface material.
+`FftInputDomain` steers where `FftInputTexture` lands on the CPU each update, either spatial A in `Spatial` mode or spectrum C in `Spectrum` mode. `FftPatternTarget` tells procedural shaders whether to write A or C, in line with the uniform in [`bindings.wgsl`](src/fft/bindings.wgsl). `bevy_fft::prelude` re-exports what the in-repo examples use, including `FftInputTexture` and `prepare_fft_bind_groups`. Deeper or rarely used symbols remain on `bevy_fft::fft` and `bevy_fft::fft::resources`.
 
 Workspace buffers use Rgba32Float real and imaginary textures. Radix-2 butterfly stages use `256 × 1` workgroups and a 2D dispatch over half-width butterflies and full grid lines. The WGSL [`c32`](src/complex/c32.wgsl) helpers can pack one complex as two f16 in a single `u32`, but the stock FFT graph is still wired to float storage only. 1D or 3D FFTs, packed uint buffers, and related layout work stay in [`ROADMAP.md`](ROADMAP.md).
 

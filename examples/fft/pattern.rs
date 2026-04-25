@@ -1,4 +1,4 @@
-//! Procedural GPU patterns or PNG inputs through [`bevy_fft::fft::FftInputTexture`] using assets such as `sunflower.png` and `clouds.png`.
+//! Procedural GPU patterns or PNG inputs through [`FftInputTexture`](bevy_fft::fft::FftInputTexture) using assets such as `sunflower.png` and `clouds.png`.
 
 use crate::band_pass::BandPassParams;
 use bevy::{

@@ -26,12 +26,10 @@ mod node;
 pub mod resources;
 
 pub use node::{
-    FftNode, FftSpectrumPassthroughNode, run_forward_fft, run_inverse_fft, splice_after_resolve_outputs,
-    splice_spectrum_pass,
+    FftNode, FftSpectrumPassthroughNode, run_forward_fft, run_inverse_fft,
+    splice_after_resolve_outputs, splice_spectrum_pass,
 };
-pub use resources::{
-    FftPipelines, FftTextures, prepare_fft_bind_groups, prepare_fft_textures,
-};
+pub use resources::{FftPipelines, FftTextures, prepare_fft_bind_groups, prepare_fft_textures};
 
 use node::{FftComputeNode, FftResolveOutputsNode, FftResolveSpectrumNode};
 use resources::{
@@ -103,6 +101,17 @@ mod layout_tests {
         // If this fails, update `bindings.wgsl` so `FftSettings` matches the Rust uniform layout.
         let n = FftSettings::min_size().get() as usize;
         assert_eq!(n, 48, "update bindings.wgsl FftSettings if this changes");
+    }
+
+    #[test]
+    fn fft_settings_from_fft_source_matches_source_fields() {
+        let src = super::FftSource::square_forward_then_inverse(128);
+        let s = super::FftSettings::from_fft_source(&src);
+        assert_eq!(s.size, src.size);
+        assert_eq!(s.orders, src.orders);
+        assert_eq!(s.schedule, src.schedule.to_bits());
+        assert_eq!(s.pattern_target, src.pattern_target as u32);
+        assert_eq!(s.normalization, src.spatial_display_gain);
     }
 
     /// Cheap regression check for the twiddle indexing logic.
@@ -220,6 +229,14 @@ pub enum FftPatternTarget {
     /// Writes spectral data into **C**, which pairs well with a workflow that only runs an inverse FFT.
     SpectrumC = 1,
 }
+
+/// When present on the same entity as [`FftSource`] and [`crate::fft::resources::FftTextures`], the
+/// stock render-graph FFT and resolve passes skip that entity. Use this when a custom render node
+/// drives [`run_forward_fft`](crate::fft::run_forward_fft) and [`run_inverse_fft`](crate::fft::run_inverse_fft)
+/// on that entity’s buffers (for example eWave). Extraction and [`crate::fft::resources::prepare_fft_roots_buffer`]
+/// still run from [`FftSource`].
+#[derive(Component, Clone, Copy, Default, Reflect)]
+pub struct FftSkipStockPipeline;
 
 /// Main-world FFT configuration. The render world mirrors this into [`FftSettings`], [`FftRoots`],
 /// and related extracted components each frame.
@@ -347,23 +364,30 @@ pub struct FftSettings {
     pub normalization: f32,
 }
 
+impl FftSettings {
+    /// Uniform layout for the GPU, matching [`FftSource`] and the `FftSettings` block in `bindings.wgsl`.
+    pub fn from_fft_source(source: &FftSource) -> Self {
+        FftSettings {
+            size: source.size,
+            orders: source.orders,
+            padding: source.padding,
+            schedule: source.schedule.to_bits(),
+            pattern_target: source.pattern_target as u32,
+            window_type: 0,
+            window_strength: 0.0,
+            radial_falloff: 0.0,
+            normalization: source.spatial_display_gain,
+        }
+    }
+}
+
 impl ExtractComponent for FftSettings {
     type QueryData = Read<FftSource>;
     type QueryFilter = ();
     type Out = FftSettings;
 
     fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
-        Some(FftSettings {
-            size: item.size,
-            orders: item.orders,
-            padding: item.padding,
-            schedule: item.schedule.to_bits(),
-            pattern_target: item.pattern_target as u32,
-            window_type: 0,
-            window_strength: 0.0,
-            radial_falloff: 0.0,
-            normalization: item.spatial_display_gain,
-        })
+        Some(FftSettings::from_fft_source(&item))
     }
 }
 
@@ -406,6 +430,7 @@ impl Plugin for FftPlugin {
         // Forward and inverse passes still load from `assets/` so they are easy to tweak.
 
         app.register_type::<FftSource>()
+            .register_type::<FftSkipStockPipeline>()
             .register_type::<FftSchedule>()
             .register_type::<FftInputDomain>()
             .register_type::<FftPatternTarget>()

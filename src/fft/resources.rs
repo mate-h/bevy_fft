@@ -17,7 +17,7 @@ use bevy::{
     utils::once,
 };
 
-use super::{FftInputDomain, FftRoots, FftSettings, FftSource};
+use super::{FftInputDomain, FftRoots, FftSettings, FftSkipStockPipeline, FftSource};
 use crate::{complex::c32, fft::FftInputTexture};
 
 #[derive(Resource)]
@@ -293,14 +293,13 @@ pub fn prepare_fft_bind_groups(
     fft_roots_buffer: Res<FftRootsBuffer>,
     globals_buffer: Res<GlobalsBuffer>,
     gpu_images: Res<RenderAssets<GpuImage>>,
-    query: Query<(Entity, &FftTextures, &FftSettings)>,
+    query: Query<(Entity, &FftTextures, &FftSettings), Without<FftSkipStockPipeline>>,
 ) {
     // `ComponentUniforms<FftSettings>` exists only when at least one entity has an extracted
-    // `FftSettings` (from `FftSource`). Apps that only use a custom sim (e.g. eWave) and never
-    // spawn that component hit this path every frame; that is not an error. Use `RUST_LOG=trace`
-    // to see these diagnostics.
+    // `FftSettings` (from `FftSource`). Apps with no FFT entities hit this path every frame; that
+    // is not an error. Use `RUST_LOG=trace` to see these diagnostics.
     let Some(settings_binding) = fft_uniforms.binding() else {
-        trace!("Skipping entity FftBindGroups: no FftSettings component uniform (common for eWave-only apps)");
+        trace!("Skipping entity FftBindGroups: no FftSettings component uniform");
         return;
     };
 
@@ -448,6 +447,8 @@ pub(crate) fn prepare_fft_roots_buffer(
     query: Query<(&FftRoots, &FftSettings), With<FftSettings>>,
     mut fft_roots_buffer: ResMut<FftRootsBuffer>,
 ) {
+    // One shared GPU storage buffer backs every FFT bind group. All entities must use the same
+    // twiddle table (typical when every `FftSource` shares the forward layout for its `orders`).
     let Ok((roots, _)) = query.single() else {
         return;
     };

@@ -1,4 +1,7 @@
 //! Periodic eWave surface: deep-water-style linear evolution in Fourier space with GPU FFT.
+//!
+//! **Plugin order:** add [`FftPlugin`](bevy_fft::fft::FftPlugin) before [`EwavePlugin`](bevy_fft::ewave::EwavePlugin).
+//! `EwavePlugin::finish` needs FFT render resources; reversing the order panics at startup.
 
 use bevy::{
     camera::Exposure,
@@ -27,11 +30,10 @@ use bevy_egui::{
     EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui,
     input::{EguiWantsInput, write_egui_wants_input_system},
 };
-use bevy_fft::ewave::{
+use bevy_fft::prelude::{
     EwaveController, EwaveMaterialUniform, EwavePlugin, EwaveSurfaceExtension,
-    EwaveSurfaceMaterial, EwaveSurfaceTag,
+    EwaveSurfaceMaterial, EwaveSurfaceTag, FftPlugin,
 };
-use bevy_fft::prelude::*;
 
 const GRID: u32 = 256;
 const PATCH_HALF_EXTENT: f32 = 16.0;
@@ -105,7 +107,7 @@ fn setup(
     mut images: ResMut<Assets<Image>>,
     mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
 ) {
-    let mut controller = EwaveController::new(&mut images, GRID);
+    let mut controller = EwaveController::spawn(&mut commands, &mut images, GRID);
     controller.tile_world = PATCH_TILE_WORLD;
     controller.height_scale = 0.12;
     let h_phi = controller.h_phi().clone();
@@ -163,8 +165,7 @@ fn setup(
 
     commands.spawn((
         Camera3d::default(),
-        Transform::from_translation(patch_center + CAMERA_OFFSET)
-            .looking_at(patch_center, Vec3::Y),
+        Transform::from_translation(patch_center + CAMERA_OFFSET).looking_at(patch_center, Vec3::Y),
         FreeCamera::default(),
         Atmosphere::earthlike(scattering_mediums.add(ScatteringMedium::default())),
         AtmosphereSettings::default(),
@@ -236,6 +237,7 @@ fn pointer_to_grid(
 }
 
 fn ewave_egui_panel(
+    mut commands: Commands,
     mut contexts: EguiContexts,
     mut sun_settings: ResMut<SunLightSettings>,
     mut controller: ResMut<EwaveController>,
@@ -262,7 +264,7 @@ fn ewave_egui_panel(
             .changed()
         {
             let n = n.next_power_of_two().clamp(128, 512);
-            controller.rebuild(&mut images, n);
+            controller.rebuild(&mut commands, &mut images, n);
         }
         ui.separator();
         ui.label("Brush (RMB on patch)");

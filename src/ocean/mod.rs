@@ -1,6 +1,7 @@
 //! Ocean-style mesh displacement driven by the FFT pipeline `spatial_output` texture.
 //!
-//! Add [`OceanPlugin`] after [`crate::fft::FftPlugin`]. Use [`OceanSurfaceMaterial`] ([`ExtendedMaterial`]
+//! Register [`crate::fft::FftPlugin`] **before** [`OceanPlugin`]. `OceanPlugin::finish` expects FFT render
+//! resources to exist; reversing the order will panic at startup. Use [`OceanSurfaceMaterial`] ([`ExtendedMaterial`]
 //! of [`StandardMaterial`] and [`OceanSurfaceExtension`]) on a subdivided plane; drive FFT with
 //! [`OceanSimSettings`] and [`crate::fft::FftSchedule::Inverse`]. One inverse FFT writes height in B,
 //! slopes in R and G, and wind-aligned horizontal chop (scalar) in W.
@@ -46,7 +47,8 @@ use render::{
 };
 
 use crate::fft::{
-    FftSystemSet, prepare_fft_bind_groups, splice_after_resolve_outputs, splice_spectrum_pass,
+    FftPlugin, FftSystemSet, prepare_fft_bind_groups, splice_after_resolve_outputs,
+    splice_spectrum_pass,
 };
 
 /// Same factor as `PM_PEAK_COEFF` in `assets/ocean/init_h0.wgsl` (`ω_pm ≈ this * g / U` in rad/s).
@@ -226,6 +228,10 @@ impl Plugin for OceanPlugin {
     }
 
     fn finish(&self, app: &mut App) {
+        assert!(
+            app.is_plugin_added::<FftPlugin>(),
+            "OceanPlugin requires FftPlugin to be registered first (e.g. add_plugins((FftPlugin, OceanPlugin)))."
+        );
         if app.get_sub_app_mut(RenderApp).is_none() {
             return;
         }
@@ -233,14 +239,6 @@ impl Plugin for OceanPlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
-
-        if render_app
-            .world()
-            .get_resource::<crate::fft::resources::FftBindGroupLayouts>()
-            .is_none()
-        {
-            panic!("OceanPlugin requires FftPlugin (add it before OceanPlugin)");
-        }
 
         render_app
             .init_resource::<OceanComputePipelines>()

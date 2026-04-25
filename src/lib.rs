@@ -4,8 +4,11 @@
 //! After the resolve step, [`fft::FftTextures::spatial_output`] holds the spatial result and
 //! [`fft::FftTextures::power_spectrum`] summarizes the spectrum for display.
 //!
-//! Import the common API from [`prelude`], which includes FFT types, extension helpers such as
-//! [`fft::FftBindGroupLayouts`], and the usual [`ocean`] surface types.
+//! Import the usual surface from [`prelude`]: [`fft::FftPlugin`], [`fft::FftSource`], extracted types such as
+//! [`fft::FftSettings`] and [`fft::FftTextures`], graph splice helpers, [`fft::FftInputTexture`] and
+//! [`fft::prepare_fft_bind_groups`] for the `fft` example, plus [`ocean`], [`ewave`], and [`shallow_water`]
+//! surface types. Twiddle helpers, [`fft::FftSpectrumPassthroughNode`], manual FFT dispatch, and other
+//! internals stay on [`fft`] and [`fft::resources`].
 //!
 //! **Main world vs render world.** [`fft::FftSource`] is the component you spawn and edit in the
 //! main app. Each frame it is extracted into [`fft::FftSettings`], [`fft::FftRoots`], and related
@@ -17,7 +20,12 @@
 //!
 //! The [`ocean`] module registers [`ocean::OceanSurfaceMaterial`] ([`bevy::pbr::ExtendedMaterial`] over
 //! [`bevy::pbr::StandardMaterial`] plus [`ocean::OceanSurfaceExtension`]) and displaces a mesh using
-//! [`fft::FftTextures::spatial_output`]. Broader ocean and bloom plans live in **`ROADMAP.md`**.
+//! [`fft::FftTextures::spatial_output`]. Register [`fft::FftPlugin`] before [`ocean::OceanPlugin`] or
+//! [`ewave::EwavePlugin`] so each domain plugin’s `finish` runs after FFT render setup (see those modules).
+//! The GPU twiddle table uses one shared
+//! [`fft::resources::FftRootsBuffer`] for all [`fft::FftSource`] entities. Every active transform
+//! must use the same roots layout (typical when all grids share the stock forward table for their `orders`).
+//! Broader ocean and bloom plans live in **`ROADMAP.md`**.
 
 pub mod complex;
 pub mod ewave;

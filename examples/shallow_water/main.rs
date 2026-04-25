@@ -27,9 +27,10 @@ use bevy_egui::{
     EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui,
     input::{EguiWantsInput, write_egui_wants_input_system},
 };
-use bevy_fft::shallow_water::{
+use bevy_fft::prelude::{
     ShallowWaterBorder, ShallowWaterController, ShallowWaterMaterialUniform, ShallowWaterPlugin,
     ShallowWaterSurfaceExtension, ShallowWaterSurfaceMaterial, ShallowWaterSurfaceTag,
+    round_particle_count,
 };
 
 const GRID: u32 = 256;
@@ -233,7 +234,7 @@ fn shallow_water_egui_panel(
             .add(egui::Slider::new(&mut particles, 64..=262_144u32).text("particles"))
             .changed()
         {
-            controller.particle_count = bevy_fft::shallow_water::round_particle_count(particles);
+            controller.particle_count = round_particle_count(particles);
         }
         ui.separator();
         ui.label("Brush");

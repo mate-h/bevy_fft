@@ -1,5 +1,6 @@
 //! eWave: Tessendorf exponential iWave integrator in k-space (FFT) with periodic boundary.
-//! Requires [`FftPlugin`](crate::fft::FftPlugin) (pulled in automatically by [`EwavePlugin`]).
+//! Register [`FftPlugin`](crate::fft::FftPlugin) **before** [`EwavePlugin`]. Otherwise `EwavePlugin::finish`
+//! runs too early and the render world does not have [`crate::fft::resources::FftBindGroupLayouts`] yet.
 //!
 //! FFT bin layout: forward and inverse passes use the usual stock layout (DC at index `(0,0)` on
 //! each axis, negative frequencies in the upper index range). Per-bin k-space code must map `(i, j)` to
@@ -18,44 +19,61 @@ pub mod shaders {
 
 pub use render::{
     EwaveGpuResources, EwavePipelines, EwaveSimLabel, EwaveSimNode, EwaveSimUniform,
-    plug_ewave_render_app, prepare_ewave_fft_roots_buffer, prepare_ewave_gpu,
-    splice_ewave_before_camera,
+    plug_ewave_render_app, prepare_ewave_gpu, splice_ewave_before_camera,
 };
 
 use bevy::{
     asset::load_internal_asset,
+    ecs::{query::QueryItem, system::lifetimeless::Read},
     image::Image,
-    pbr::{
-        ExtendedMaterial, MaterialExtension, MaterialPlugin, MeshMaterial3d, StandardMaterial,
-    },
+    pbr::{ExtendedMaterial, MaterialExtension, MaterialPlugin, MeshMaterial3d, StandardMaterial},
     prelude::*,
     reflect::{Reflect, TypePath},
     render::{
         RenderApp,
+        extract_component::{ExtractComponent, ExtractComponentPlugin},
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_resource::{AsBindGroup, ShaderType},
     },
     shader::{Shader, ShaderRef},
 };
 
-use crate::fft::FftPlugin;
+use crate::fft::{FftPlugin, FftSkipStockPipeline};
 
-/// All GPU images for the eWave sim (one `Rg` for spatial `h` and `φ`, eight FFT buffer planes, four spectra).
-#[derive(Clone, Reflect)]
-pub struct EwaveFftTextures {
+/// Marks the main-world entity that carries the eWave grid ([`FftSource`](crate::fft::FftSource),
+/// [`FftTextures`](crate::fft::resources::FftTextures), and [`EwaveGridImages`]).
+#[derive(Component, Clone, Copy, Default, Reflect)]
+pub struct EwaveSimRoot;
+
+impl ExtractComponent for EwaveSimRoot {
+    type QueryData = Read<EwaveSimRoot>;
+    type QueryFilter = ();
+    type Out = EwaveSimRoot;
+
+    fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
+        Some(*item)
+    }
+}
+
+/// GPU images used by eWave outside the shared [`FftTextures`](crate::fft::resources::FftTextures) set:
+/// spatial `h` and `φ`, and the four spectrum planes.
+#[derive(Component, Clone, Reflect)]
+pub struct EwaveGridImages {
     pub h_phi: Handle<Image>,
-    pub buffer_a_re: Handle<Image>,
-    pub buffer_a_im: Handle<Image>,
-    pub buffer_b_re: Handle<Image>,
-    pub buffer_b_im: Handle<Image>,
-    pub buffer_c_re: Handle<Image>,
-    pub buffer_c_im: Handle<Image>,
-    pub buffer_d_re: Handle<Image>,
-    pub buffer_d_im: Handle<Image>,
     pub h_hat_re: Handle<Image>,
     pub h_hat_im: Handle<Image>,
     pub p_hat_re: Handle<Image>,
     pub p_hat_im: Handle<Image>,
+}
+
+impl ExtractComponent for EwaveGridImages {
+    type QueryData = Read<EwaveGridImages>;
+    type QueryFilter = ();
+    type Out = EwaveGridImages;
+
+    fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
+        Some(item.clone())
+    }
 }
 
 fn rgba32(n: u32) -> Image {
@@ -79,18 +97,10 @@ fn rgba32(n: u32) -> Image {
     image
 }
 
-impl EwaveFftTextures {
+impl EwaveGridImages {
     fn new(images: &mut Assets<Image>, n: u32) -> Self {
         Self {
             h_phi: images.add(ewave_h_phi_image(n, n)),
-            buffer_a_re: images.add(rgba32(n)),
-            buffer_a_im: images.add(rgba32(n)),
-            buffer_b_re: images.add(rgba32(n)),
-            buffer_b_im: images.add(rgba32(n)),
-            buffer_c_re: images.add(rgba32(n)),
-            buffer_c_im: images.add(rgba32(n)),
-            buffer_d_re: images.add(rgba32(n)),
-            buffer_d_im: images.add(rgba32(n)),
             h_hat_re: images.add(rgba32(n)),
             h_hat_im: images.add(rgba32(n)),
             p_hat_re: images.add(rgba32(n)),
@@ -99,12 +109,15 @@ impl EwaveFftTextures {
     }
 }
 
-/// Main-world state; extracted to the render world for simulation and materials.
+/// Main-world simulation parameters; extracted to the render world. The FFT grid lives on
+/// [`EwaveSimRoot`] as [`crate::fft::FftSource`] plus [`crate::fft::resources::FftTextures`].
 #[derive(Resource, Clone, ExtractResource, Reflect)]
 pub struct EwaveController {
+    /// Entity with [`EwaveSimRoot`], [`FftSkipStockPipeline`], [`crate::fft::FftSource`], [`EwaveGridImages`], and [`crate::fft::resources::FftTextures`].
+    pub sim_entity: Entity,
+    /// Cached [`EwaveGridImages::h_phi`] for materials and setup.
+    pub h_phi: Handle<Image>,
     pub n: u32,
-    pub fft: crate::fft::FftSource,
-    pub textures: EwaveFftTextures,
     /// World width of the patch (same units as `g`).
     pub tile_world: f32,
     pub g: f32,
@@ -120,14 +133,19 @@ pub struct EwaveController {
 }
 
 impl EwaveController {
-    pub fn new(images: &mut Assets<Image>, n: u32) -> Self {
+    /// Spawns the FFT entity with [`crate::fft::FftSource::try_square_forward_then_inverse`].
+    pub fn spawn(commands: &mut Commands, images: &mut Assets<Image>, n: u32) -> Self {
+        let grid = EwaveGridImages::new(images, n);
+        let h_phi = grid.h_phi.clone();
         let fft = crate::fft::FftSource::try_square_forward_then_inverse(n)
             .expect("eWave needs power-of-two grid size");
-        let textures = EwaveFftTextures::new(images, n);
+        let sim_entity = commands
+            .spawn((EwaveSimRoot, FftSkipStockPipeline, fft, grid))
+            .id();
         Self {
+            sim_entity,
+            h_phi,
             n,
-            fft,
-            textures,
             tile_world: 32.0,
             g: 9.81,
             dt: 0.04,
@@ -142,19 +160,39 @@ impl EwaveController {
         }
     }
 
-    pub fn rebuild(&mut self, images: &mut Assets<Image>, n: u32) {
+    pub fn rebuild(&mut self, commands: &mut Commands, images: &mut Assets<Image>, n: u32) {
         if n == self.n {
             return;
         }
-        self.n = n;
-        self.fft = crate::fft::FftSource::try_square_forward_then_inverse(n)
-            .expect("eWave needs power-of-two grid size");
-        self.textures = EwaveFftTextures::new(images, n);
-        self.sim_apply_serial = self.sim_apply_serial.wrapping_add(1);
+        let tile_world = self.tile_world;
+        let g = self.g;
+        let dt = self.dt;
+        let height_scale = self.height_scale;
+        let paused = self.paused;
+        let brush_active = self.brush_active;
+        let brush_radius = self.brush_radius;
+        let brush_strength = self.brush_strength;
+        let pointer = self.pointer;
+        let pointer_prev = self.pointer_prev;
+        let sim_apply_serial = self.sim_apply_serial.wrapping_add(1);
+        commands.entity(self.sim_entity).despawn();
+        let mut next = Self::spawn(commands, images, n);
+        next.tile_world = tile_world;
+        next.g = g;
+        next.dt = dt;
+        next.height_scale = height_scale;
+        next.paused = paused;
+        next.brush_active = brush_active;
+        next.brush_radius = brush_radius;
+        next.brush_strength = brush_strength;
+        next.pointer = pointer;
+        next.pointer_prev = pointer_prev;
+        next.sim_apply_serial = sim_apply_serial;
+        *self = next;
     }
 
     pub fn h_phi(&self) -> &Handle<Image> {
-        &self.textures.h_phi
+        &self.h_phi
     }
 }
 
@@ -170,13 +208,12 @@ fn ewave_h_phi_image(w: u32, h: u32) -> Image {
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        &[0u8; 16],
+        &[0; 16],
         TextureFormat::Rgba32Float,
         RenderAssetUsages::default(),
     );
-    image.texture_descriptor.usage = TextureUsages::STORAGE_BINDING
-        | TextureUsages::TEXTURE_BINDING
-        | TextureUsages::COPY_DST;
+    image.texture_descriptor.usage =
+        TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
     image
 }
 
@@ -249,16 +286,13 @@ fn sync_ewave_mesh_material(
     mat.extension.settings.grid_size = g;
     mat.extension.settings.tile_world_size = sim.tile_world;
     mat.extension.settings.height_scale = sim.height_scale;
-    mat.extension.h_phi = sim.textures.h_phi.clone();
+    mat.extension.h_phi = sim.h_phi.clone();
 }
 
 pub struct EwavePlugin;
 
 impl Plugin for EwavePlugin {
     fn build(&self, app: &mut App) {
-        if !app.is_plugin_added::<FftPlugin>() {
-            app.add_plugins(FftPlugin);
-        }
         load_internal_asset!(
             app,
             shaders::EWAVE_SURFACE,
@@ -266,14 +300,21 @@ impl Plugin for EwavePlugin {
             Shader::from_wgsl
         );
         app.register_type::<EwaveController>()
-            .register_type::<EwaveFftTextures>()
+            .register_type::<EwaveSimRoot>()
+            .register_type::<EwaveGridImages>()
             .register_type::<EwaveMaterialUniform>()
             .add_plugins(ExtractResourcePlugin::<EwaveController>::default())
+            .add_plugins(ExtractComponentPlugin::<EwaveSimRoot>::default())
+            .add_plugins(ExtractComponentPlugin::<EwaveGridImages>::default())
             .add_plugins(MaterialPlugin::<EwaveSurfaceMaterial>::default())
             .add_systems(PostUpdate, sync_ewave_mesh_material);
     }
 
     fn finish(&self, app: &mut App) {
+        assert!(
+            app.is_plugin_added::<FftPlugin>(),
+            "EwavePlugin requires FftPlugin to be registered first (e.g. add_plugins((FftPlugin, EwavePlugin)))."
+        );
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             plug_ewave_render_app(render_app);
         }

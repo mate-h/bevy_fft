@@ -3,10 +3,13 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use bevy::app::SubApp;
+use bevy::ecs::query::QueryState;
 use bevy::ecs::world::FromWorld;
 use bevy::log::warn;
 use bevy::render::graph::CameraDriverLabel;
-use bevy::render::render_graph::{Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel};
+use bevy::render::render_graph::{
+    Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel,
+};
 use bevy::render::render_resource::binding_types::{texture_storage_2d, uniform_buffer};
 use bevy::render::render_resource::encase::internal::{WriteInto, Writer};
 use bevy::render::render_resource::{
@@ -19,16 +22,14 @@ use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::{
     prelude::*,
     render::{
-        Render, RenderSystems,
-        globals::GlobalsBuffer,
-        render_asset::RenderAssets,
+        Render, RenderSystems, globals::GlobalsBuffer, render_asset::RenderAssets,
         texture::GpuImage,
     },
 };
 
-use crate::fft::resources::{FftBindGroupLayouts, FftPipelines, FftRootsBuffer};
-use crate::fft::{run_forward_fft, run_inverse_fft, FftNode, FftRoots, FftSettings, FftSource};
-use crate::ewave::EwaveController;
+use crate::ewave::{EwaveController, EwaveGridImages, EwaveSimRoot};
+use crate::fft::resources::{FftBindGroupLayouts, FftPipelines, FftTextures};
+use crate::fft::{FftNode, FftSettings, run_forward_fft, run_inverse_fft};
 
 #[repr(C)]
 #[derive(Copy, Clone, Default, ShaderType)]
@@ -46,20 +47,6 @@ pub struct EwaveSimUniform {
     pub pointer_y: f32,
     pub pointer_ox: f32,
     pub pointer_oy: f32,
-}
-
-fn fft_settings_from_source(s: &FftSource) -> FftSettings {
-    FftSettings {
-        size: s.size,
-        orders: s.orders,
-        padding: s.padding,
-        schedule: s.schedule.to_bits(),
-        pattern_target: s.pattern_target as u32,
-        window_type: 0,
-        window_strength: 0.0,
-        radial_falloff: 0.0,
-        normalization: s.spatial_display_gain,
-    }
 }
 
 fn write_uniform<T: ShaderType + WriteInto>(queue: &RenderQueue, buffer: &Buffer, v: &T) {
@@ -195,27 +182,6 @@ impl EwaveGpuResources {
     }
 }
 
-/// Pushes twiddle data into [`FftRootsBuffer`] when the app has no `FftSource` entity, because
-/// [`prepare_fft_roots_buffer`](crate::fft::resources::prepare_fft_roots_buffer) no-ops in that
-/// case and the storage buffer may never be uploaded, so `binding()` stays `None`. eWave reuses
-/// the same `roots` field as a component `FftSource` would.
-pub fn prepare_ewave_fft_roots_buffer(
-    device: Res<RenderDevice>,
-    queue: Res<RenderQueue>,
-    has_fft_entity: Query<(), With<FftSettings>>,
-    controller: Res<EwaveController>,
-    mut fft_roots_buffer: ResMut<FftRootsBuffer>,
-) {
-    if has_fft_entity.iter().next().is_some() {
-        return;
-    }
-    let data = FftRoots {
-        roots: controller.fft.roots,
-    };
-    fft_roots_buffer.buffer.set(data);
-    fft_roots_buffer.buffer.write_buffer(&device, &queue);
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_ewave_gpu(
     render_device: Res<RenderDevice>,
@@ -227,8 +193,9 @@ pub fn prepare_ewave_gpu(
     pipeline_cache: Res<PipelineCache>,
     layouts: Res<FftBindGroupLayouts>,
     globals: Res<GlobalsBuffer>,
-    roots: Res<FftRootsBuffer>,
+    roots: Res<crate::fft::resources::FftRootsBuffer>,
     gpu_imgs: Res<RenderAssets<GpuImage>>,
+    grid_query: Query<(&FftTextures, &EwaveGridImages, &FftSettings), With<EwaveSimRoot>>,
 ) {
     let n = controller.n;
     let n_changed = gpu.last_n != n;
@@ -239,12 +206,7 @@ pub fn prepare_ewave_gpu(
         gpu.ewave_bind_group = None;
     }
     let need_force_buffers = n_changed | apply_changed | gpu.fft_settings_buffer.is_none();
-    gpu.ensure_uniform_buffers(
-        &render_device,
-        n,
-        n_changed,
-        need_force_buffers,
-    );
+    gpu.ensure_uniform_buffers(&render_device, n, n_changed, need_force_buffers);
 
     let Some(fs) = gpu.fft_settings_buffer.as_ref() else {
         return;
@@ -253,8 +215,11 @@ pub fn prepare_ewave_gpu(
         return;
     };
 
-    let fsu = fft_settings_from_source(&controller.fft);
-    write_uniform(&render_queue, fs, &fsu);
+    let Ok((textures, t, fs_comp)) = grid_query.single() else {
+        return;
+    };
+
+    write_uniform(&render_queue, fs, fs_comp);
     let u = EwaveSimUniform {
         n: controller.n,
         _pad0: 0,
@@ -278,31 +243,30 @@ pub fn prepare_ewave_gpu(
     let Some(rbind) = roots.buffer.binding() else {
         return;
     };
-    let t = &controller.textures;
-    let Some(a_re) = gpu_imgs.get(&t.buffer_a_re) else {
+    let Some(a_re) = gpu_imgs.get(&textures.buffer_a_re) else {
         gpu.fft_bind_group = None;
         gpu.ewave_bind_group = None;
         return;
     };
-    let Some(a_im) = gpu_imgs.get(&t.buffer_a_im) else {
+    let Some(a_im) = gpu_imgs.get(&textures.buffer_a_im) else {
         return;
     };
-    let Some(b_re) = gpu_imgs.get(&t.buffer_b_re) else {
+    let Some(b_re) = gpu_imgs.get(&textures.buffer_b_re) else {
         return;
     };
-    let Some(b_im) = gpu_imgs.get(&t.buffer_b_im) else {
+    let Some(b_im) = gpu_imgs.get(&textures.buffer_b_im) else {
         return;
     };
-    let Some(c_re) = gpu_imgs.get(&t.buffer_c_re) else {
+    let Some(c_re) = gpu_imgs.get(&textures.buffer_c_re) else {
         return;
     };
-    let Some(c_im) = gpu_imgs.get(&t.buffer_c_im) else {
+    let Some(c_im) = gpu_imgs.get(&textures.buffer_c_im) else {
         return;
     };
-    let Some(d_re) = gpu_imgs.get(&t.buffer_d_re) else {
+    let Some(d_re) = gpu_imgs.get(&textures.buffer_d_re) else {
         return;
     };
-    let Some(d_im) = gpu_imgs.get(&t.buffer_d_im) else {
+    let Some(d_im) = gpu_imgs.get(&textures.buffer_d_im) else {
         return;
     };
     let Some(hp) = gpu_imgs.get(&t.h_phi) else {
@@ -381,15 +345,23 @@ fn dispatch_ewave(
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
 pub struct EwaveSimLabel;
 
-pub struct EwaveSimNode;
+pub struct EwaveSimNode {
+    fft_settings: QueryState<&'static FftSettings, With<EwaveSimRoot>>,
+}
 
 impl FromWorld for EwaveSimNode {
-    fn from_world(_: &mut World) -> Self {
-        Self
+    fn from_world(world: &mut World) -> Self {
+        Self {
+            fft_settings: QueryState::new(world),
+        }
     }
 }
 
 impl Node for EwaveSimNode {
+    fn update(&mut self, world: &mut World) {
+        self.fft_settings.update_archetypes(world);
+    }
+
     fn run(
         &self,
         _ctx: &mut RenderGraphContext,
@@ -403,6 +375,10 @@ impl Node for EwaveSimNode {
         let gpu_res = world.resource::<EwaveGpuResources>();
         let ts = world.resource::<EwaveTimestamp>();
 
+        let Some(settings) = self.fft_settings.iter_manual(world).next() else {
+            return Ok(());
+        };
+
         let Some(fft) = gpu_res.fft_bind_group.as_ref() else {
             return Ok(());
         };
@@ -411,11 +387,8 @@ impl Node for EwaveSimNode {
         };
         let n = controller.n;
         let wgn = wg2(n);
-        let settings = fft_settings_from_source(&controller.fft);
         let apply_clear = controller.sim_apply_serial
-            != gpu_res
-                .last_cleared_apply_serial
-                .load(Ordering::Relaxed);
+            != gpu_res.last_cleared_apply_serial.load(Ordering::Relaxed);
 
         let enc = render_context.command_encoder();
         {
@@ -424,41 +397,26 @@ impl Node for EwaveSimNode {
                 ..default()
             });
             if apply_clear {
-                dispatch_ewave(
-                    &mut pass,
-                    &cache,
-                    pl_ew.clear_spatial,
-                    fft,
-                    ew,
-                    wgn,
-                );
-                gpu_res.last_cleared_apply_serial.store(
-                    controller.sim_apply_serial,
-                    Ordering::Relaxed,
-                );
+                dispatch_ewave(&mut pass, &cache, pl_ew.clear_spatial, fft, ew, wgn);
+                gpu_res
+                    .last_cleared_apply_serial
+                    .store(controller.sim_apply_serial, Ordering::Relaxed);
             }
 
             if !controller.paused {
                 dispatch_ewave(&mut pass, &cache, pl_ew.pack_h, fft, ew, wgn);
-                run_forward_fft(pl_fft, &cache, &mut pass, fft, &settings);
+                run_forward_fft(pl_fft, &cache, &mut pass, fft, settings);
                 dispatch_ewave(&mut pass, &cache, pl_ew.copy_c_h, fft, ew, wgn);
                 dispatch_ewave(&mut pass, &cache, pl_ew.pack_phi, fft, ew, wgn);
-                run_forward_fft(pl_fft, &cache, &mut pass, fft, &settings);
+                run_forward_fft(pl_fft, &cache, &mut pass, fft, settings);
                 dispatch_ewave(&mut pass, &cache, pl_ew.copy_c_p, fft, ew, wgn);
                 dispatch_ewave(&mut pass, &cache, pl_ew.ewave_k, fft, ew, wgn);
                 dispatch_ewave(&mut pass, &cache, pl_ew.copy_h_c, fft, ew, wgn);
-                run_inverse_fft(pl_fft, &cache, &mut pass, fft, &settings);
+                run_inverse_fft(pl_fft, &cache, &mut pass, fft, settings);
                 dispatch_ewave(&mut pass, &cache, pl_ew.extract_b_h, fft, ew, wgn);
                 dispatch_ewave(&mut pass, &cache, pl_ew.copy_p_c, fft, ew, wgn);
-                run_inverse_fft(pl_fft, &cache, &mut pass, fft, &settings);
-                dispatch_ewave(
-                    &mut pass,
-                    &cache,
-                    pl_ew.extract_b_phi,
-                    fft,
-                    ew,
-                    wgn,
-                );
+                run_inverse_fft(pl_fft, &cache, &mut pass, fft, settings);
+                dispatch_ewave(&mut pass, &cache, pl_ew.extract_b_phi, fft, ew, wgn);
             }
             dispatch_ewave(&mut pass, &cache, pl_ew.brush, fft, ew, wgn);
         }
@@ -479,7 +437,9 @@ pub fn splice_ewave_before_camera(world: &mut World) {
         .remove_node_edge(FftNode::ResolveOutputs, CameraDriverLabel)
         .is_err()
     {
-        warn!("splice_ewave_before_camera: could not remove ResolveOutputs → CameraDriver edge. Register FftPlugin before EwavePlugin::finish.");
+        warn!(
+            "splice_ewave_before_camera: could not remove ResolveOutputs → CameraDriver edge. Register FftPlugin before EwavePlugin::finish."
+        );
         return;
     }
     let user = EwaveSimLabel.intern();
@@ -494,16 +454,9 @@ pub fn plug_ewave_render_app(render_app: &mut SubApp) {
         .init_resource::<EwaveGpuResources>()
         .add_systems(
             Render,
-            prepare_ewave_fft_roots_buffer
-                .in_set(RenderSystems::Prepare)
-                .after(crate::fft::resources::prepare_fft_roots_buffer),
-        )
-        .add_systems(
-            Render,
             prepare_ewave_gpu
                 .in_set(RenderSystems::PrepareBindGroups)
-                .after(crate::fft::resources::prepare_fft_resolve_bind_groups)
-                .after(prepare_ewave_fft_roots_buffer),
+                .after(crate::fft::resources::prepare_fft_resolve_bind_groups),
         );
     render_app
         .world_mut()
