@@ -75,5 +75,5 @@ fn resolve_spatial_from_b(@builtin(global_invocation_id) gid: vec3<u32>) {
     let spatial = textureLoad(spatial_b_re, ip);
     let n = settings.normalization;
     let s = vec4<f32>(spatial.x * n, spatial.y * n, spatial.z * n, spatial.w * n);
-    textureStore(spatial_output_out, pos, s);
+    textureStore(spatial_output_out, pos, vec4<f32>(s.xyz, 1.0));
 }
