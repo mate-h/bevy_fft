@@ -18,3 +18,7 @@ pub use crate::ocean::{
     OceanH0Uniform, OceanMaterialUniform, OceanPlugin, OceanSimSettings, OceanSurfaceExtension,
     OceanSurfaceMaterial, OceanSurfaceTag,
 };
+pub use crate::ewave::{
+    EwaveController, EwaveMaterialUniform, EwavePlugin, EwaveSurfaceExtension, EwaveSurfaceMaterial,
+    EwaveSurfaceTag,
+};

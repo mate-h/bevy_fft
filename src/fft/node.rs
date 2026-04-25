@@ -182,7 +182,8 @@ fn fft_dispatch_copy(
     pass.dispatch_workgroups(gx, gy, 1);
 }
 
-fn run_forward_fft(
+/// Forward 2D FFT: data must be in buffer **A**; spectrum ends in **C** (for real-to-complex style packing, put signal in A_re channel 0, A_im 0).
+pub fn run_forward_fft(
     pipelines: &FftPipelines,
     pipeline_cache: &PipelineCache,
     pass: &mut ComputePass<'_>,
@@ -238,7 +239,8 @@ fn run_forward_fft(
     }
 }
 
-fn run_inverse_fft(
+/// Inverse 2D FFT: spectrum in **C**; result real parts primarily in **B** after the pass.
+pub fn run_inverse_fft(
     pipelines: &FftPipelines,
     pipeline_cache: &PipelineCache,
     pass: &mut ComputePass<'_>,

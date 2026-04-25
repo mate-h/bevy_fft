@@ -26,13 +26,16 @@ mod node;
 pub mod resources;
 
 pub use node::{
-    FftNode, FftSpectrumPassthroughNode, splice_after_resolve_outputs, splice_spectrum_pass,
+    FftNode, FftSpectrumPassthroughNode, run_forward_fft, run_inverse_fft, splice_after_resolve_outputs,
+    splice_spectrum_pass,
 };
-pub use resources::{FftTextures, prepare_fft_bind_groups, prepare_fft_textures};
+pub use resources::{
+    FftPipelines, FftTextures, prepare_fft_bind_groups, prepare_fft_textures,
+};
 
 use node::{FftComputeNode, FftResolveOutputsNode, FftResolveSpectrumNode};
 use resources::{
-    FftBindGroupLayouts, FftPipelines, FftRootsBuffer, copy_input_textures_to_fft_buffers,
+    FftBindGroupLayouts, FftRootsBuffer, copy_input_textures_to_fft_buffers,
     prepare_fft_resolve_bind_groups, prepare_fft_roots_buffer,
 };
 

@@ -3,7 +3,7 @@ use std::num::NonZero;
 use bevy::{
     asset::{AssetServer, Assets, Handle, RenderAssetUsages},
     image::Image,
-    log::{info, warn},
+    log::{info, trace, warn},
     prelude::*,
     render::{
         extract_component::{ComponentUniforms, ExtractComponent},
@@ -71,7 +71,7 @@ impl FromWorld for FftBindGroupLayouts {
 }
 
 #[derive(Resource)]
-pub(crate) struct FftPipelines {
+pub struct FftPipelines {
     pub forward_br_horizontal: CachedComputePipelineId,
     pub forward_br_vertical: CachedComputePipelineId,
     pub radix2_dit: CachedComputePipelineId,
@@ -295,18 +295,22 @@ pub fn prepare_fft_bind_groups(
     gpu_images: Res<RenderAssets<GpuImage>>,
     query: Query<(Entity, &FftTextures, &FftSettings)>,
 ) {
+    // `ComponentUniforms<FftSettings>` exists only when at least one entity has an extracted
+    // `FftSettings` (from `FftSource`). Apps that only use a custom sim (e.g. eWave) and never
+    // spawn that component hit this path every frame; that is not an error. Use `RUST_LOG=trace`
+    // to see these diagnostics.
     let Some(settings_binding) = fft_uniforms.binding() else {
-        info!("FftSettings uniform buffer missing, skipping bind group creation");
+        trace!("Skipping entity FftBindGroups: no FftSettings component uniform (common for eWave-only apps)");
         return;
     };
 
     let Some(roots_binding) = fft_roots_buffer.buffer.binding() else {
-        info!("FftRootsBuffer buffer missing, skipping bind group creation");
+        trace!("Skipping entity FftBindGroups: FftRootsBuffer not ready for binding");
         return;
     };
 
     let Some(globals_binding) = globals_buffer.buffer.binding() else {
-        info!("GlobalsBuffer buffer missing, skipping bind group creation");
+        trace!("Skipping entity FftBindGroups: GlobalsBuffer not ready for binding");
         return;
     };
 

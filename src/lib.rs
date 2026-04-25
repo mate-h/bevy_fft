@@ -20,6 +20,7 @@
 //! [`fft::FftTextures::spatial_output`]. Broader ocean and bloom plans live in **`ROADMAP.md`**.
 
 pub mod complex;
+pub mod ewave;
 pub mod fft;
 pub mod ocean;
 pub mod prelude;
