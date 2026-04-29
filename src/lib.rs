@@ -6,7 +6,7 @@
 //!
 //! Import the usual surface from [`prelude`]: [`fft::FftPlugin`], [`fft::FftSource`], extracted types such as
 //! [`fft::FftSettings`] and [`fft::FftTextures`], graph splice helpers, [`fft::FftInputTexture`] and
-//! [`fft::prepare_fft_bind_groups`] for the `fft` example, plus [`ocean`], [`ewave`], and [`shallow_water`]
+//! [`fft::prepare_fft_bind_groups`] for the `fft` example, plus [`ocean`], [`ewave`], [`dispersive`], and [`shallow_water`]
 //! surface types. Twiddle helpers, [`fft::FftSpectrumPassthroughNode`], manual FFT dispatch, and other
 //! internals stay on [`fft`] and [`fft::resources`].
 //!
@@ -28,6 +28,7 @@
 //! Broader ocean and bloom plans live in **`ROADMAP.md`**.
 
 pub mod complex;
+pub mod dispersive;
 pub mod ewave;
 pub mod fft;
 pub mod ocean;

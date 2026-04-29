@@ -27,6 +27,11 @@ name = "ewave"
 path = "examples/ewave/main.rs"
 required-features = ["free_camera"]
 
+[[example]]
+name = "dispersive"
+path = "examples/dispersive/main.rs"
+required-features = ["free_camera"]
+
 [dev-dependencies]
 bevy_egui = "0.39"
 

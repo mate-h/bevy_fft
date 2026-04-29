@@ -5,6 +5,10 @@
 //! Twiddle helpers, [`crate::fft::FftSpectrumPassthroughNode`], [`crate::fft::run_forward_fft`],
 //! [`crate::fft::run_inverse_fft`], and other internals remain on [`crate::fft`] and [`crate::fft::resources`].
 
+pub use crate::dispersive::{
+    DispersiveController, DispersiveGridImages, DispersiveMaterialUniform, DispersivePlugin,
+    DispersiveSimRoot, DispersiveSurfaceExtension, DispersiveSurfaceMaterial, DispersiveSurfaceTag,
+};
 pub use crate::ewave::{
     EwaveController, EwaveGridImages, EwaveMaterialUniform, EwavePlugin, EwaveSimRoot,
     EwaveSurfaceExtension, EwaveSurfaceMaterial, EwaveSurfaceTag,
