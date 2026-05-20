@@ -61,7 +61,7 @@ fn resolve_power_spectrum_from_c(@builtin(global_invocation_id) gid: vec3<u32>) 
     textureStore(power_spectrum_out, pos, vec4<f32>(c, 1.0));
 }
 
-// Spatial preview from **B** after inverse FFT. Opaque alpha keeps 2D sprites visible.
+// Spatial output from **B** after inverse FFT. RGB is slopes and elevation; alpha is simulation data (e.g. ocean chop).
 @compute
 @workgroup_size(16, 16, 1)
 fn resolve_spatial_from_b(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -75,5 +75,5 @@ fn resolve_spatial_from_b(@builtin(global_invocation_id) gid: vec3<u32>) {
     let spatial = textureLoad(spatial_b_re, ip);
     let n = settings.normalization;
     let s = vec4<f32>(spatial.x * n, spatial.y * n, spatial.z * n, spatial.w * n);
-    textureStore(spatial_output_out, pos, vec4<f32>(s.xyz, 1.0));
+    textureStore(spatial_output_out, pos, s);
 }

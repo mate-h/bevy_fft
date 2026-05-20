@@ -256,7 +256,7 @@ pub struct FftSource {
     pub input_domain: FftInputDomain,
     /// Where generated patterns should write, either **A** or **C**, independent of the schedule.
     pub pattern_target: FftPatternTarget,
-    /// Scales the resolved spatial preview. The underlying FFT buffers stay untouched.
+    /// Scales values written to [`crate::fft::resources::FftTextures::spatial_output`]. FFT buffers stay untouched.
     pub spatial_display_gain: f32,
 }
 
