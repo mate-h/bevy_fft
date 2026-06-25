@@ -54,7 +54,7 @@ struct FftPushConstants {
     flags: u32,
 }
 
-var<push_constant> pc: FftPushConstants;
+var<immediate> pc: FftPushConstants;
 
 const FLAG_INVERSE_FINALIZE: u32 = 1u;
 const FLAG_FORWARD_ALPHA: u32 = 2u;

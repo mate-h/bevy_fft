@@ -8,15 +8,13 @@ use bevy::{
     camera_controller::free_camera::{FreeCamera, FreeCameraPlugin, FreeCameraState},
     core_pipeline::tonemapping::Tonemapping,
     light::{
-        AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, GlobalAmbientLight,
-        light_consts::lux,
+        Atmosphere, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, GlobalAmbientLight,
+        VolumetricLight, atmosphere::ScatteringMedium, light_consts::lux,
     },
+    material::OpaqueRendererMethod,
     math::primitives::InfinitePlane3d,
     mesh::Meshable,
-    pbr::{
-        Atmosphere, AtmosphereSettings, DefaultOpaqueRendererMethod, OpaqueRendererMethod,
-        ScatteringMedium, StandardMaterial,
-    },
+    pbr::{AtmosphereSettings, DefaultOpaqueRendererMethod, StandardMaterial},
     post_process::bloom::Bloom,
     prelude::*,
     render::{
@@ -52,7 +50,7 @@ fn main() {
         .init_resource::<SunLightSettings>()
         .add_plugins((
             DefaultPlugins.set(RenderPlugin {
-                render_creation: RenderCreation::Automatic(wgpu),
+                render_creation: RenderCreation::Automatic(Box::new(wgpu)),
                 ..default()
             }),
             FreeCameraPlugin,
@@ -154,20 +152,22 @@ fn setup(
 
     commands.spawn((
         DirectionalLight {
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             illuminance: lux::RAW_SUNLIGHT,
             ..default()
         },
         SunLight,
+        VolumetricLight,
         Transform::from_xyz(0.0, sun.elevation, -1.0).looking_at(Vec3::ZERO, Vec3::Y),
         cascade_shadow_config,
     ));
 
+    let earth_medium = scattering_mediums.add(ScatteringMedium::earth(256, 256));
+    commands.spawn(Atmosphere::earth(earth_medium));
     commands.spawn((
         Camera3d::default(),
         Transform::from_translation(patch_center + CAMERA_OFFSET).looking_at(patch_center, Vec3::Y),
         FreeCamera::default(),
-        Atmosphere::earthlike(scattering_mediums.add(ScatteringMedium::default())),
         AtmosphereSettings::default(),
         Exposure { ev100: 12.0 },
         Tonemapping::AcesFitted,
@@ -219,9 +219,9 @@ fn pointer_to_grid(
     let new_sim = Vec2::new(sx, sy);
     // Paint on the 3D patch only when the pointer is not over an egui window. `wants_pointer_input`
     // is often stricter; `is_pointer_over_area` matches “cursor over UI chrome”.
-    let paint = mouse.pressed(MouseButton::Right) && !egui_wants.is_pointer_over_area();
+    let paint = mouse.pressed(MouseButton::Left) && !egui_wants.is_pointer_over_area();
 
-    if mouse.just_pressed(MouseButton::Right) && paint {
+    if mouse.just_pressed(MouseButton::Left) && paint {
         controller.pointer_prev = new_sim;
         controller.pointer = new_sim;
     } else if paint {

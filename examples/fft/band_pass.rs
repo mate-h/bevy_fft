@@ -1,25 +1,20 @@
 //! Radial band-pass on spectrum buffer **C** between forward FFT and IFFT.
 
 use bevy::{
-    ecs::{
-        change_detection::Mut,
-        query::{QueryItem, QueryState},
-        schedule::IntoScheduleConfigs,
-        system::lifetimeless::Read,
-    },
+    ecs::{query::QueryItem, schedule::IntoScheduleConfigs, system::lifetimeless::Read},
     prelude::*,
     render::{
         Render, RenderApp,
         extract_component::{
             ComponentUniforms, ExtractComponent, ExtractComponentPlugin, UniformComponentPlugin,
         },
-        render_graph::{Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel},
         render_resource::{
             BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
             CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor,
             PipelineCache, ShaderStages, ShaderType, binding_types::uniform_buffer,
         },
         renderer::{RenderContext, RenderDevice},
+        sync_component::SyncComponent,
     },
     shader::ShaderDefVal,
 };
@@ -47,6 +42,10 @@ impl Default for BandPassParams {
     }
 }
 
+impl SyncComponent for BandPassParams {
+    type Target = Self;
+}
+
 impl ExtractComponent for BandPassParams {
     type QueryData = Read<BandPassParams>;
     type QueryFilter = ();
@@ -56,9 +55,6 @@ impl ExtractComponent for BandPassParams {
         Some(*item)
     }
 }
-
-#[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
-pub struct BandPassLabel;
 
 #[derive(Resource)]
 pub struct BandPassPipelineRes {
@@ -82,7 +78,7 @@ impl FromWorld for BandPassPipelineRes {
         let pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("fft_demo_band_pass".into()),
             layout: vec![layouts.common.clone(), params_layout.clone()],
-            push_constant_ranges: vec![],
+            immediate_size: 0,
             shader,
             shader_defs: vec![ShaderDefVal::UInt("CHANNELS".into(), 4)],
             entry_point: Some("radial_band_pass".into()),
@@ -124,12 +120,14 @@ impl Plugin for BandPassPlugin {
                     .after(prepare_fft_bind_groups),
             );
 
-        render_app
-            .world_mut()
-            .resource_scope(|world, mut graph: Mut<RenderGraph>| {
-                graph.add_node(BandPassLabel, BandPassNode::from_world(world));
-            });
-        splice_spectrum_pass(render_app.world_mut(), BandPassLabel);
+        disable_spectrum_passthrough(render_app);
+        render_app.add_systems(
+            bevy::render::renderer::RenderGraph,
+            run_band_pass
+                .after(FftNode::ComputeFFT)
+                .before(FftNode::ResolveSpectrum)
+                .in_set(bevy::render::renderer::RenderGraphSystems::Render),
+        );
     }
 }
 
@@ -167,55 +165,29 @@ fn prepare_band_pass_bind_group(
     }
 }
 
-struct BandPassNode {
-    query: QueryState<(
-        &'static FftBindGroups,
-        &'static BandPassBindGroup,
-        &'static FftSettings,
-    )>,
-}
+pub fn run_band_pass(
+    mut ctx: RenderContext,
+    bp: Res<BandPassPipelineRes>,
+    pipeline_cache: Res<PipelineCache>,
+    query: Query<(&FftBindGroups, &BandPassBindGroup, &FftSettings)>,
+) {
+    let Some(pipeline) = pipeline_cache.get_compute_pipeline(bp.pipeline) else {
+        return;
+    };
 
-impl FromWorld for BandPassNode {
-    fn from_world(world: &mut World) -> Self {
-        Self {
-            query: world.query(),
-        }
-    }
-}
+    let encoder = ctx.command_encoder();
+    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+        label: Some("fft_demo_band_pass_pass"),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(pipeline);
 
-impl Node for BandPassNode {
-    fn update(&mut self, world: &mut World) {
-        self.query.update_archetypes(world);
-    }
-
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        let bp = world.resource::<BandPassPipelineRes>();
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let Some(pipeline) = pipeline_cache.get_compute_pipeline(bp.pipeline) else {
-            return Ok(());
-        };
-
-        let encoder = render_context.command_encoder();
-        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("fft_demo_band_pass_pass"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(pipeline);
-
-        let wg = 16u32;
-        for (fft_bg, bp_bg, settings) in self.query.iter_manual(world) {
-            pass.set_bind_group(0, &fft_bg.common, &[]);
-            pass.set_bind_group(1, &bp_bg.group, &[]);
-            let nx = settings.size.x.div_ceil(wg);
-            let ny = settings.size.y.div_ceil(wg);
-            pass.dispatch_workgroups(nx, ny, 1);
-        }
-
-        Ok(())
+    let wg = 16u32;
+    for (fft_bg, bp_bg, settings) in &query {
+        pass.set_bind_group(0, &fft_bg.common, &[]);
+        pass.set_bind_group(1, &bp_bg.group, &[]);
+        let nx = settings.size.x.div_ceil(wg);
+        let ny = settings.size.y.div_ceil(wg);
+        pass.dispatch_workgroups(nx, ny, 1);
     }
 }

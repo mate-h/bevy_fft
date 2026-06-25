@@ -21,14 +21,12 @@ mod render;
 
 use bevy::{
     asset::{Asset, Handle, load_internal_asset},
-    ecs::change_detection::Mut,
     pbr::{ExtendedMaterial, MaterialExtension, StandardMaterial},
     prelude::*,
     reflect::{Reflect, TypePath},
     render::{
         Render, RenderApp, RenderSystems,
         extract_component::{ExtractComponentPlugin, UniformComponentPlugin},
-        render_graph::RenderGraph,
         render_resource::{AsBindGroup, ShaderType},
     },
     shader::{Shader, ShaderRef},
@@ -40,15 +38,15 @@ pub use render::{
 };
 
 use render::{
-    OceanComputePipelines, OceanFoamNode, OceanFoamPipelines, OceanSpectrumNode,
-    prepare_ocean_compute_bind_groups, prepare_ocean_foam_bind_groups,
-    prepare_ocean_foam_mask_image, prepare_ocean_h0_image, sync_ocean_dynamic_uniform,
-    sync_ocean_foam_display, sync_ocean_foam_uniform, sync_ocean_h0_uniform,
+    OceanComputePipelines, OceanFoamPipelines, prepare_ocean_compute_bind_groups,
+    prepare_ocean_foam_bind_groups, prepare_ocean_foam_mask_image, prepare_ocean_h0_image,
+    run_ocean_foam, run_ocean_spectrum, sync_ocean_dynamic_uniform, sync_ocean_foam_display,
+    sync_ocean_foam_uniform, sync_ocean_h0_uniform,
 };
 
 use crate::fft::{
-    FftPlugin, FftSystemSet, prepare_fft_bind_groups, splice_after_resolve_outputs,
-    splice_spectrum_pass,
+    FftPlugin, FftSystemSet, disable_spectrum_passthrough, prepare_fft_bind_groups,
+    run_fft_forward, run_fft_resolve_outputs, run_fft_resolve_spectrum,
 };
 
 /// Same factor as `PM_PEAK_COEFF` in `assets/ocean/init_h0.wgsl` (`ω_pm ≈ this * g / U` in rad/s).
@@ -155,10 +153,6 @@ impl MaterialExtension for OceanSurfaceExtension {
         ShaderRef::Handle(shaders::OCEAN_SURFACE.clone())
     }
 
-    fn prepass_vertex_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::OCEAN_SURFACE.clone())
-    }
-
     fn deferred_vertex_shader() -> ShaderRef {
         ShaderRef::Handle(shaders::OCEAN_SURFACE.clone())
     }
@@ -257,14 +251,18 @@ impl Plugin for OceanPlugin {
                     .after(crate::fft::resources::prepare_fft_resolve_bind_groups),
             );
 
-        render_app
-            .world_mut()
-            .resource_scope(|world, mut graph: Mut<RenderGraph>| {
-                graph.add_node(OceanSpectrumLabel, OceanSpectrumNode::from_world(world));
-                graph.add_node(OceanFoamLabel, OceanFoamNode::from_world(world));
-            });
-        splice_spectrum_pass(render_app.world_mut(), OceanSpectrumLabel);
-        // `FftPlugin::finish` must run first so `ResolveOutputs` → `CameraDriver` exists for `splice_after_resolve_outputs`.
-        splice_after_resolve_outputs(render_app.world_mut(), OceanFoamLabel);
+        disable_spectrum_passthrough(render_app);
+        render_app.add_systems(
+            bevy::render::renderer::RenderGraph,
+            (
+                run_ocean_spectrum
+                    .after(run_fft_forward)
+                    .before(run_fft_resolve_spectrum),
+                run_ocean_foam
+                    .after(run_fft_resolve_outputs)
+                    .before(bevy::core_pipeline::schedule::camera_driver),
+            )
+                .in_set(bevy::render::renderer::RenderGraphSystems::Render),
+        );
     }
 }

@@ -18,8 +18,8 @@ pub mod shaders {
 }
 
 pub use render::{
-    EwaveGpuResources, EwavePipelines, EwaveSimLabel, EwaveSimNode, EwaveSimUniform,
-    plug_ewave_render_app, prepare_ewave_gpu, splice_ewave_before_camera,
+    EwaveGpuResources, EwavePipelines, EwaveSimLabel, EwaveSimUniform, plug_ewave_render_app,
+    prepare_ewave_gpu, run_ewave_sim,
 };
 
 use bevy::{
@@ -34,6 +34,7 @@ use bevy::{
         extract_component::{ExtractComponent, ExtractComponentPlugin},
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_resource::{AsBindGroup, ShaderType},
+        sync_component::SyncComponent,
     },
     shader::{Shader, ShaderRef},
 };
@@ -44,6 +45,10 @@ use crate::fft::{FftPlugin, FftSkipStockPipeline};
 /// [`FftTextures`](crate::fft::resources::FftTextures), and [`EwaveGridImages`]).
 #[derive(Component, Clone, Copy, Default, Reflect)]
 pub struct EwaveSimRoot;
+
+impl SyncComponent for EwaveSimRoot {
+    type Target = Self;
+}
 
 impl ExtractComponent for EwaveSimRoot {
     type QueryData = Read<EwaveSimRoot>;
@@ -64,6 +69,10 @@ pub struct EwaveGridImages {
     pub h_hat_im: Handle<Image>,
     pub p_hat_re: Handle<Image>,
     pub p_hat_im: Handle<Image>,
+}
+
+impl SyncComponent for EwaveGridImages {
+    type Target = Self;
 }
 
 impl ExtractComponent for EwaveGridImages {
@@ -255,9 +264,6 @@ impl MaterialExtension for EwaveSurfaceExtension {
     fn fragment_shader() -> ShaderRef {
         ShaderRef::Handle(shaders::EWAVE_SURFACE.clone())
     }
-    fn prepass_vertex_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::EWAVE_SURFACE.clone())
-    }
     fn deferred_vertex_shader() -> ShaderRef {
         ShaderRef::Handle(shaders::EWAVE_SURFACE.clone())
     }
@@ -279,7 +285,7 @@ fn sync_ewave_mesh_material(
     let Ok(h) = q.single() else {
         return;
     };
-    let Some(mat) = materials.get_mut(&h.0) else {
+    let Some(mut mat) = materials.get_mut(&h.0) else {
         return;
     };
     let g = sim.n as f32;

@@ -1,9 +1,11 @@
-//! Common import path for in-repo examples and domain plugins: FFT entities, splice helpers,
-//! [`crate::ocean`] and [`ewave`](crate::ewave) surface types, shallow-water surface types, and symbols
-//! the `fft` example uses ([`crate::fft::FftInputTexture`], [`crate::fft::prepare_fft_bind_groups`]).
+//! Common import path for in-repo examples and domain plugins: FFT entities, render-graph ordering
+//! ([`crate::fft::disable_spectrum_passthrough`], [`crate::fft::FftNode`], [`crate::fft::run_fft_forward`],
+//! [`crate::fft::run_fft_resolve_spectrum`]), [`crate::ocean`] and [`ewave`](crate::ewave) surface types,
+//! shallow-water surface types, and symbols the `fft` example uses ([`crate::fft::FftInputTexture`],
+//! [`crate::fft::prepare_fft_bind_groups`]).
 //!
-//! Twiddle helpers, [`crate::fft::FftSpectrumPassthroughNode`], [`crate::fft::run_forward_fft`],
-//! [`crate::fft::run_inverse_fft`], and other internals remain on [`crate::fft`] and [`crate::fft::resources`].
+//! Twiddle helpers, [`crate::fft::run_forward_fft`], [`crate::fft::run_inverse_fft`], and other
+//! internals remain on [`crate::fft`] and [`crate::fft::resources`].
 
 pub use crate::ewave::{
     EwaveController, EwaveGridImages, EwaveMaterialUniform, EwavePlugin, EwaveSimRoot,
@@ -12,7 +14,8 @@ pub use crate::ewave::{
 pub use crate::fft::resources::{FftBindGroupLayouts, FftBindGroups, prepare_fft_bind_groups};
 pub use crate::fft::{
     FftInputTexture, FftNode, FftPlugin, FftSchedule, FftSettings, FftSkipStockPipeline, FftSource,
-    FftSystemSet, FftTextures, splice_after_resolve_outputs, splice_spectrum_pass,
+    FftSystemSet, FftTextures, disable_spectrum_passthrough, run_fft_forward,
+    run_fft_resolve_outputs, run_fft_resolve_spectrum,
 };
 pub use crate::ocean::{
     OceanDynamicUniform, OceanFoamMask, OceanFoamPhase, OceanFoamUniform, OceanH0Image,

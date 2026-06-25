@@ -4,7 +4,7 @@
 //!
 //! Add [`ShallowWaterPlugin`], insert [`ShallowWaterController`] as a resource with GPU images, and use
 //! [`ShallowWaterSurfaceMaterial`] on an XZ plane. The compute pass runs on the root [`RenderGraph`]
-//! before [`bevy::render::graph::CameraDriverLabel`].
+//! before the camera driver on the root [`RenderGraph`](bevy::render::renderer::RenderGraph) schedule.
 
 mod render;
 
@@ -25,9 +25,9 @@ use bevy::{
 };
 
 pub use render::{
-    ShallowWaterGpuResources, ShallowWaterPipelines, ShallowWaterSimLabel, ShallowWaterSimNode,
-    ShallowWaterTimestamp, plug_shallow_water_render_app, prepare_shallow_water_gpu,
-    round_particle_count, splice_shallow_water_before_camera,
+    ShallowWaterGpuResources, ShallowWaterPipelines, ShallowWaterSimLabel, ShallowWaterTimestamp,
+    plug_shallow_water_render_app, prepare_shallow_water_gpu, round_particle_count,
+    run_shallow_water_sim,
 };
 
 /// Border condition encoded like the reference: wall, source, drain, waves.
@@ -272,10 +272,6 @@ impl MaterialExtension for ShallowWaterSurfaceExtension {
         ShaderRef::Handle(shaders::SHALLOW_WATER_SURFACE.clone())
     }
 
-    fn prepass_vertex_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::SHALLOW_WATER_SURFACE.clone())
-    }
-
     fn deferred_vertex_shader() -> ShaderRef {
         ShaderRef::Handle(shaders::SHALLOW_WATER_SURFACE.clone())
     }
@@ -307,7 +303,7 @@ fn sync_shallow_water_mesh_material(
     let Ok(h) = q.single() else {
         return;
     };
-    let Some(mat) = materials.get_mut(&h.0) else {
+    let Some(mut mat) = materials.get_mut(&h.0) else {
         return;
     };
     let g = sim.cells_x.max(sim.cells_y) as f32;

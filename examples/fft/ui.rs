@@ -40,7 +40,7 @@ pub struct BrightnessSliderFill;
 /// Top-left sliders and a bottom [`Text2d`] hint. Registered by [`BandPassUiPlugin`] during `Startup`.
 fn setup_band_pass_ui(mut commands: Commands) {
     let label_style = TextFont {
-        font_size: 15.0,
+        font_size: FontSize::Px(15.0),
         ..default()
     };
 
@@ -73,7 +73,7 @@ fn setup_band_pass_ui(mut commands: Commands) {
             panel.spawn((
                 Text::new("Band-pass"),
                 TextFont {
-                    font_size: 17.0,
+                    font_size: FontSize::Px(17.0),
                     ..default()
                 },
                 TextColor(Color::WHITE),
@@ -252,7 +252,7 @@ fn setup_band_pass_ui(mut commands: Commands) {
         Text2d::default(),
         TextColor(Color::WHITE),
         TextFont {
-            font_size: 15.0,
+            font_size: FontSize::Px(15.0),
             ..default()
         },
         Transform::from_xyz(0.0, -420.0, 10.0),

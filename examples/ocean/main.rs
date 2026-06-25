@@ -12,13 +12,13 @@ use bevy::{
     camera_controller::free_camera::{FreeCamera, FreeCameraPlugin, FreeCameraState},
     core_pipeline::tonemapping::Tonemapping,
     light::{
-        AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, GlobalAmbientLight,
-        light_consts::lux,
+        Atmosphere, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, GlobalAmbientLight,
+        VolumetricLight, atmosphere::ScatteringMedium, light_consts::lux,
     },
+    material::OpaqueRendererMethod,
     mesh::Meshable,
     pbr::{
-        Atmosphere, AtmosphereSettings, DefaultOpaqueRendererMethod, OpaqueRendererMethod,
-        ScatteringMedium, ScreenSpaceReflections, StandardMaterial,
+        AtmosphereSettings, DefaultOpaqueRendererMethod, ScreenSpaceReflections, StandardMaterial,
     },
     post_process::bloom::Bloom,
     prelude::*,
@@ -121,12 +121,14 @@ fn setup(mut commands: Commands, mut scattering_mediums: ResMut<Assets<Scatterin
         OceanFoamPhase(0),
     ));
 
-    // Match `examples/3d/atmosphere.rs` camera stack (HDR path is implicit; atmosphere adds SSR + FXAA there).
+    // Match `examples/3d/atmosphere.rs`: no transform on the atmosphere entity; the on_add hook
+    // places the planet center below the origin so the scene sits near the surface.
+    let earth_medium = scattering_mediums.add(ScatteringMedium::earth(256, 256));
+    commands.spawn(Atmosphere::earth(earth_medium));
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 8.0, 24.0).looking_at(Vec3::ZERO, Vec3::Y),
         FreeCamera::default(),
-        Atmosphere::earthlike(scattering_mediums.add(ScatteringMedium::default())),
         AtmosphereSettings::default(),
         Exposure { ev100: 12.0 },
         Tonemapping::AcesFitted,
@@ -146,11 +148,12 @@ fn setup(mut commands: Commands, mut scattering_mediums: ResMut<Assets<Scatterin
 
     commands.spawn((
         DirectionalLight {
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             illuminance: lux::RAW_SUNLIGHT,
             ..default()
         },
         SunLight,
+        VolumetricLight,
         Transform::from_xyz(0.0, 0.1, -1.0).looking_at(Vec3::ZERO, Vec3::Y),
         cascade_shadow_config,
     ));
@@ -431,7 +434,7 @@ fn ocean_egui_panel(
     let Ok(handle) = surface_mat.single() else {
         return;
     };
-    let Some(mat) = materials.get_mut(handle) else {
+    let Some(mut mat) = materials.get_mut(handle) else {
         return;
     };
     mat.extension.settings.amplitude = mesh_amplitude;

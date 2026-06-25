@@ -5,9 +5,10 @@
 //! [`fft::FftTextures::power_spectrum`] summarizes the spectrum for display.
 //!
 //! Import the usual surface from [`prelude`]: [`fft::FftPlugin`], [`fft::FftSource`], extracted types such as
-//! [`fft::FftSettings`] and [`fft::FftTextures`], graph splice helpers, [`fft::FftInputTexture`] and
+//! [`fft::FftSettings`] and [`fft::FftTextures`], render-graph ordering helpers ([`fft::disable_spectrum_passthrough`],
+//! [`fft::FftNode`], [`fft::run_fft_forward`], [`fft::run_fft_resolve_spectrum`]), [`fft::FftInputTexture`] and
 //! [`fft::prepare_fft_bind_groups`] for the `fft` example, plus [`ocean`], [`ewave`], and [`shallow_water`]
-//! surface types. Twiddle helpers, [`fft::FftSpectrumPassthroughNode`], manual FFT dispatch, and other
+//! surface types. Twiddle helpers, [`fft::run_forward_fft`], [`fft::run_inverse_fft`], and other
 //! internals stay on [`fft`] and [`fft::resources`].
 //!
 //! **Main world vs render world.** [`fft::FftSource`] is the component you spawn and edit in the
@@ -16,7 +17,9 @@
 //! the extracted types, not [`fft::FftSource`] directly.
 //!
 //! For GPU edits to the spectrum, insert a compute pass on buffer **C** between the forward FFT
-//! and the inverse FFT, then connect it with [`fft::splice_spectrum_pass`].
+//! and the inverse FFT, then connect it with [`fft::disable_spectrum_passthrough`] and a custom
+//! [`RenderGraph`](bevy::render::renderer::RenderGraph) pass between [`fft::run_fft_forward`] and
+//! [`fft::run_fft_resolve_spectrum`].
 //!
 //! The [`ocean`] module registers [`ocean::OceanSurfaceMaterial`] ([`bevy::pbr::ExtendedMaterial`] over
 //! [`bevy::pbr::StandardMaterial`] plus [`ocean::OceanSurfaceExtension`]) and displaces a mesh using

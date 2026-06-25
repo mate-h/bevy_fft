@@ -5,7 +5,6 @@ use std::sync::Mutex;
 use bevy::{
     asset::{Assets, Handle, RenderAssetUsages},
     ecs::{
-        query::QueryState,
         system::lifetimeless::Read,
         world::{FromWorld, World},
     },
@@ -16,12 +15,12 @@ use bevy::{
     render::{
         extract_component::{ComponentUniforms, ExtractComponent},
         render_asset::RenderAssets,
-        render_graph::{Node, NodeRunError, RenderGraphContext, RenderLabel},
         render_resource::{
             binding_types::{texture_storage_2d, uniform_buffer},
             *,
         },
-        renderer::RenderDevice,
+        renderer::{RenderContext, RenderDevice},
+        sync_component::SyncComponent,
         texture::GpuImage,
     },
     shader::ShaderDefVal,
@@ -60,6 +59,10 @@ pub struct OceanH0Uniform {
     pub _pad3: u32,
 }
 
+impl SyncComponent for OceanH0Uniform {
+    type Target = Self;
+}
+
 impl ExtractComponent for OceanH0Uniform {
     type QueryData = Read<Self>;
     type QueryFilter = ();
@@ -86,6 +89,10 @@ pub struct OceanDynamicUniform {
     pub _pad3: f32,
 }
 
+impl SyncComponent for OceanDynamicUniform {
+    type Target = Self;
+}
+
 impl ExtractComponent for OceanDynamicUniform {
     type QueryData = Read<Self>;
     type QueryFilter = ();
@@ -104,6 +111,10 @@ impl ExtractComponent for OceanDynamicUniform {
 #[derive(Component, Clone, Reflect)]
 pub struct OceanH0Image {
     pub texture: Handle<Image>,
+}
+
+impl SyncComponent for OceanH0Image {
+    type Target = Self;
 }
 
 impl ExtractComponent for OceanH0Image {
@@ -129,7 +140,7 @@ pub struct OceanComputeBindGroups {
     pub spectrum_h0_read: BindGroup,
 }
 
-#[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
+#[derive(PartialEq, Eq, Debug, Copy, Clone, Hash)]
 pub struct OceanSpectrumLabel;
 
 #[repr(C)]
@@ -148,6 +159,10 @@ pub struct OceanFoamUniform {
     pub _foam_uniform_pad2: f32,
     pub _foam_uniform_pad3: f32,
     pub _foam_uniform_pad4: f32,
+}
+
+impl SyncComponent for OceanFoamUniform {
+    type Target = Self;
 }
 
 impl ExtractComponent for OceanFoamUniform {
@@ -171,6 +186,10 @@ pub struct OceanFoamMask {
     pub texture_b: Handle<Image>,
 }
 
+impl SyncComponent for OceanFoamMask {
+    type Target = Self;
+}
+
 impl ExtractComponent for OceanFoamMask {
     type QueryData = Read<Self>;
     type QueryFilter = ();
@@ -186,6 +205,10 @@ impl ExtractComponent for OceanFoamMask {
 /// Advances once per main-world frame so render prep picks read/write halves consistently.
 #[derive(Component, Clone, Copy, Default, Reflect)]
 pub struct OceanFoamPhase(pub u32);
+
+impl SyncComponent for OceanFoamPhase {
+    type Target = Self;
+}
 
 impl ExtractComponent for OceanFoamPhase {
     type QueryData = Read<Self>;
@@ -204,7 +227,7 @@ pub struct OceanFoamBindGroups {
     pub group: BindGroup,
 }
 
-#[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
+#[derive(PartialEq, Eq, Debug, Copy, Clone, Hash)]
 pub struct OceanFoamLabel;
 
 #[derive(Resource)]
@@ -233,7 +256,7 @@ impl FromWorld for OceanFoamPipelines {
         let foam = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("ocean_jacobian_foam".into()),
             layout: vec![layout.clone()],
-            push_constant_ranges: vec![],
+            immediate_size: 0,
             shader,
             shader_defs: vec![],
             entry_point: Some("ocean_jacobian_foam".into()),
@@ -290,7 +313,7 @@ impl FromWorld for OceanComputePipelines {
         let init = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("ocean_init_h0".into()),
             layout: vec![init_layout.clone()],
-            push_constant_ranges: vec![],
+            immediate_size: 0,
             shader: init_shader,
             shader_defs: vec![],
             entry_point: Some("init_h0".into()),
@@ -306,7 +329,7 @@ impl FromWorld for OceanComputePipelines {
                 spectrum_layout_dynamic.clone(),
                 spectrum_layout_h0.clone(),
             ],
-            push_constant_ranges: vec![],
+            immediate_size: 0,
             shader: spectrum_shader,
             shader_defs: vec![ShaderDefVal::UInt("CHANNELS".into(), 4)],
             entry_point: Some("ocean_fill_spectrum_c".into()),
@@ -457,7 +480,7 @@ pub(super) fn sync_ocean_foam_display(
     phase.0 = phase.0.wrapping_add(1);
     let k = phase.0;
     if let Ok(mh) = surface.single()
-        && let Some(mat) = materials.get_mut(mh)
+        && let Some(mut mat) = materials.get_mut(mh)
     {
         mat.extension.foam_mask = if k % 2 == 0 {
             mask.texture_b.clone()
@@ -598,133 +621,87 @@ pub(super) fn prepare_ocean_foam_bind_groups(
     }
 }
 
-pub struct OceanSpectrumNode {
-    query: QueryState<(
-        &'static FftBindGroups,
-        &'static OceanComputeBindGroups,
-        &'static FftSettings,
-        &'static OceanH0Uniform,
+pub fn run_ocean_spectrum(
+    mut ctx: RenderContext,
+    pl: Res<OceanComputePipelines>,
+    cache: Res<PipelineCache>,
+    tracker: Res<OceanInitTracker>,
+    query: Query<(
+        &FftBindGroups,
+        &OceanComputeBindGroups,
+        &FftSettings,
+        &OceanH0Uniform,
     )>,
-}
+) {
+    let Some(init_pl) = cache.get_compute_pipeline(pl.init) else {
+        return;
+    };
+    let Some(spec_pl) = cache.get_compute_pipeline(pl.spectrum) else {
+        return;
+    };
 
-impl FromWorld for OceanSpectrumNode {
-    fn from_world(world: &mut World) -> Self {
-        Self {
-            query: world.query(),
-        }
-    }
-}
+    let wg = 8u32;
+    let enc = ctx.command_encoder();
 
-impl Node for OceanSpectrumNode {
-    fn update(&mut self, world: &mut World) {
-        self.query.update_archetypes(world);
-    }
+    for (fft_bg, ocean_bg, settings, h0_uni) in &query {
+        let nx = settings.size.x.div_ceil(wg);
+        let ny = settings.size.y.div_ceil(wg);
 
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut bevy::render::renderer::RenderContext,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        let pl = world.resource::<OceanComputePipelines>();
-        let cache = world.resource::<PipelineCache>();
-        let tracker = world.resource::<OceanInitTracker>();
-
-        let Some(init_pl) = cache.get_compute_pipeline(pl.init) else {
-            return Ok(());
+        let current = *h0_uni;
+        let needs_h0_init = {
+            let guard = tracker.last_init_h0_uniform.lock().unwrap();
+            guard.as_ref() != Some(&current)
         };
-        let Some(spec_pl) = cache.get_compute_pipeline(pl.spectrum) else {
-            return Ok(());
-        };
-
-        let wg = 8u32;
-        let enc = render_context.command_encoder();
-
-        for (fft_bg, ocean_bg, settings, h0_uni) in self.query.iter_manual(world) {
-            let nx = settings.size.x.div_ceil(wg);
-            let ny = settings.size.y.div_ceil(wg);
-
-            let current = *h0_uni;
-            let needs_h0_init = {
-                let guard = tracker.last_init_h0_uniform.lock().unwrap();
-                guard.as_ref() != Some(&current)
-            };
-            if needs_h0_init {
-                {
-                    let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("ocean_init_h0_pass"),
-                        timestamp_writes: None,
-                    });
-                    pass.set_pipeline(init_pl);
-                    pass.set_bind_group(0, &ocean_bg.init, &[]);
-                    pass.dispatch_workgroups(nx, ny, 1);
-                }
-                *tracker.last_init_h0_uniform.lock().unwrap() = Some(current);
-            }
-
+        if needs_h0_init {
             {
                 let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("ocean_spectrum_to_c_pass"),
+                    label: Some("ocean_init_h0_pass"),
                     timestamp_writes: None,
                 });
-                pass.set_pipeline(spec_pl);
-                pass.set_bind_group(0, &fft_bg.common, &[]);
-                pass.set_bind_group(1, &ocean_bg.spectrum_dynamic, &[]);
-                pass.set_bind_group(2, &ocean_bg.spectrum_h0_read, &[]);
+                pass.set_pipeline(init_pl);
+                pass.set_bind_group(0, &ocean_bg.init, &[]);
                 pass.dispatch_workgroups(nx, ny, 1);
             }
+            *tracker.last_init_h0_uniform.lock().unwrap() = Some(current);
         }
 
-        Ok(())
-    }
-}
-
-pub struct OceanFoamNode {
-    query: QueryState<(&'static OceanFoamBindGroups, &'static FftSettings)>,
-}
-
-impl FromWorld for OceanFoamNode {
-    fn from_world(world: &mut World) -> Self {
-        Self {
-            query: world.query(),
-        }
-    }
-}
-
-impl Node for OceanFoamNode {
-    fn update(&mut self, world: &mut World) {
-        self.query.update_archetypes(world);
-    }
-
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut bevy::render::renderer::RenderContext,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        let pl = world.resource::<OceanFoamPipelines>();
-        let cache = world.resource::<PipelineCache>();
-
-        let Some(foam_pl) = cache.get_compute_pipeline(pl.foam) else {
-            return Ok(());
-        };
-
-        let wg = 8u32;
-        let enc = render_context.command_encoder();
-
-        for (foam_bg, settings) in self.query.iter_manual(world) {
-            let nx = settings.size.x.div_ceil(wg);
-            let ny = settings.size.y.div_ceil(wg);
-
+        {
             let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("ocean_jacobian_foam_pass"),
+                label: Some("ocean_spectrum_to_c_pass"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(foam_pl);
-            pass.set_bind_group(0, &foam_bg.group, &[]);
+            pass.set_pipeline(spec_pl);
+            pass.set_bind_group(0, &fft_bg.common, &[]);
+            pass.set_bind_group(1, &ocean_bg.spectrum_dynamic, &[]);
+            pass.set_bind_group(2, &ocean_bg.spectrum_h0_read, &[]);
             pass.dispatch_workgroups(nx, ny, 1);
         }
+    }
+}
 
-        Ok(())
+pub fn run_ocean_foam(
+    mut ctx: RenderContext,
+    pl: Res<OceanFoamPipelines>,
+    cache: Res<PipelineCache>,
+    query: Query<(&OceanFoamBindGroups, &FftSettings)>,
+) {
+    let Some(foam_pl) = cache.get_compute_pipeline(pl.foam) else {
+        return;
+    };
+
+    let wg = 8u32;
+    let enc = ctx.command_encoder();
+
+    for (foam_bg, settings) in &query {
+        let nx = settings.size.x.div_ceil(wg);
+        let ny = settings.size.y.div_ceil(wg);
+
+        let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("ocean_jacobian_foam_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(foam_pl);
+        pass.set_bind_group(0, &foam_bg.group, &[]);
+        pass.dispatch_workgroups(nx, ny, 1);
     }
 }

@@ -1,14 +1,13 @@
 use bevy::{
+    app::SubApp,
     ecs::{
-        query::QueryState,
-        world::{FromWorld, World},
+        schedule::{IntoScheduleConfigs, SystemSet},
+        system::Query,
     },
     log::{error, info},
     render::{
-        graph::CameraDriverLabel,
-        render_graph::{Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel},
         render_resource::{ComputePass, ComputePassDescriptor, PipelineCache},
-        renderer::RenderContext,
+        renderer::{RenderContext, RenderGraph, RenderGraphSystems},
     },
     utils::once,
 };
@@ -35,91 +34,32 @@ const BUF_C: u32 = 2;
 const FLAG_INVERSE_FINALIZE: u32 = 1;
 const FLAG_FORWARD_ALPHA: u32 = 2;
 
-#[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
+/// Labels for the stock FFT compute chain on the root [`RenderGraph`] schedule.
+///
+/// Custom passes run between [`run_fft_forward`] and [`run_fft_resolve_spectrum`] on the root
+/// [`RenderGraph`] schedule. Call [`disable_spectrum_passthrough`] when replacing the stock pass.
+#[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, SystemSet)]
 pub enum FftNode {
     ComputeFFT,
     /// After the forward FFT the spectrum lives in **C**. The stock implementation for this label
-    /// does nothing on the GPU. Use [`splice_spectrum_pass`] to insert a real compute pass here.
+    /// does nothing on the GPU. Call [`disable_spectrum_passthrough`] and register your pass between
+    /// [`run_fft_forward`] and [`run_fft_resolve_spectrum`].
     SpectrumPass,
     /// Writes `power_spectrum` from **C** while it still holds the spectrum (before inverse FFT scratch).
     ResolveSpectrum,
     ComputeIFFT,
     /// Writes `spatial_output` from **B** after the inverse FFT.
     ResolveOutputs,
-    /// Optional hook. Register a compute node with this label to run pattern generation before [`Self::ComputeFFT`].
+    /// Optional hook. Register a compute system before [`Self::ComputeFFT`] to run pattern generation.
     GeneratePattern,
 }
 
-/// Empty placeholder for [`FftNode::SpectrumPass`], replaced when splicing a custom node.
-#[derive(Default)]
-pub struct FftSpectrumPassthroughNode;
+/// When `true`, the default no-op [`fft_spectrum_passthrough`] system is skipped.
+#[derive(bevy::prelude::Resource, Default)]
+pub struct FftSpectrumSpliced(pub bool);
 
-impl Node for FftSpectrumPassthroughNode {
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        _render_context: &mut RenderContext,
-        _world: &World,
-    ) -> Result<(), NodeRunError> {
-        Ok(())
-    }
-}
-
-/// Drops the default spectrum pass and wires `user_pass` between [`FftNode::ComputeFFT`] and [`FftNode::ResolveSpectrum`].
-///
-/// Call from `RenderApp` after registering `user_pass` on the **root** [`RenderGraph`].
-pub fn splice_spectrum_pass(world: &mut World, user_pass: impl RenderLabel) {
-    let Some(mut graph) = world.get_resource_mut::<RenderGraph>() else {
-        return;
-    };
-    if graph.get_node_state(FftNode::SpectrumPass).is_err() {
-        bevy::log::warn!(
-            "splice_spectrum_pass: `FftNode::SpectrumPass` is missing. Register `FftPlugin` before splicing so the forward chain is set up."
-        );
-        return;
-    }
-    let _ = graph.remove_node(FftNode::SpectrumPass);
-    let user = user_pass.intern();
-    graph.add_node_edge(FftNode::ComputeFFT, user);
-    graph.add_node_edge(user, FftNode::ResolveSpectrum);
-}
-
-/// Runs `user_pass` after [`FftNode::ResolveOutputs`] and before [`CameraDriverLabel`].
-///
-/// Call from `RenderApp` after [`FftPlugin`] registers the `ResolveOutputs` → `CameraDriver` edge,
-/// and after registering `user_pass` on the root [`RenderGraph`].
-pub fn splice_after_resolve_outputs(world: &mut World, user_pass: impl RenderLabel) {
-    let Some(mut graph) = world.get_resource_mut::<RenderGraph>() else {
-        return;
-    };
-    if graph
-        .remove_node_edge(FftNode::ResolveOutputs, CameraDriverLabel)
-        .is_err()
-    {
-        bevy::log::warn!(
-            "splice_after_resolve_outputs: could not remove ResolveOutputs → CameraDriver edge. Register FftPlugin before OceanPlugin."
-        );
-        return;
-    }
-    let user = user_pass.intern();
-    graph.add_node_edge(FftNode::ResolveOutputs, user);
-    graph.add_node_edge(user, CameraDriverLabel);
-}
-
-pub(super) struct FftComputeNode {
-    query: QueryState<(&'static FftBindGroups, &'static FftSettings)>,
-}
-
-impl FromWorld for FftComputeNode {
-    fn from_world(world: &mut World) -> Self {
-        Self {
-            query: world.query(),
-        }
-    }
-}
-
-fn fft_set_push_constants(pass: &mut ComputePass<'_>, pc: &FftPushConstants) {
-    pass.set_push_constants(0, bytemuck::bytes_of(pc));
+fn fft_set_immediates(pass: &mut ComputePass<'_>, pc: &FftPushConstants) {
+    pass.set_immediates(0, bytemuck::bytes_of(pc));
 }
 
 fn fft_dispatch_dit_chain(
@@ -153,7 +93,7 @@ fn fft_dispatch_dit_chain(
             dst_buffer: dst,
             flags,
         };
-        fft_set_push_constants(pass, &pc);
+        fft_set_immediates(pass, &pc);
         pass.dispatch_workgroups(gx, n, 1);
         std::mem::swap(&mut src, &mut dst);
     }
@@ -176,7 +116,7 @@ fn fft_dispatch_copy(
         dst_buffer: dst,
         flags: 0,
     };
-    fft_set_push_constants(pass, &pc);
+    fft_set_immediates(pass, &pc);
     let gx = n.div_ceil(16);
     let gy = n.div_ceil(16);
     pass.dispatch_workgroups(gx, gy, 1);
@@ -296,181 +236,146 @@ pub fn run_inverse_fft(
     }
 }
 
-impl Node for FftComputeNode {
-    fn update(&mut self, world: &mut World) {
-        self.query.update_archetypes(world);
-    }
+/// Registers the stock FFT compute chain on the root [`RenderGraph`] schedule, before the camera driver.
+pub fn plug_fft_render_graph(render_app: &mut SubApp) {
+    use bevy::core_pipeline::schedule::camera_driver;
 
-    fn run(
-        &self,
-        graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        let pipelines = world.resource::<FftPipelines>();
-        let pipeline_cache = world.resource::<PipelineCache>();
-        let node_label = graph.label();
+    render_app
+        .init_resource::<FftSpectrumSpliced>()
+        .add_systems(
+            RenderGraph,
+            ((
+                run_fft_forward.in_set(FftNode::ComputeFFT),
+                fft_spectrum_passthrough
+                    .run_if(|s: bevy::prelude::Res<FftSpectrumSpliced>| !s.0)
+                    .in_set(FftNode::SpectrumPass),
+                run_fft_resolve_spectrum.in_set(FftNode::ResolveSpectrum),
+                run_fft_inverse.in_set(FftNode::ComputeIFFT),
+                run_fft_resolve_outputs.in_set(FftNode::ResolveOutputs),
+            )
+                .chain(),)
+                .before(camera_driver)
+                .in_set(RenderGraphSystems::Render),
+        );
+}
 
-        for (bind_groups, settings) in self.query.iter_manual(world) {
-            let schedule =
-                FftSchedule::try_from_bits(settings.schedule).unwrap_or(FftSchedule::Forward);
+/// Disables the stock no-op spectrum pass. Register your pass on [`RenderGraph`] between
+/// [`run_fft_forward`] and [`run_fft_resolve_spectrum`].
+pub fn disable_spectrum_passthrough(render_app: &mut SubApp) {
+    render_app.insert_resource(FftSpectrumSpliced(true));
+}
 
-            if node_label == FftNode::ComputeFFT.intern()
-                && matches!(schedule, FftSchedule::Inverse)
-            {
-                once!(info!(
-                    "Skipping forward FFT because schedule is FftSchedule::Inverse"
-                ));
-                continue;
-            }
+pub fn run_fft_forward(
+    mut ctx: RenderContext,
+    pipelines: bevy::prelude::Res<FftPipelines>,
+    pipeline_cache: bevy::prelude::Res<PipelineCache>,
+    query: Query<(&FftBindGroups, &FftSettings)>,
+) {
+    let command_encoder = ctx.command_encoder();
+    let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+        label: Some("fft_forward".into()),
+        timestamp_writes: None,
+    });
 
-            if node_label == FftNode::ComputeIFFT.intern()
-                && matches!(schedule, FftSchedule::Forward)
-            {
-                continue;
-            }
-
-            let command_encoder = render_context.command_encoder();
-            let label = if node_label == FftNode::ComputeFFT.intern() {
-                "fft_forward"
-            } else {
-                "fft_inverse"
-            };
-
-            let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some(label.into()),
-                timestamp_writes: None,
-            });
-
-            if node_label == FftNode::ComputeFFT.intern() {
-                if !matches!(schedule, FftSchedule::Inverse) {
-                    run_forward_fft(
-                        pipelines,
-                        pipeline_cache,
-                        &mut compute_pass,
-                        &bind_groups.common,
-                        settings,
-                    );
-                }
-            } else if node_label == FftNode::ComputeIFFT.intern() {
-                if !matches!(schedule, FftSchedule::Forward) {
-                    run_inverse_fft(
-                        pipelines,
-                        pipeline_cache,
-                        &mut compute_pass,
-                        &bind_groups.common,
-                        settings,
-                    );
-                }
-            } else {
-                once!(error!(
-                    "FftComputeNode used with invalid label: {:?}",
-                    node_label
-                ));
-                return Ok(());
-            }
+    for (bind_groups, settings) in &query {
+        let schedule =
+            FftSchedule::try_from_bits(settings.schedule).unwrap_or(FftSchedule::Forward);
+        if matches!(schedule, FftSchedule::Inverse) {
+            once!(info!(
+                "Skipping forward FFT because schedule is FftSchedule::Inverse"
+            ));
+            continue;
         }
-
-        Ok(())
+        run_forward_fft(
+            &pipelines,
+            &pipeline_cache,
+            &mut compute_pass,
+            &bind_groups.common,
+            settings,
+        );
     }
 }
 
-pub(super) struct FftResolveSpectrumNode {
-    query: QueryState<(&'static FftResolveBindGroups, &'static FftSettings)>,
-}
+pub fn run_fft_inverse(
+    mut ctx: RenderContext,
+    pipelines: bevy::prelude::Res<FftPipelines>,
+    pipeline_cache: bevy::prelude::Res<PipelineCache>,
+    query: Query<(&FftBindGroups, &FftSettings)>,
+) {
+    let command_encoder = ctx.command_encoder();
+    let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+        label: Some("fft_inverse".into()),
+        timestamp_writes: None,
+    });
 
-impl FromWorld for FftResolveSpectrumNode {
-    fn from_world(world: &mut World) -> Self {
-        Self {
-            query: world.query(),
+    for (bind_groups, settings) in &query {
+        let schedule =
+            FftSchedule::try_from_bits(settings.schedule).unwrap_or(FftSchedule::Forward);
+        if matches!(schedule, FftSchedule::Forward) {
+            continue;
         }
+        run_inverse_fft(
+            &pipelines,
+            &pipeline_cache,
+            &mut compute_pass,
+            &bind_groups.common,
+            settings,
+        );
     }
 }
 
-impl Node for FftResolveSpectrumNode {
-    fn update(&mut self, world: &mut World) {
-        self.query.update_archetypes(world);
-    }
+fn fft_spectrum_passthrough() {}
 
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        let pipelines = world.resource::<FftPipelines>();
-        let pipeline_cache = world.resource::<PipelineCache>();
+pub fn run_fft_resolve_spectrum(
+    mut ctx: RenderContext,
+    pipelines: bevy::prelude::Res<FftPipelines>,
+    pipeline_cache: bevy::prelude::Res<PipelineCache>,
+    query: Query<(&FftResolveBindGroups, &FftSettings)>,
+) {
+    let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipelines.resolve_spectrum) else {
+        return;
+    };
 
-        let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipelines.resolve_spectrum) else {
-            return Ok(());
-        };
+    let command_encoder = ctx.command_encoder();
+    let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+        label: Some("fft_resolve_spectrum_pass".into()),
+        timestamp_writes: None,
+    });
 
-        let command_encoder = render_context.command_encoder();
-        let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("fft_resolve_spectrum_pass".into()),
-            timestamp_writes: None,
-        });
+    compute_pass.set_pipeline(pipeline);
 
-        compute_pass.set_pipeline(pipeline);
-
-        let wg = 16u32;
-        for (bind, settings) in self.query.iter_manual(world) {
-            compute_pass.set_bind_group(0, &bind.group, &[]);
-            let nx = settings.size.x.div_ceil(wg);
-            let ny = settings.size.y.div_ceil(wg);
-            compute_pass.dispatch_workgroups(nx, ny, 1);
-        }
-
-        Ok(())
+    let wg = 16u32;
+    for (bind, settings) in &query {
+        compute_pass.set_bind_group(0, &bind.group, &[]);
+        let nx = settings.size.x.div_ceil(wg);
+        let ny = settings.size.y.div_ceil(wg);
+        compute_pass.dispatch_workgroups(nx, ny, 1);
     }
 }
 
-pub(super) struct FftResolveOutputsNode {
-    query: QueryState<(&'static FftResolveBindGroups, &'static FftSettings)>,
-}
+pub fn run_fft_resolve_outputs(
+    mut ctx: RenderContext,
+    pipelines: bevy::prelude::Res<FftPipelines>,
+    pipeline_cache: bevy::prelude::Res<PipelineCache>,
+    query: Query<(&FftResolveBindGroups, &FftSettings)>,
+) {
+    let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipelines.resolve_spatial) else {
+        return;
+    };
 
-impl FromWorld for FftResolveOutputsNode {
-    fn from_world(world: &mut World) -> Self {
-        Self {
-            query: world.query(),
-        }
-    }
-}
+    let command_encoder = ctx.command_encoder();
+    let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+        label: Some("fft_resolve_spatial_pass".into()),
+        timestamp_writes: None,
+    });
 
-impl Node for FftResolveOutputsNode {
-    fn update(&mut self, world: &mut World) {
-        self.query.update_archetypes(world);
-    }
+    compute_pass.set_pipeline(pipeline);
 
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        let pipelines = world.resource::<FftPipelines>();
-        let pipeline_cache = world.resource::<PipelineCache>();
-
-        let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipelines.resolve_spatial) else {
-            return Ok(());
-        };
-
-        let command_encoder = render_context.command_encoder();
-        let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("fft_resolve_spatial_pass".into()),
-            timestamp_writes: None,
-        });
-
-        compute_pass.set_pipeline(pipeline);
-
-        let wg = 16u32;
-        for (bind, settings) in self.query.iter_manual(world) {
-            compute_pass.set_bind_group(0, &bind.group, &[]);
-            let nx = settings.size.x.div_ceil(wg);
-            let ny = settings.size.y.div_ceil(wg);
-            compute_pass.dispatch_workgroups(nx, ny, 1);
-        }
-
-        Ok(())
+    let wg = 16u32;
+    for (bind, settings) in &query {
+        compute_pass.set_bind_group(0, &bind.group, &[]);
+        let nx = settings.size.x.div_ceil(wg);
+        let ny = settings.size.y.div_ceil(wg);
+        compute_pass.dispatch_workgroups(nx, ny, 1);
     }
 }

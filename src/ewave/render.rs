@@ -3,13 +3,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use bevy::app::SubApp;
-use bevy::ecs::query::QueryState;
 use bevy::ecs::world::FromWorld;
-use bevy::log::warn;
-use bevy::render::graph::CameraDriverLabel;
-use bevy::render::render_graph::{
-    Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel,
-};
 use bevy::render::render_resource::binding_types::{texture_storage_2d, uniform_buffer};
 use bevy::render::render_resource::encase::internal::{WriteInto, Writer};
 use bevy::render::render_resource::{
@@ -29,7 +23,7 @@ use bevy::{
 
 use crate::ewave::{EwaveController, EwaveGridImages, EwaveSimRoot};
 use crate::fft::resources::{FftBindGroupLayouts, FftPipelines, FftTextures};
-use crate::fft::{FftNode, FftSettings, run_forward_fft, run_inverse_fft};
+use crate::fft::{FftSettings, run_fft_resolve_outputs, run_forward_fft, run_inverse_fft};
 
 #[repr(C)]
 #[derive(Copy, Clone, Default, ShaderType)]
@@ -95,7 +89,7 @@ impl FromWorld for EwavePipelines {
             cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some(label.into()),
                 layout: layout_two.clone(),
-                push_constant_ranges: vec![],
+                immediate_size: 0,
                 shader: shader.clone(),
                 shader_defs: ewave_shader_defs.clone(),
                 entry_point: Some(entry.into()),
@@ -342,109 +336,67 @@ fn dispatch_ewave(
     }
 }
 
-#[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
+#[derive(PartialEq, Eq, Debug, Copy, Clone, Hash)]
 pub struct EwaveSimLabel;
 
-pub struct EwaveSimNode {
-    fft_settings: QueryState<&'static FftSettings, With<EwaveSimRoot>>,
-}
-
-impl FromWorld for EwaveSimNode {
-    fn from_world(world: &mut World) -> Self {
-        Self {
-            fft_settings: QueryState::new(world),
-        }
-    }
-}
-
-impl Node for EwaveSimNode {
-    fn update(&mut self, world: &mut World) {
-        self.fft_settings.update_archetypes(world);
-    }
-
-    fn run(
-        &self,
-        _ctx: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        let pl_ew = world.resource::<EwavePipelines>();
-        let pl_fft = world.resource::<FftPipelines>();
-        let cache = world.resource::<PipelineCache>();
-        let controller = world.resource::<EwaveController>();
-        let gpu_res = world.resource::<EwaveGpuResources>();
-        let ts = world.resource::<EwaveTimestamp>();
-
-        let Some(settings) = self.fft_settings.iter_manual(world).next() else {
-            return Ok(());
-        };
-
-        let Some(fft) = gpu_res.fft_bind_group.as_ref() else {
-            return Ok(());
-        };
-        let Some(ew) = gpu_res.ewave_bind_group.as_ref() else {
-            return Ok(());
-        };
-        let n = controller.n;
-        let wgn = wg2(n);
-        let apply_clear = controller.sim_apply_serial
-            != gpu_res.last_cleared_apply_serial.load(Ordering::Relaxed);
-
-        let enc = render_context.command_encoder();
-        {
-            let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("ewave_sim"),
-                ..default()
-            });
-            if apply_clear {
-                dispatch_ewave(&mut pass, &cache, pl_ew.clear_spatial, fft, ew, wgn);
-                gpu_res
-                    .last_cleared_apply_serial
-                    .store(controller.sim_apply_serial, Ordering::Relaxed);
-            }
-
-            if !controller.paused {
-                dispatch_ewave(&mut pass, &cache, pl_ew.pack_h, fft, ew, wgn);
-                run_forward_fft(pl_fft, &cache, &mut pass, fft, settings);
-                dispatch_ewave(&mut pass, &cache, pl_ew.copy_c_h, fft, ew, wgn);
-                dispatch_ewave(&mut pass, &cache, pl_ew.pack_phi, fft, ew, wgn);
-                run_forward_fft(pl_fft, &cache, &mut pass, fft, settings);
-                dispatch_ewave(&mut pass, &cache, pl_ew.copy_c_p, fft, ew, wgn);
-                dispatch_ewave(&mut pass, &cache, pl_ew.ewave_k, fft, ew, wgn);
-                dispatch_ewave(&mut pass, &cache, pl_ew.copy_h_c, fft, ew, wgn);
-                run_inverse_fft(pl_fft, &cache, &mut pass, fft, settings);
-                dispatch_ewave(&mut pass, &cache, pl_ew.extract_b_h, fft, ew, wgn);
-                dispatch_ewave(&mut pass, &cache, pl_ew.copy_p_c, fft, ew, wgn);
-                run_inverse_fft(pl_fft, &cache, &mut pass, fft, settings);
-                dispatch_ewave(&mut pass, &cache, pl_ew.extract_b_phi, fft, ew, wgn);
-            }
-            dispatch_ewave(&mut pass, &cache, pl_ew.brush, fft, ew, wgn);
-        }
-        if !controller.paused {
-            ts.0.fetch_add(1, Ordering::Relaxed);
-        }
-        Ok(())
-    }
-}
-
-/// Inserts the eWave pass between the stock FFT `ResolveOutputs` node and the camera so height
-/// reads pick up the latest `h_phi` for the 3D pass.
-pub fn splice_ewave_before_camera(world: &mut World) {
-    let Some(mut graph) = world.get_resource_mut::<RenderGraph>() else {
+pub fn run_ewave_sim(
+    mut ctx: RenderContext,
+    pl_ew: Res<EwavePipelines>,
+    pl_fft: Res<FftPipelines>,
+    cache: Res<PipelineCache>,
+    controller: Res<EwaveController>,
+    gpu_res: Res<EwaveGpuResources>,
+    ts: Res<EwaveTimestamp>,
+    fft_settings: Query<&FftSettings, With<EwaveSimRoot>>,
+) {
+    let Some(settings) = fft_settings.iter().next() else {
         return;
     };
-    if graph
-        .remove_node_edge(FftNode::ResolveOutputs, CameraDriverLabel)
-        .is_err()
-    {
-        warn!(
-            "splice_ewave_before_camera: could not remove ResolveOutputs → CameraDriver edge. Register FftPlugin before EwavePlugin::finish."
-        );
+
+    let Some(fft) = gpu_res.fft_bind_group.as_ref() else {
         return;
+    };
+    let Some(ew) = gpu_res.ewave_bind_group.as_ref() else {
+        return;
+    };
+    let n = controller.n;
+    let wgn = wg2(n);
+    let apply_clear =
+        controller.sim_apply_serial != gpu_res.last_cleared_apply_serial.load(Ordering::Relaxed);
+
+    let enc = ctx.command_encoder();
+    {
+        let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("ewave_sim"),
+            ..default()
+        });
+        if apply_clear {
+            dispatch_ewave(&mut pass, &cache, pl_ew.clear_spatial, fft, ew, wgn);
+            gpu_res
+                .last_cleared_apply_serial
+                .store(controller.sim_apply_serial, Ordering::Relaxed);
+        }
+
+        if !controller.paused {
+            dispatch_ewave(&mut pass, &cache, pl_ew.pack_h, fft, ew, wgn);
+            run_forward_fft(&pl_fft, &cache, &mut pass, fft, settings);
+            dispatch_ewave(&mut pass, &cache, pl_ew.copy_c_h, fft, ew, wgn);
+            dispatch_ewave(&mut pass, &cache, pl_ew.pack_phi, fft, ew, wgn);
+            run_forward_fft(&pl_fft, &cache, &mut pass, fft, settings);
+            dispatch_ewave(&mut pass, &cache, pl_ew.copy_c_p, fft, ew, wgn);
+            dispatch_ewave(&mut pass, &cache, pl_ew.ewave_k, fft, ew, wgn);
+            dispatch_ewave(&mut pass, &cache, pl_ew.copy_h_c, fft, ew, wgn);
+            run_inverse_fft(&pl_fft, &cache, &mut pass, fft, settings);
+            dispatch_ewave(&mut pass, &cache, pl_ew.extract_b_h, fft, ew, wgn);
+            dispatch_ewave(&mut pass, &cache, pl_ew.copy_p_c, fft, ew, wgn);
+            run_inverse_fft(&pl_fft, &cache, &mut pass, fft, settings);
+            dispatch_ewave(&mut pass, &cache, pl_ew.extract_b_phi, fft, ew, wgn);
+        }
+        dispatch_ewave(&mut pass, &cache, pl_ew.brush, fft, ew, wgn);
     }
-    let user = EwaveSimLabel.intern();
-    graph.add_node_edge(FftNode::ResolveOutputs, user);
-    graph.add_node_edge(user, CameraDriverLabel);
+    if !controller.paused {
+        ts.0.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 pub fn plug_ewave_render_app(render_app: &mut SubApp) {
@@ -458,10 +410,11 @@ pub fn plug_ewave_render_app(render_app: &mut SubApp) {
                 .in_set(RenderSystems::PrepareBindGroups)
                 .after(crate::fft::resources::prepare_fft_resolve_bind_groups),
         );
-    render_app
-        .world_mut()
-        .resource_scope(|world, mut graph: Mut<RenderGraph>| {
-            graph.add_node(EwaveSimLabel, EwaveSimNode::from_world(world));
-        });
-    splice_ewave_before_camera(render_app.world_mut());
+    render_app.add_systems(
+        bevy::render::renderer::RenderGraph,
+        run_ewave_sim
+            .after(run_fft_resolve_outputs)
+            .before(bevy::core_pipeline::schedule::camera_driver)
+            .in_set(bevy::render::renderer::RenderGraphSystems::Render),
+    );
 }

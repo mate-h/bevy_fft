@@ -134,7 +134,7 @@ fn bind_demo_textures(
     let Ok(DemoSpatialMesh(material)) = spatial.single() else {
         return;
     };
-    let Some(mat) = materials.get_mut(material) else {
+    let Some(mut mat) = materials.get_mut(material) else {
         return;
     };
     mat.texture = Some(tex.spatial_output.clone());

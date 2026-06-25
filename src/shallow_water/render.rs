@@ -9,9 +9,7 @@ use bevy::{
     prelude::*,
     render::{
         Render, RenderSystems,
-        graph::CameraDriverLabel,
         render_asset::RenderAssets,
-        render_graph::{Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel},
         render_resource::{
             binding_types::{storage_buffer, texture_storage_2d, uniform_buffer},
             encase::internal::{WriteInto, Writer},
@@ -105,7 +103,7 @@ impl FromWorld for ShallowWaterPipelines {
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some(label.into()),
                 layout: layout.clone(),
-                push_constant_ranges: vec![],
+                immediate_size: 0,
                 shader: shader.clone(),
                 shader_defs: vec![],
                 entry_point: Some(entry.into()),
@@ -143,7 +141,7 @@ impl FromWorld for ShallowWaterPipelines {
             update_particles: pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("shallow_water_particles".into()),
                 layout,
-                push_constant_ranges: vec![],
+                immediate_size: 0,
                 shader,
                 shader_defs: vec![],
                 entry_point: Some("updateParticles".into()),
@@ -381,165 +379,137 @@ pub fn prepare_shallow_water_gpu(
     gpu.settings_bind_group = Some(settings_bind_group);
 }
 
-#[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
+#[derive(PartialEq, Eq, Debug, Copy, Clone, Hash)]
 pub struct ShallowWaterSimLabel;
 
-pub struct ShallowWaterSimNode;
-
-impl FromWorld for ShallowWaterSimNode {
-    fn from_world(_world: &mut World) -> Self {
-        Self
-    }
-}
-
-impl Node for ShallowWaterSimNode {
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        if world.get_resource::<ShallowWaterController>().is_none() {
-            return Ok(());
-        }
-
-        let pl = world.resource::<ShallowWaterPipelines>();
-        let cache = world.resource::<PipelineCache>();
-        let controller = world.resource::<ShallowWaterController>();
-        let gpu_res = world.resource::<ShallowWaterGpuResources>();
-        let timestamp = world.resource::<ShallowWaterTimestamp>();
-
-        let Some(bg0) = gpu_res.buffer_bind_group.as_ref() else {
-            return Ok(());
-        };
-        let Some(bg1) = gpu_res.settings_bind_group.as_ref() else {
-            return Ok(());
-        };
-
-        macro_rules! pipe {
-            ($field:ident) => {
-                cache.get_compute_pipeline(pl.$field)
-            };
-        }
-
-        let Some(p_clear) = pipe!(clear) else {
-            return Ok(());
-        };
-        let Some(p_preset) = pipe!(load_preset) else {
-            return Ok(());
-        };
-        let Some(p_interact) = pipe!(interact) else {
-            return Ok(());
-        };
-
-        macro_rules! require_pipe {
-            ($name:ident) => {
-                match pipe!($name) {
-                    Some(p) => p,
-                    None => return Ok(()),
-                }
-            };
-        }
-
-        let wg = SimWorkgroups::new(controller.cells_x, controller.cells_y);
-        let pc = gpu_res.particle_count / 64;
-
-        let enc = render_context.command_encoder();
-
-        let apply_init =
-            controller.sim_apply_serial != gpu_res.last_applied_serial.load(Ordering::Relaxed);
-
-        {
-            let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("shallow_water_pass"),
-                timestamp_writes: None,
-            });
-
-            pass.set_bind_group(0, bg0, &[]);
-            pass.set_bind_group(1, bg1, &[]);
-
-            if apply_init {
-                pass.set_pipeline(p_clear);
-                pass.dispatch_workgroups(wg.border.0, wg.border.1, 1);
-                pass.set_pipeline(p_preset);
-                pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
-            }
-
-            pass.set_pipeline(p_interact);
-            pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
-
-            if !controller.paused {
-                pass.set_pipeline(require_pipe!(mac_u_copy));
-                pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-                pass.set_pipeline(require_pipe!(mac_u_sl_forward));
-                pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-                pass.set_pipeline(require_pipe!(mac_u_sl_reverse));
-                pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-                pass.set_pipeline(require_pipe!(mac_u_combine));
-                pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-
-                pass.set_pipeline(require_pipe!(mac_w_copy));
-                pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-                pass.set_pipeline(require_pipe!(mac_w_sl_forward));
-                pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-                pass.set_pipeline(require_pipe!(mac_w_sl_reverse));
-                pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-                pass.set_pipeline(require_pipe!(mac_w_combine));
-                pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-
-                pass.set_pipeline(require_pipe!(integrate_height));
-                pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
-                pass.set_pipeline(require_pipe!(integrate_velocity_u));
-                pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-                pass.set_pipeline(require_pipe!(integrate_velocity_w));
-                pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-                pass.set_pipeline(require_pipe!(apply_domain_boundaries));
-                pass.dispatch_workgroups(wg.border.0, wg.border.1, 1);
-                pass.set_pipeline(require_pipe!(wet_dry_u));
-                pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-                pass.set_pipeline(require_pipe!(wet_dry_w));
-                pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-                pass.set_pipeline(require_pipe!(friction_u));
-                pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-                pass.set_pipeline(require_pipe!(friction_w));
-                pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-                pass.set_pipeline(require_pipe!(pml_step));
-                pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
-                pass.set_pipeline(require_pipe!(pml_damp_u));
-                pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-                pass.set_pipeline(require_pipe!(pml_damp_w));
-                pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-                pass.set_pipeline(require_pipe!(apply_domain_boundaries));
-                pass.dispatch_workgroups(wg.border.0, wg.border.1, 1);
-                pass.set_pipeline(require_pipe!(overshoot_reduce));
-                pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
-                pass.set_pipeline(require_pipe!(reconstruct_cell_velocity));
-                pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
-                pass.set_pipeline(require_pipe!(update_particles));
-                pass.dispatch_workgroups(pc, 1, 1);
-            }
-        }
-
-        if apply_init {
-            gpu_res
-                .last_applied_serial
-                .store(controller.sim_apply_serial, Ordering::Relaxed);
-        }
-
-        if !controller.paused {
-            timestamp.0.fetch_add(1, Ordering::Relaxed);
-        }
-
-        Ok(())
-    }
-}
-
-/// Inserts [`ShallowWaterSimLabel`] before [`CameraDriverLabel`].
-pub fn splice_shallow_water_before_camera(world: &mut World) {
-    let Some(mut graph) = world.get_resource_mut::<RenderGraph>() else {
+pub fn run_shallow_water_sim(
+    mut ctx: RenderContext,
+    pl: Res<ShallowWaterPipelines>,
+    cache: Res<PipelineCache>,
+    controller: Res<ShallowWaterController>,
+    gpu_res: Res<ShallowWaterGpuResources>,
+    timestamp: Res<ShallowWaterTimestamp>,
+) {
+    let Some(bg0) = gpu_res.buffer_bind_group.as_ref() else {
         return;
     };
-    graph.add_node_edge(ShallowWaterSimLabel, CameraDriverLabel);
+    let Some(bg1) = gpu_res.settings_bind_group.as_ref() else {
+        return;
+    };
+
+    macro_rules! pipe {
+        ($field:ident) => {
+            cache.get_compute_pipeline(pl.$field)
+        };
+    }
+
+    let Some(p_clear) = pipe!(clear) else {
+        return;
+    };
+    let Some(p_preset) = pipe!(load_preset) else {
+        return;
+    };
+    let Some(p_interact) = pipe!(interact) else {
+        return;
+    };
+
+    macro_rules! require_pipe {
+        ($name:ident) => {
+            match pipe!($name) {
+                Some(p) => p,
+                None => return,
+            }
+        };
+    }
+
+    let wg = SimWorkgroups::new(controller.cells_x, controller.cells_y);
+    let pc = gpu_res.particle_count / 64;
+
+    let enc = ctx.command_encoder();
+
+    let apply_init =
+        controller.sim_apply_serial != gpu_res.last_applied_serial.load(Ordering::Relaxed);
+
+    {
+        let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("shallow_water_pass"),
+            timestamp_writes: None,
+        });
+
+        pass.set_bind_group(0, bg0, &[]);
+        pass.set_bind_group(1, bg1, &[]);
+
+        if apply_init {
+            pass.set_pipeline(p_clear);
+            pass.dispatch_workgroups(wg.border.0, wg.border.1, 1);
+            pass.set_pipeline(p_preset);
+            pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
+        }
+
+        pass.set_pipeline(p_interact);
+        pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
+
+        if !controller.paused {
+            pass.set_pipeline(require_pipe!(mac_u_copy));
+            pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
+            pass.set_pipeline(require_pipe!(mac_u_sl_forward));
+            pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
+            pass.set_pipeline(require_pipe!(mac_u_sl_reverse));
+            pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
+            pass.set_pipeline(require_pipe!(mac_u_combine));
+            pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
+
+            pass.set_pipeline(require_pipe!(mac_w_copy));
+            pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
+            pass.set_pipeline(require_pipe!(mac_w_sl_forward));
+            pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
+            pass.set_pipeline(require_pipe!(mac_w_sl_reverse));
+            pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
+            pass.set_pipeline(require_pipe!(mac_w_combine));
+            pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
+
+            pass.set_pipeline(require_pipe!(integrate_height));
+            pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
+            pass.set_pipeline(require_pipe!(integrate_velocity_u));
+            pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
+            pass.set_pipeline(require_pipe!(integrate_velocity_w));
+            pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
+            pass.set_pipeline(require_pipe!(apply_domain_boundaries));
+            pass.dispatch_workgroups(wg.border.0, wg.border.1, 1);
+            pass.set_pipeline(require_pipe!(wet_dry_u));
+            pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
+            pass.set_pipeline(require_pipe!(wet_dry_w));
+            pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
+            pass.set_pipeline(require_pipe!(friction_u));
+            pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
+            pass.set_pipeline(require_pipe!(friction_w));
+            pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
+            pass.set_pipeline(require_pipe!(pml_step));
+            pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
+            pass.set_pipeline(require_pipe!(pml_damp_u));
+            pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
+            pass.set_pipeline(require_pipe!(pml_damp_w));
+            pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
+            pass.set_pipeline(require_pipe!(apply_domain_boundaries));
+            pass.dispatch_workgroups(wg.border.0, wg.border.1, 1);
+            pass.set_pipeline(require_pipe!(overshoot_reduce));
+            pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
+            pass.set_pipeline(require_pipe!(reconstruct_cell_velocity));
+            pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
+            pass.set_pipeline(require_pipe!(update_particles));
+            pass.dispatch_workgroups(pc, 1, 1);
+        }
+    }
+
+    if apply_init {
+        gpu_res
+            .last_applied_serial
+            .store(controller.sim_apply_serial, Ordering::Relaxed);
+    }
+
+    if !controller.paused {
+        timestamp.0.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 pub fn plug_shallow_water_render_app(render_app: &mut SubApp) {
@@ -551,11 +521,10 @@ pub fn plug_shallow_water_render_app(render_app: &mut SubApp) {
             Render,
             prepare_shallow_water_gpu.in_set(RenderSystems::PrepareBindGroups),
         );
-
-    render_app
-        .world_mut()
-        .resource_scope(|world, mut graph: Mut<RenderGraph>| {
-            graph.add_node(ShallowWaterSimLabel, ShallowWaterSimNode::from_world(world));
-        });
-    splice_shallow_water_before_camera(render_app.world_mut());
+    render_app.add_systems(
+        bevy::render::renderer::RenderGraph,
+        run_shallow_water_sim
+            .before(bevy::core_pipeline::schedule::camera_driver)
+            .in_set(bevy::render::renderer::RenderGraphSystems::Render),
+    );
 }

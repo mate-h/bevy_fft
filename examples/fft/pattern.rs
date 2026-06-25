@@ -3,7 +3,7 @@
 use crate::band_pass::BandPassParams;
 use bevy::{
     asset::RenderAssetUsages,
-    ecs::{change_detection::Mut, world::FromWorld},
+    ecs::world::FromWorld,
     input::keyboard::KeyCode,
     prelude::*,
     render::{
@@ -11,16 +11,16 @@ use bevy::{
         extract_component::{ExtractComponent, ExtractComponentPlugin},
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_asset::RenderAssets,
-        render_graph::{Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel},
         render_resource::{
             CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor, Extent3d,
             PipelineCache, TextureDimension, TextureFormat,
         },
-        renderer::RenderContext,
+        renderer::{RenderContext, RenderGraph, RenderGraphSystems},
         texture::GpuImage,
     },
     shader::ShaderDefVal,
 };
+use bevy_fft::fft::run_fft_forward;
 use bevy_fft::prelude::*;
 use bytemuck::cast_slice;
 use image::imageops::FilterType;
@@ -111,20 +111,13 @@ impl Plugin for PatternPlugin {
             return;
         };
         render_app.init_resource::<ExamplePatternPipeline>();
-        render_app
-            .world_mut()
-            .resource_scope(|world, mut graph: Mut<RenderGraph>| {
-                graph.add_node(
-                    FftNode::GeneratePattern,
-                    ExamplePatternNode::from_world(world),
-                );
-                graph.add_node(
-                    PatternGraph::CopyInputTexture,
-                    CopyInputTextureNode::from_world(world),
-                );
-                graph.add_node_edge(FftNode::GeneratePattern, PatternGraph::CopyInputTexture);
-                graph.add_node_edge(PatternGraph::CopyInputTexture, FftNode::ComputeFFT);
-            });
+        render_app.add_systems(
+            RenderGraph,
+            (run_example_pattern, run_copy_input_texture)
+                .chain()
+                .before(run_fft_forward)
+                .in_set(RenderGraphSystems::Render),
+        );
     }
 }
 
@@ -221,11 +214,6 @@ fn image_resized_to_rgba32f(src: &Image, width: u32, height: u32) -> Option<Imag
     ))
 }
 
-#[derive(PartialEq, Eq, Debug, Copy, Clone, Hash, RenderLabel)]
-enum PatternGraph {
-    CopyInputTexture,
-}
-
 #[derive(Resource)]
 struct ExamplePatternPipeline {
     radial: CachedComputePipelineId,
@@ -243,7 +231,7 @@ impl FromWorld for ExamplePatternPipeline {
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some(label.into()),
                 layout: vec![layouts.common.clone()],
-                push_constant_ranges: vec![],
+                immediate_size: 0,
                 shader: shader.clone(),
                 shader_defs: defs.clone(),
                 entry_point: Some(entry.into()),
@@ -258,110 +246,67 @@ impl FromWorld for ExamplePatternPipeline {
     }
 }
 
-struct ExamplePatternNode {
-    query: QueryState<(
-        &'static FftBindGroups,
-        &'static FftSettings,
-        Option<&'static FftInputTexture>,
-    )>,
-}
+fn run_example_pattern(
+    mut ctx: RenderContext,
+    pipelines: Res<ExamplePatternPipeline>,
+    pattern: Res<InputPattern>,
+    pipeline_cache: Res<PipelineCache>,
+    query: Query<(&FftBindGroups, &FftSettings, Option<&FftInputTexture>)>,
+) {
+    if pattern.0.uses_external_png() {
+        return;
+    }
 
-impl FromWorld for ExamplePatternNode {
-    fn from_world(world: &mut World) -> Self {
-        Self {
-            query: world.query(),
+    let pipeline_id = match pattern.0 {
+        InputPatternKind::Radial => pipelines.radial,
+        InputPatternKind::Horizontal => pipelines.horizontal,
+        _ => unreachable!(),
+    };
+
+    let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipeline_id) else {
+        return;
+    };
+
+    let command_encoder = ctx.command_encoder();
+    for (bind_groups, settings, input_texture) in &query {
+        if input_texture.is_some() {
+            continue;
         }
+        let mut pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("example_pattern_generation_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_groups.common, &[]);
+        let nx = settings.size.x.div_ceil(WG);
+        let ny = settings.size.y.div_ceil(WG);
+        pass.dispatch_workgroups(nx, ny, 1);
     }
 }
 
-impl Node for ExamplePatternNode {
-    fn update(&mut self, world: &mut World) {
-        self.query.update_archetypes(world);
-    }
+fn run_copy_input_texture(
+    mut ctx: RenderContext,
+    gpu: Res<RenderAssets<GpuImage>>,
+    query: Query<(&FftTextures, &InputPatternTextures)>,
+) {
+    let enc = ctx.command_encoder();
 
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        let pipelines = world.resource::<ExamplePatternPipeline>();
-        let pattern = world.resource::<InputPattern>();
-        let pipeline_cache = world.resource::<PipelineCache>();
-
-        if pattern.0.uses_external_png() {
-            return Ok(());
-        }
-
-        let pipeline_id = match pattern.0 {
-            InputPatternKind::Radial => pipelines.radial,
-            InputPatternKind::Horizontal => pipelines.horizontal,
-            _ => unreachable!(),
+    for (fft, snap) in &query {
+        let Some(src) = gpu.get(&fft.buffer_a_re) else {
+            continue;
         };
-
-        let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipeline_id) else {
-            return Ok(());
+        let Some(dst) = gpu.get(&snap.re) else {
+            continue;
         };
-
-        let command_encoder = render_context.command_encoder();
-        for (bind_groups, settings, input_texture) in self.query.iter_manual(world) {
-            if input_texture.is_some() {
-                continue;
-            }
-            let mut pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("example_pattern_generation_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &bind_groups.common, &[]);
-            let nx = settings.size.x.div_ceil(WG);
-            let ny = settings.size.y.div_ceil(WG);
-            pass.dispatch_workgroups(nx, ny, 1);
-        }
-
-        Ok(())
-    }
-}
-
-struct CopyInputTextureNode {
-    query: QueryState<(&'static FftTextures, &'static InputPatternTextures)>,
-}
-
-impl FromWorld for CopyInputTextureNode {
-    fn from_world(world: &mut World) -> Self {
-        Self {
-            query: world.query(),
-        }
-    }
-}
-
-impl Node for CopyInputTextureNode {
-    fn update(&mut self, world: &mut World) {
-        self.query.update_archetypes(world);
-    }
-
-    fn run(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext,
-        world: &World,
-    ) -> Result<(), NodeRunError> {
-        let gpu = world.resource::<RenderAssets<GpuImage>>();
-        let enc = render_context.command_encoder();
-
-        for (fft, snap) in self.query.iter_manual(world) {
-            let Some(src) = gpu.get(&fft.buffer_a_re) else {
-                continue;
-            };
-            let Some(dst) = gpu.get(&snap.re) else {
-                continue;
-            };
-            enc.copy_texture_to_texture(
-                src.texture.as_image_copy(),
-                dst.texture.as_image_copy(),
-                src.size,
-            );
-        }
-        Ok(())
+        let size = src.size_2d();
+        enc.copy_texture_to_texture(
+            src.texture.as_image_copy(),
+            dst.texture.as_image_copy(),
+            Extent3d {
+                width: size.x,
+                height: size.y,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 }

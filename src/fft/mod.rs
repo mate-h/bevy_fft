@@ -2,12 +2,10 @@ use bevy::{
     app::{App, Plugin, Update},
     asset::{Handle, load_internal_asset},
     ecs::{
-        change_detection::Mut,
         component::Component,
         query::QueryItem,
         schedule::{IntoScheduleConfigs, SystemSet},
         system::lifetimeless::Read,
-        world::FromWorld,
     },
     math::UVec2,
     prelude::Image,
@@ -15,9 +13,8 @@ use bevy::{
     render::{
         Render, RenderApp, RenderSystems,
         extract_component::{ExtractComponent, ExtractComponentPlugin, UniformComponentPlugin},
-        graph::CameraDriverLabel,
-        render_graph::RenderGraph,
         render_resource::*,
+        sync_component::SyncComponent,
     },
     shader::Shader,
 };
@@ -26,12 +23,12 @@ mod node;
 pub mod resources;
 
 pub use node::{
-    FftNode, FftSpectrumPassthroughNode, run_forward_fft, run_inverse_fft,
-    splice_after_resolve_outputs, splice_spectrum_pass,
+    FftNode, FftSpectrumSpliced, disable_spectrum_passthrough, run_fft_forward, run_fft_inverse,
+    run_fft_resolve_outputs, run_fft_resolve_spectrum, run_forward_fft, run_inverse_fft,
 };
 pub use resources::{FftPipelines, FftTextures, prepare_fft_bind_groups, prepare_fft_textures};
 
-use node::{FftComputeNode, FftResolveOutputsNode, FftResolveSpectrumNode};
+use node::plug_fft_render_graph;
 use resources::{
     FftBindGroupLayouts, FftRootsBuffer, copy_input_textures_to_fft_buffers,
     prepare_fft_resolve_bind_groups, prepare_fft_roots_buffer,
@@ -335,6 +332,10 @@ pub struct FftInputTexture {
     pub imag: Option<Handle<Image>>,
 }
 
+impl SyncComponent for FftInputTexture {
+    type Target = Self;
+}
+
 impl ExtractComponent for FftInputTexture {
     type QueryData = Read<FftInputTexture>;
     type QueryFilter = ();
@@ -381,6 +382,10 @@ impl FftSettings {
     }
 }
 
+impl SyncComponent for FftSettings {
+    type Target = Self;
+}
+
 impl ExtractComponent for FftSettings {
     type QueryData = Read<FftSource>;
     type QueryFilter = ();
@@ -395,6 +400,10 @@ impl ExtractComponent for FftSettings {
 #[repr(C)]
 pub struct FftRoots {
     pub roots: [c32; 8192],
+}
+
+impl SyncComponent for FftRoots {
+    type Target = Self;
 }
 
 impl ExtractComponent for FftRoots {
@@ -477,29 +486,7 @@ impl Plugin for FftPlugin {
                 ),
             );
 
-        // Root graph: one FFT+resolve run per frame before any camera subgraph (2D or 3D).
-        render_app
-            .world_mut()
-            .resource_scope(|world, mut graph: Mut<RenderGraph>| {
-                graph.add_node(FftNode::ComputeFFT, FftComputeNode::from_world(world));
-                graph.add_node(FftNode::SpectrumPass, FftSpectrumPassthroughNode::default());
-                graph.add_node(
-                    FftNode::ResolveSpectrum,
-                    FftResolveSpectrumNode::from_world(world),
-                );
-                graph.add_node(FftNode::ComputeIFFT, FftComputeNode::from_world(world));
-                graph.add_node(
-                    FftNode::ResolveOutputs,
-                    FftResolveOutputsNode::from_world(world),
-                );
-                graph.add_node_edges((
-                    FftNode::ComputeFFT,
-                    FftNode::SpectrumPass,
-                    FftNode::ResolveSpectrum,
-                    FftNode::ComputeIFFT,
-                    FftNode::ResolveOutputs,
-                ));
-                graph.add_node_edge(FftNode::ResolveOutputs, CameraDriverLabel);
-            });
+        // Root schedule: one FFT+resolve run per frame before any camera subgraph (2D or 3D).
+        plug_fft_render_graph(render_app);
     }
 }
