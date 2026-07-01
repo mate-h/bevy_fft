@@ -30,9 +30,7 @@ jobs:
           persist-credentials: false
       - &install-rust
         name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.96
-        with:
-          components: rustfmt, clippy
+        run: rustup toolchain install 1.96 --component rustfmt --component clippy --profile minimal
       - &rust-cache
         name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
