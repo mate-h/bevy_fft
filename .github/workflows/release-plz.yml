@@ -28,6 +28,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - &linux-deps
+        name: Install Linux dependencies
+        if: runner.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
       - &install-rust
         name: Install Rust toolchain
         run: rustup toolchain install 1.96 --component rustfmt --component clippy --profile minimal
@@ -53,6 +60,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - *checkout
+      - *linux-deps
       - *install-rust
       - *rust-cache
       - name: Run release-plz
