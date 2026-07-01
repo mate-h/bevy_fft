@@ -2,7 +2,13 @@
 name = "bevy_fft"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.96"
+description = "GPU FFT library for Bevy: frequency-domain filtering and synthesis on square power-of-two grids."
+license = "MIT"
+repository = "https://github.com/mate-h/bevy_fft"
+readme = "README.md"
+keywords = ["bevy", "fft", "gpu", "wgpu", "ocean"]
+categories = ["game-development", "graphics", "rendering::data-formats"]
 
 [dependencies]
 bevy = "0.19.0"

@@ -1,0 +1,65 @@
+# On every push to main, release-plz maintains a release PR (version bump and
+# changelog). Merging that PR bumps the version on main, which lets the
+# release job publish to crates.io and push the git tag and GitHub release.
+#
+# Publishing uses crates.io Trusted Publishing (OIDC). There is no
+# CARGO_REGISTRY_TOKEN secret. See docs/publishing.md for one-time setup.
+
+name: Release-plz
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release-plz-release:
+    name: Release-plz release
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'mate-h' }}
+    permissions:
+      contents: write
+      pull-requests: read
+      id-token: write
+    steps:
+      - &checkout
+        name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - &install-rust
+        name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - &rust-cache
+        name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release-plz-pr:
+    name: Release-plz PR
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'mate-h' }}
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - *checkout
+      - *install-rust
+      - *rust-cache
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

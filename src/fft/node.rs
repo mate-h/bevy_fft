@@ -62,6 +62,7 @@ fn fft_set_immediates(pass: &mut ComputePass<'_>, pc: &FftPushConstants) {
     pass.set_immediates(0, bytemuck::bytes_of(pc));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fft_dispatch_dit_chain(
     pass: &mut ComputePass<'_>,
     pipeline: &bevy::render::render_resource::ComputePipeline,
@@ -273,7 +274,7 @@ pub fn run_fft_forward(
 ) {
     let command_encoder = ctx.command_encoder();
     let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-        label: Some("fft_forward".into()),
+        label: Some("fft_forward"),
         timestamp_writes: None,
     });
 
@@ -304,7 +305,7 @@ pub fn run_fft_inverse(
 ) {
     let command_encoder = ctx.command_encoder();
     let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-        label: Some("fft_inverse".into()),
+        label: Some("fft_inverse"),
         timestamp_writes: None,
     });
 
@@ -338,7 +339,7 @@ pub fn run_fft_resolve_spectrum(
 
     let command_encoder = ctx.command_encoder();
     let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-        label: Some("fft_resolve_spectrum_pass".into()),
+        label: Some("fft_resolve_spectrum_pass"),
         timestamp_writes: None,
     });
 
@@ -365,7 +366,7 @@ pub fn run_fft_resolve_outputs(
 
     let command_encoder = ctx.command_encoder();
     let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
-        label: Some("fft_resolve_spatial_pass".into()),
+        label: Some("fft_resolve_spatial_pass"),
         timestamp_writes: None,
     });
 

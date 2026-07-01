@@ -1,0 +1,6 @@
+[workspace]
+git_release_enable = true
+pr_labels = ["release"]
+
+[[package]]
+name = "bevy_fft"

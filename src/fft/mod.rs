@@ -392,7 +392,7 @@ impl ExtractComponent for FftSettings {
     type Out = FftSettings;
 
     fn extract_component(item: QueryItem<'_, '_, Self::QueryData>) -> Option<Self::Out> {
-        Some(FftSettings::from_fft_source(&item))
+        Some(FftSettings::from_fft_source(item))
     }
 }
 

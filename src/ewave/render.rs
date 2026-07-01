@@ -163,13 +163,13 @@ impl EwaveGpuResources {
         self.last_n = n;
         self.fft_settings_buffer = Some(device.create_buffer(&BufferDescriptor {
             label: Some("ewave_fft_settings"),
-            size: FftSettings::min_size().get() as u64,
+            size: FftSettings::min_size().get(),
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
         self.ewave_sim_buffer = Some(device.create_buffer(&BufferDescriptor {
             label: Some("ewave_sim_uniform"),
-            size: <EwaveSimUniform as ShaderType>::min_size().get() as u64,
+            size: <EwaveSimUniform as ShaderType>::min_size().get(),
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
@@ -339,6 +339,7 @@ fn dispatch_ewave(
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash)]
 pub struct EwaveSimLabel;
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_ewave_sim(
     mut ctx: RenderContext,
     pl_ew: Res<EwavePipelines>,

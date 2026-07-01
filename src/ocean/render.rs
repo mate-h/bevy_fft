@@ -346,6 +346,7 @@ impl FromWorld for OceanComputePipelines {
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub(super) fn prepare_ocean_h0_image(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -404,6 +405,7 @@ pub(super) fn sync_ocean_dynamic_uniform(
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub(super) fn prepare_ocean_foam_mask_image(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -506,6 +508,7 @@ type PrepareOceanBgQuery<'w, 's> = Query<
     ),
 >;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_ocean_compute_bind_groups(
     mut commands: Commands,
     render_device: Res<RenderDevice>,
