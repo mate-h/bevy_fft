@@ -23,14 +23,17 @@
 //!
 //! The [`ocean`] module registers [`ocean::OceanSurfaceMaterial`] ([`bevy::pbr::ExtendedMaterial`] over
 //! [`bevy::pbr::StandardMaterial`] plus [`ocean::OceanSurfaceExtension`]) and displaces a mesh using
-//! [`fft::FftTextures::spatial_output`]. Register [`fft::FftPlugin`] before [`ocean::OceanPlugin`] or
-//! [`ewave::EwavePlugin`] so each domain plugin’s `finish` runs after FFT render setup (see those modules).
+//! [`fft::FftTextures::spatial_output`]. Register [`fft::FftPlugin`] before [`ocean::OceanPlugin`],
+//! [`ewave::EwavePlugin`], or [`dispersive::DispersivePlugin`] so each domain plugin’s `finish` runs
+//! after FFT render setup (see those modules). Do not register [`ewave::EwavePlugin`] and
+//! [`dispersive::DispersivePlugin`] together: both splice after FFT resolve.
 //! The GPU twiddle table uses one shared
 //! [`fft::resources::FftRootsBuffer`] for all [`fft::FftSource`] entities. Every active transform
 //! must use the same roots layout (typical when all grids share the stock forward table for their `orders`).
 //! Broader ocean and bloom plans live in **`ROADMAP.md`**.
 
 pub mod complex;
+pub mod dispersive;
 pub mod ewave;
 pub mod fft;
 pub mod ocean;
