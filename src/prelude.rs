@@ -1,12 +1,16 @@
 //! Common import path for in-repo examples and domain plugins: FFT entities, render-graph ordering
 //! ([`crate::fft::disable_spectrum_passthrough`], [`crate::fft::FftNode`], [`crate::fft::run_fft_forward`],
-//! [`crate::fft::run_fft_resolve_spectrum`]), [`crate::ocean`] and [`ewave`](crate::ewave) surface types,
-//! shallow-water surface types, and symbols the `fft` example uses ([`crate::fft::FftInputTexture`],
-//! [`crate::fft::prepare_fft_bind_groups`]).
+//! [`crate::fft::run_fft_resolve_spectrum`]), [`crate::ocean`], [`ewave`](crate::ewave), and
+//! [`dispersive`](crate::dispersive) surface types, shallow-water surface types, and symbols the `fft`
+//! example uses ([`crate::fft::FftInputTexture`], [`crate::fft::prepare_fft_bind_groups`]).
 //!
 //! Twiddle helpers, [`crate::fft::run_forward_fft`], [`crate::fft::run_inverse_fft`], and other
 //! internals remain on [`crate::fft`] and [`crate::fft::resources`].
 
+pub use crate::dispersive::{
+    DispersiveController, DispersiveGridImages, DispersiveMaterialUniform, DispersivePlugin,
+    DispersiveSimRoot, DispersiveSurfaceExtension, DispersiveSurfaceMaterial, DispersiveSurfaceTag,
+};
 pub use crate::ewave::{
     EwaveController, EwaveGridImages, EwaveMaterialUniform, EwavePlugin, EwaveSimRoot,
     EwaveSurfaceExtension, EwaveSurfaceMaterial, EwaveSurfaceTag,
