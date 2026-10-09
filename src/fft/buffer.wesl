@@ -16,7 +16,6 @@ import bevy_fft::fft::bindings::{
     buffer_d_im,
 };
 
-@if(CHANNELS)
 alias c32_n = c32_4;
 
 // Helper functions that take an explicit iteration parameter

@@ -26,7 +26,6 @@ import bevy_fft::fft::fft_common::{
     get_fft_root,
 };
 
-@if(CHANNELS)
 alias c32_n = c32_4;
 
 struct FftPushConstants {

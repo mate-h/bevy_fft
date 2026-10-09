@@ -16,7 +16,6 @@ import bevy_fft::fft::buffer::{
 };
 import bevy_fft::fft::fft_common::fft_reverse_lower_bits;
 
-@if(CHANNELS)
 alias c32_n = c32_4;
 
 @compute @workgroup_size(8, 8, 1)

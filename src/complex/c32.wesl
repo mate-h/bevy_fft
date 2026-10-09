@@ -36,11 +36,8 @@ struct packed_c32_4 {
     value: vec4<u32>,
 }
 
-@if(CHANNELS)
 alias c32_n = c32_4;
-@if(CHANNELS)
 alias packed_c32_n = packed_c32_4;
-
 // UNPACKING
 
 fn unpack_c32(p: packed_c32) -> c32 {
@@ -82,6 +79,9 @@ fn unpack_c32_4(p: packed_c32_4) -> c32_4 {
     );
 }
 
+fn unpack_c32_n(packed: packed_c32_n) -> c32_n {
+    return unpack_c32_4(packed);
+}
 
 // PACKING
 
@@ -111,6 +111,9 @@ fn pack_c32_4(unpacked: c32_4) -> packed_c32_4 {
     return packed_c32_4(vec4(packed_x, packed_y, packed_z, packed_w));
 }
 
+fn pack_c32_n(unpacked: c32_n) -> packed_c32_n {
+    return pack_c32_4(unpacked);
+}
 
 // SPLATTING
 
@@ -130,6 +133,9 @@ fn splat_c32_4(c: c32) -> c32_4 {
     return c32_4(vec4(c.re), vec4(c.im));
 }
 
+fn splat_c32_n(c: c32) -> c32_n {
+    return splat_c32_4(c);
+}
 
 // ARITHMETIC
 
@@ -149,6 +155,9 @@ fn add_c32_4(c1: c32_4, c2: c32_4) -> c32_4 {
     return c32_4(c1.re + c2.re, c1.im + c2.im);
 }
 
+fn add_c32_n(c1: c32_n, c2: c32_n) -> c32_n {
+    return add_c32_4(c1, c2);
+}
 
 fn neg_c32(c: c32) -> c32 {
     return c32(-c.re, -c.im);
@@ -166,6 +175,9 @@ fn neg_c32_4(c: c32_4) -> c32_4 {
     return c32_4(-c.re, -c.im);
 }
 
+fn neg_c32_n(c: c32_n) -> c32_n {
+    return neg_c32_4(c);
+}
 
 fn mul_c32(c1: c32, c2: c32) -> c32 {
     let real = c1.re * c2.re - c1.im * c2.im;
@@ -191,6 +203,9 @@ fn mul_c32_4(c1: c32_4, c2: c32_4) -> c32_4 {
     return c32_4(real, imag);
 }
 
+fn mul_c32_n(c1: c32_n, c2: c32_n) -> c32_n {
+    return mul_c32_4(c1, c2);
+}
 
 fn muls_c32(c1: c32, c2: c32) -> c32 {
     let real = c1.re * c2.re - c1.im * c2.im;
@@ -216,6 +231,9 @@ fn muls_c32_4(c1: c32_4, c2: c32) -> c32_4 {
     return c32_4(real, imag);
 }
 
+fn muls_c32_n(c1: c32_n, c2: c32) -> c32_n {
+    return muls_c32_4(c1, c2);
+}
 
 
 fn fma_c32(c1: c32, c2: c32, c3: c32) -> c32 {
@@ -234,6 +252,9 @@ fn fma_c32_4(c1: c32_4, c2: c32, c3: c32_4) -> c32_4 {
     return add_c32_4(muls_c32_4(c1, c2), c3);
 }
 
+fn fma_c32_n(c1: c32_n, c2: c32, c3: c32_n) -> c32_n {
+    return fma_c32_4(c1, c2, c3);
+}
 
 fn cis_c32(theta: f32) -> c32 {
     return c32(cos(theta), sin(theta));
@@ -255,3 +276,6 @@ fn conj_c32_4(c: c32_4) -> c32_4 {
     return c32_4(c.re, -c.im);
 }
 
+fn conj_c32_n(c: c32_n) -> c32_n {
+    return conj_c32_4(c);
+}

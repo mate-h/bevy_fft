@@ -178,8 +178,7 @@ fn ocean_mix_foam_into_base_color(mesh_uv: vec2<f32>, base_color: vec4<f32>) -> 
 fn vertex(vertex: Vertex) -> VertexOutput {
     let surf = ocean_displace_surface(vertex.instance_index, vertex.position, vertex.uv);
 
-@if(PREPASS_PIPELINE)
-@if(NORMAL_PREPASS_OR_DEFERRED_PREPASS)
+@if(PREPASS_PIPELINE && NORMAL_PREPASS_OR_DEFERRED_PREPASS) {
     var out: VertexOutput;
     out.position = surf.clip_position;
     out.world_position = surf.world_position;
@@ -200,7 +199,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         get_world_from_local(vertex.instance_index)[3],
     );
     return out;
-@else
+} @elif(PREPASS_PIPELINE) {
     var out: VertexOutput;
     out.position = surf.clip_position;
     out.world_position = surf.world_position;
@@ -214,16 +213,17 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     out.previous_world_position = surf.world_position;
 @if(VERTEX_COLORS)
     out.color = vertex.color;
-@if(UNCLIPPED_DEPTH_ORTHO_EMULATION)
+@if(UNCLIPPED_DEPTH_ORTHO_EMULATION) {
     out.unclipped_depth = surf.clip_position.z;
     out.position.z = min(out.position.z, 1.0);
+}
 @if(VISIBILITY_RANGE_DITHER)
     out.visibility_range_dither = get_visibility_range_dither_level(
         vertex.instance_index,
         get_world_from_local(vertex.instance_index)[3],
     );
     return out;
-@else
+} @else {
     var out: VertexOutput;
     out.position = surf.clip_position;
     out.world_position = surf.world_position;
@@ -243,22 +243,25 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     );
     return out;
 }
-
-@if(PREPASS_PIPELINE)
+}
 
 @if(!PREPASS_PIPELINE)
 @fragment
 fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
-    pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
-@if(VERTEX_OUTPUT_INSTANCE_INDEX)
-@if(VERTEX_UVS_A)
+    pbr_input.material.base_color = alpha_discard(
+        pbr_input.material.flags,
+        pbr_input.material.alpha_cutoff,
+        pbr_input.material.base_color
+    );
+@if(VERTEX_OUTPUT_INSTANCE_INDEX && VERTEX_UVS_A) {
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
     let n_world = ocean_highres_world_normal(in.instance_index, in.uv);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = ocean_mix_foam_into_base_color(in.uv, pbr_input.material.base_color);
+}
     var out: FragmentOutput;
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
         out.color = apply_pbr_lighting(pbr_input);
@@ -269,25 +272,29 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     return out;
 }
 
-@if(PREPASS_PIPELINE)
-@if(PREPASS_FRAGMENT)
+@if(PREPASS_PIPELINE && PREPASS_FRAGMENT)
 @fragment
 fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
-@if(!NORMAL_PREPASS_OR_DEFERRED_PREPASS)
+@if(!NORMAL_PREPASS_OR_DEFERRED_PREPASS) {
     var out: FragmentOutput;
 @if(UNCLIPPED_DEPTH_ORTHO_EMULATION)
     out.frag_depth = in.position.z;
     return out;
-@else
+} @else {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
-    pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
-@if(VERTEX_OUTPUT_INSTANCE_INDEX)
-@if(VERTEX_UVS_A)
+    pbr_input.material.base_color = alpha_discard(
+        pbr_input.material.flags,
+        pbr_input.material.alpha_cutoff,
+        pbr_input.material.base_color
+    );
+@if(VERTEX_OUTPUT_INSTANCE_INDEX && VERTEX_UVS_A) {
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
     let n_world = ocean_highres_world_normal(in.instance_index, in.uv);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = ocean_mix_foam_into_base_color(in.uv, pbr_input.material.base_color);
+}
     return deferred_output(in, pbr_input);
+}
 }

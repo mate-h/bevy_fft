@@ -23,9 +23,7 @@ import bevy_fft::fft::bindings::{
     im_tex,
 };
 
-@if(CHANNELS)
 alias c32_n = c32_4;
-@if(CHANNELS)
 alias packed_c32_n = packed_c32_4;
 
 // --- load packed texels as channel structs ---
