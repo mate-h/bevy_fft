@@ -1,6 +1,6 @@
 //! Single-precision complex number **`c32`** for CPU-side twiddle tables and GPU uniform packing.
 //!
-//! WGSL definitions live in **`c32.wgsl`**.
+//! WESL definitions live in **`c32.wesl`**.
 
 use std::{
     fmt::{self, Display, Formatter},
@@ -151,4 +151,10 @@ impl DivAssign for c32 {
     fn div_assign(&mut self, rhs: Self) {
         *self = *self / rhs;
     }
+}
+
+
+/// Registers the `c32` WESL library (`bevy_fft::complex::c32`).
+pub fn register_shaders(app: &mut bevy::prelude::App) {
+    bevy::shader::load_shader_library!(app, "c32.wesl");
 }

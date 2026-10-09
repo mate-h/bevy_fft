@@ -229,7 +229,7 @@ impl FromWorld for DispersivePipelines {
         );
         let data_layout = BindGroupLayoutDescriptor::new("dispersive_data_layout", &data_entries);
         let layout_two = vec![layouts.common.clone(), data_layout.clone()];
-        let shader = assets.load("dispersive/dispersive.wgsl");
+        let shader = assets.load("dispersive/dispersive.wesl");
         let def = vec![bevy::shader::ShaderDefVal::UInt("CHANNELS".into(), 4)];
         let q = |label: &'static str, entry: &'static str| {
             cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -240,7 +240,8 @@ impl FromWorld for DispersivePipelines {
                 shader_defs: def.clone(),
                 entry_point: Some(entry.into()),
                 zero_initialize_workgroup_memory: false,
-            })
+                constants: vec![],
+        })
         };
         Self {
             data_layout: data_layout.clone(),
@@ -725,12 +726,11 @@ pub fn run_dispersive_sim(
         dispatch(&mut pass, &cache, pl.airy_stack_clear_qx, fft, dbg, wgn);
     }
 
-    for depth_idx in 0usize..4 {
+    for &dbg_d in &airy_dbg {
         let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
             label: Some("dispersive_airy_qx_depth"),
             ..default()
         });
-        let dbg_d = airy_dbg[depth_idx];
         dispatch(
             &mut pass,
             &cache,
@@ -763,12 +763,11 @@ pub fn run_dispersive_sim(
         dispatch(&mut pass, &cache, pl.airy_stack_clear_qy, fft, dbg, wgn);
     }
 
-    for depth_idx in 0usize..4 {
+    for &dbg_d in &airy_dbg {
         let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
             label: Some("dispersive_airy_qy_depth"),
             ..default()
         });
-        let dbg_d = airy_dbg[depth_idx];
         dispatch(
             &mut pass,
             &cache,

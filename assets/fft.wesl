@@ -1,50 +1,33 @@
-#define_import_path bevy_fft::fft
-
-#import bevy_fft::{
-    complex::{
-        splat_c32_n,
-        add_c32_n,
-        mul_c32_n,
-        conj_c32_n,
-        neg_c32_n,
-        c32,
-        c32_2,
-        c32_3,
-        c32_4,
-    },
-    bindings::{
-        settings,
-    },
-    buffer::{
-        read_buffer_a,
-        read_buffer_b,
-        read_buffer_c,
-        write_buffer_a,
-        write_buffer_b,
-        write_buffer_c,
-        write_shifted_d_re,
-        write_shifted_d_im,
-    },
-    plot::{
-        apply_window
-    },
-    fft_common::{
-        fft_reverse_lower_bits,
-        get_fft_root,
-    },
+import bevy_fft::complex::c32::{
+    splat_c32_n,
+    add_c32_n,
+    mul_c32_n,
+    conj_c32_n,
+    neg_c32_n,
+    c32,
+    c32_2,
+    c32_3,
+    c32_4,
+};
+import bevy_fft::fft::bindings::settings;
+import bevy_fft::fft::buffer::{
+    read_buffer_a,
+    read_buffer_b,
+    read_buffer_c,
+    write_buffer_a,
+    write_buffer_b,
+    write_buffer_c,
+    write_shifted_d_re,
+    write_shifted_d_im,
+};
+import bevy_fft::fft::plot::apply_window;
+import bevy_fft::fft::fft_common::{
+    fft_reverse_lower_bits,
+    get_fft_root,
 };
 
-#ifdef CHANNELS
-#if CHANNELS == 1 
-    alias c32_n = c32;
-#else if CHANNELS == 2;
-    alias c32_n = c32_2;
-#else if CHANNELS == 3;
-    alias c32_n = c32_3;
-#else if CHANNELS == 4;
-    alias c32_n = c32_4;
-#endif
-#endif
+@if(CHANNELS)
+alias c32_n = c32_4;
 
 struct FftPushConstants {
     stage: u32,

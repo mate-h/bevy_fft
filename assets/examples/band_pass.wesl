@@ -1,4 +1,4 @@
-#import bevy_fft::bindings::{
+import bevy_fft::fft::bindings::{
     settings,
     buffer_c_re,
     buffer_c_im,

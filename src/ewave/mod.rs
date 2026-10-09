@@ -11,10 +11,7 @@
 mod render;
 
 pub mod shaders {
-    use bevy::asset::{Handle, uuid_handle};
-    use bevy::shader::Shader;
-
-    pub const EWAVE_SURFACE: Handle<Shader> = uuid_handle!("7e0e1a2b-3c4d-5e6f-7890-abcdef123456");
+    pub const EWAVE_SURFACE: &str = "embedded://bevy_fft/ewave/surface.wesl";
 }
 
 pub use render::{
@@ -23,7 +20,7 @@ pub use render::{
 };
 
 use bevy::{
-    asset::load_internal_asset,
+    asset::embedded_asset,
     ecs::{query::QueryItem, system::lifetimeless::Read},
     image::Image,
     pbr::{ExtendedMaterial, MaterialExtension, MaterialPlugin, MeshMaterial3d, StandardMaterial},
@@ -36,7 +33,7 @@ use bevy::{
         render_resource::{AsBindGroup, ShaderType},
         sync_component::SyncComponent,
     },
-    shader::{Shader, ShaderRef},
+    shader::ShaderRef,
 };
 
 use crate::fft::{FftPlugin, FftSkipStockPipeline};
@@ -46,11 +43,11 @@ use crate::fft::{FftPlugin, FftSkipStockPipeline};
 #[derive(Component, Clone, Copy, Default, Reflect)]
 pub struct EwaveSimRoot;
 
-impl SyncComponent for EwaveSimRoot {
+impl SyncComponent<RenderApp> for EwaveSimRoot {
     type Target = Self;
 }
 
-impl ExtractComponent for EwaveSimRoot {
+impl ExtractComponent<RenderApp> for EwaveSimRoot {
     type QueryData = Read<EwaveSimRoot>;
     type QueryFilter = ();
     type Out = EwaveSimRoot;
@@ -71,11 +68,11 @@ pub struct EwaveGridImages {
     pub p_hat_im: Handle<Image>,
 }
 
-impl SyncComponent for EwaveGridImages {
+impl SyncComponent<RenderApp> for EwaveGridImages {
     type Target = Self;
 }
 
-impl ExtractComponent for EwaveGridImages {
+impl ExtractComponent<RenderApp> for EwaveGridImages {
     type QueryData = Read<EwaveGridImages>;
     type QueryFilter = ();
     type Out = EwaveGridImages;
@@ -121,6 +118,7 @@ impl EwaveGridImages {
 /// Main-world simulation parameters; extracted to the render world. The FFT grid lives on
 /// [`EwaveSimRoot`] as [`crate::fft::FftSource`] plus [`crate::fft::resources::FftTextures`].
 #[derive(Resource, Clone, ExtractResource, Reflect)]
+#[extract_app(RenderApp)]
 pub struct EwaveController {
     /// Entity with [`EwaveSimRoot`], [`FftSkipStockPipeline`], [`crate::fft::FftSource`], [`EwaveGridImages`], and [`crate::fft::resources::FftTextures`].
     pub sim_entity: Entity,
@@ -259,16 +257,16 @@ impl Default for EwaveSurfaceExtension {
 
 impl MaterialExtension for EwaveSurfaceExtension {
     fn vertex_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::EWAVE_SURFACE.clone())
+        shaders::EWAVE_SURFACE.into()
     }
     fn fragment_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::EWAVE_SURFACE.clone())
+        shaders::EWAVE_SURFACE.into()
     }
     fn deferred_vertex_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::EWAVE_SURFACE.clone())
+        shaders::EWAVE_SURFACE.into()
     }
     fn deferred_fragment_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::EWAVE_SURFACE.clone())
+        shaders::EWAVE_SURFACE.into()
     }
 }
 
@@ -299,12 +297,7 @@ pub struct EwavePlugin;
 
 impl Plugin for EwavePlugin {
     fn build(&self, app: &mut App) {
-        load_internal_asset!(
-            app,
-            shaders::EWAVE_SURFACE,
-            "surface.wgsl",
-            Shader::from_wgsl
-        );
+        embedded_asset!(app, "surface.wesl");
         app.register_type::<EwaveController>()
             .register_type::<EwaveSimRoot>()
             .register_type::<EwaveGridImages>()

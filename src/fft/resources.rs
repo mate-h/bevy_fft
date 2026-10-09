@@ -5,7 +5,7 @@ use bevy::{
     image::Image,
     log::{info, trace, warn},
     prelude::*,
-    render::{
+    render::{RenderApp, 
         extract_component::{ComponentUniforms, ExtractComponent},
         globals::{GlobalsBuffer, GlobalsUniform},
         render_asset::RenderAssets,
@@ -87,9 +87,9 @@ impl FromWorld for FftPipelines {
         let pipeline_cache = world.resource::<PipelineCache>();
         let layouts = world.resource::<FftBindGroupLayouts>();
         let asset_server = world.resource::<AssetServer>();
-        let fft = asset_server.load("fft.wgsl");
-        let ifft = asset_server.load("ifft.wgsl");
-        let resolve_shader = super::shaders::RESOLVE_OUTPUTS.clone();
+        let fft = asset_server.load("fft.wesl");
+        let ifft = asset_server.load("ifft.wesl");
+        let resolve_shader = asset_server.load(super::shaders::RESOLVE_OUTPUTS);
 
         let base_shader_defs = vec![ShaderDefVal::UInt("CHANNELS".into(), 4)];
 
@@ -102,7 +102,8 @@ impl FromWorld for FftPipelines {
                 shader_defs: base_shader_defs.clone(),
                 entry_point: Some("fft_forward_br_horizontal".into()),
                 zero_initialize_workgroup_memory: false,
-            });
+                constants: vec![],
+        });
 
         let forward_br_vertical =
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -113,7 +114,8 @@ impl FromWorld for FftPipelines {
                 shader_defs: base_shader_defs.clone(),
                 entry_point: Some("fft_forward_br_vertical".into()),
                 zero_initialize_workgroup_memory: false,
-            });
+                constants: vec![],
+        });
 
         let radix2_dit = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("fft_radix2_dit".into()),
@@ -123,6 +125,7 @@ impl FromWorld for FftPipelines {
             shader_defs: base_shader_defs.clone(),
             entry_point: Some("fft_radix2_dit".into()),
             zero_initialize_workgroup_memory: false,
+            constants: vec![],
         });
 
         let fft_copy = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -133,6 +136,7 @@ impl FromWorld for FftPipelines {
             shader_defs: base_shader_defs.clone(),
             entry_point: Some("fft_copy_buffer".into()),
             zero_initialize_workgroup_memory: false,
+            constants: vec![],
         });
 
         let inverse_br_horizontal =
@@ -144,7 +148,8 @@ impl FromWorld for FftPipelines {
                 shader_defs: base_shader_defs.clone(),
                 entry_point: Some("ifft_br_horizontal".into()),
                 zero_initialize_workgroup_memory: false,
-            });
+                constants: vec![],
+        });
 
         let inverse_br_vertical =
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -155,7 +160,8 @@ impl FromWorld for FftPipelines {
                 shader_defs: base_shader_defs,
                 entry_point: Some("ifft_br_vertical".into()),
                 zero_initialize_workgroup_memory: false,
-            });
+                constants: vec![],
+        });
 
         let resolve_spectrum = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("fft_resolve_spectrum_pipeline".into()),
@@ -165,6 +171,7 @@ impl FromWorld for FftPipelines {
             shader_defs: vec![],
             entry_point: Some("resolve_power_spectrum_from_c".into()),
             zero_initialize_workgroup_memory: false,
+            constants: vec![],
         });
 
         let resolve_spatial = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -175,6 +182,7 @@ impl FromWorld for FftPipelines {
             shader_defs: vec![],
             entry_point: Some("resolve_spatial_from_b".into()),
             zero_initialize_workgroup_memory: false,
+            constants: vec![],
         });
 
         Self {
@@ -197,6 +205,7 @@ impl FromWorld for FftPipelines {
 /// `buffer_*` handles are ping-pong storage used inside the FFT graph and are mainly interesting
 /// when you author custom compute that plugs into those bindings.
 #[derive(Component, ExtractComponent, Clone)]
+#[extract_app(RenderApp)]
 pub struct FftTextures {
     pub buffer_a_re: Handle<Image>,
     pub buffer_a_im: Handle<Image>,

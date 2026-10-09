@@ -9,7 +9,7 @@
 mod render;
 
 use bevy::{
-    asset::{Asset, Assets, Handle, RenderAssetUsages, load_internal_asset},
+    asset::{Asset, Assets, Handle, RenderAssetUsages, embedded_asset},
     image::Image,
     pbr::{ExtendedMaterial, MaterialExtension, MeshMaterial3d, StandardMaterial},
     prelude::*,
@@ -21,7 +21,7 @@ use bevy::{
             AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat, TextureUsages,
         },
     },
-    shader::{Shader, ShaderRef},
+    shader::ShaderRef,
 };
 
 pub use render::{
@@ -48,6 +48,7 @@ impl ShallowWaterBorder {
 
 /// Main-world simulation parameters (extracted to the render world each frame).
 #[derive(Resource, Clone, ExtractResource, Reflect)]
+#[extract_app(RenderApp)]
 pub struct ShallowWaterController {
     pub cells_x: u32,
     pub cells_y: u32,
@@ -265,19 +266,19 @@ impl Default for ShallowWaterSurfaceExtension {
 
 impl MaterialExtension for ShallowWaterSurfaceExtension {
     fn vertex_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::SHALLOW_WATER_SURFACE.clone())
+        shaders::SHALLOW_WATER_SURFACE.into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::SHALLOW_WATER_SURFACE.clone())
+        shaders::SHALLOW_WATER_SURFACE.into()
     }
 
     fn deferred_vertex_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::SHALLOW_WATER_SURFACE.clone())
+        shaders::SHALLOW_WATER_SURFACE.into()
     }
 
     fn deferred_fragment_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::SHALLOW_WATER_SURFACE.clone())
+        shaders::SHALLOW_WATER_SURFACE.into()
     }
 }
 
@@ -288,11 +289,7 @@ pub type ShallowWaterSurfaceMaterial =
 pub struct ShallowWaterSurfaceTag;
 
 pub mod shaders {
-    use bevy::asset::{Handle, uuid_handle};
-    use bevy::shader::Shader;
-
-    pub const SHALLOW_WATER_SURFACE: Handle<Shader> =
-        uuid_handle!("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
+    pub const SHALLOW_WATER_SURFACE: &str = "embedded://bevy_fft/shallow_water/surface.wesl";
 }
 
 fn sync_shallow_water_mesh_material(
@@ -315,12 +312,7 @@ pub struct ShallowWaterPlugin;
 
 impl Plugin for ShallowWaterPlugin {
     fn build(&self, app: &mut App) {
-        load_internal_asset!(
-            app,
-            shaders::SHALLOW_WATER_SURFACE,
-            "surface.wgsl",
-            Shader::from_wgsl
-        );
+        embedded_asset!(app, "surface.wesl");
 
         app.register_type::<ShallowWaterController>()
             .register_type::<ShallowWaterBorder>()

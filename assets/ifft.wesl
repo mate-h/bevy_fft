@@ -1,40 +1,23 @@
-#define_import_path bevy_fft::ifft
-
-#import bevy_fft::{
-    complex::{
-        conj_c32_n,
-        c32,
-        c32_2,
-        c32_3,
-        c32_4,
-    },
-    bindings::{
-        settings,
-    },
-    buffer::{
-        read_buffer_a,
-        read_buffer_b,
-        read_buffer_c,
-        write_buffer_a,
-        write_buffer_b,
-        write_buffer_c,
-    },
-    fft_common::{
-        fft_reverse_lower_bits,
-    },
+import bevy_fft::complex::c32::{
+    conj_c32_n,
+    c32,
+    c32_2,
+    c32_3,
+    c32_4,
 };
+import bevy_fft::fft::bindings::settings;
+import bevy_fft::fft::buffer::{
+    read_buffer_a,
+    read_buffer_b,
+    read_buffer_c,
+    write_buffer_a,
+    write_buffer_b,
+    write_buffer_c,
+};
+import bevy_fft::fft::fft_common::fft_reverse_lower_bits;
 
-#ifdef CHANNELS
-#if CHANNELS == 1 
-    alias c32_n = c32;
-#else if CHANNELS == 2;
-    alias c32_n = c32_2;
-#else if CHANNELS == 3;
-    alias c32_n = c32_3;
-#else if CHANNELS == 4;
-    alias c32_n = c32_4;
-#endif
-#endif
+@if(CHANNELS)
+alias c32_n = c32_4;
 
 @compute @workgroup_size(8, 8, 1)
 fn ifft_br_horizontal(@builtin(global_invocation_id) gid: vec3<u32>) {

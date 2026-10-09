@@ -1,7 +1,7 @@
 use bevy::{
     app::{App, Plugin, Update},
-    asset::{Handle, load_internal_asset},
-    ecs::{
+    asset::Handle,
+        ecs::{
         component::Component,
         query::QueryItem,
         schedule::{IntoScheduleConfigs, SystemSet},
@@ -16,7 +16,6 @@ use bevy::{
         render_resource::*,
         sync_component::SyncComponent,
     },
-    shader::Shader,
 };
 
 mod node;
@@ -162,16 +161,8 @@ mod layout_tests {
 }
 
 pub(crate) mod shaders {
-    use bevy::asset::{Handle, uuid_handle};
-    use bevy::shader::Shader;
-
-    pub const C32: Handle<Shader> = uuid_handle!("f9123e70-23a6-4dc3-a9fb-4a02ea636cfb");
-    pub const BUFFER: Handle<Shader> = uuid_handle!("33f1ccb3-7d87-48d3-8984-51892e6652d0");
-    pub const BINDINGS: Handle<Shader> = uuid_handle!("1900debb-855d-489b-a973-2559249c3945");
-    pub const PLOT: Handle<Shader> = uuid_handle!("a021a614-a32b-4b4b-9604-00005bce1436");
-    pub const FFT_COMMON: Handle<Shader> = uuid_handle!("a1b2c3d4-1111-2222-3333-444455556677");
-    pub const RESOLVE_OUTPUTS: Handle<Shader> =
-        uuid_handle!("c4d5e6f0-1111-4222-a333-444455556666");
+    //! Embedded WESL paths for the FFT compute graph.
+    pub const RESOLVE_OUTPUTS: &str = "embedded://bevy_fft/fft/resolve_outputs.wesl";
 }
 
 /// Chooses how much of the 2D FFT pipeline runs on each frame.
@@ -332,11 +323,11 @@ pub struct FftInputTexture {
     pub imag: Option<Handle<Image>>,
 }
 
-impl SyncComponent for FftInputTexture {
+impl SyncComponent<RenderApp> for FftInputTexture {
     type Target = Self;
 }
 
-impl ExtractComponent for FftInputTexture {
+impl ExtractComponent<RenderApp> for FftInputTexture {
     type QueryData = Read<FftInputTexture>;
     type QueryFilter = ();
     type Out = FftInputTexture;
@@ -382,11 +373,11 @@ impl FftSettings {
     }
 }
 
-impl SyncComponent for FftSettings {
+impl SyncComponent<RenderApp> for FftSettings {
     type Target = Self;
 }
 
-impl ExtractComponent for FftSettings {
+impl ExtractComponent<RenderApp> for FftSettings {
     type QueryData = Read<FftSource>;
     type QueryFilter = ();
     type Out = FftSettings;
@@ -402,11 +393,11 @@ pub struct FftRoots {
     pub roots: [c32; 8192],
 }
 
-impl SyncComponent for FftRoots {
+impl SyncComponent<RenderApp> for FftRoots {
     type Target = Self;
 }
 
-impl ExtractComponent for FftRoots {
+impl ExtractComponent<RenderApp> for FftRoots {
     type QueryData = Read<FftSource>;
     type QueryFilter = ();
     type Out = FftRoots;
@@ -420,22 +411,13 @@ pub struct FftPlugin;
 
 impl Plugin for FftPlugin {
     fn build(&self, app: &mut App) {
-        load_internal_asset!(app, shaders::BUFFER, "buffer.wgsl", Shader::from_wgsl);
-        load_internal_asset!(app, shaders::BINDINGS, "bindings.wgsl", Shader::from_wgsl);
-        load_internal_asset!(app, shaders::C32, "../complex/c32.wgsl", Shader::from_wgsl);
-        load_internal_asset!(app, shaders::PLOT, "plot.wgsl", Shader::from_wgsl);
-        load_internal_asset!(
-            app,
-            shaders::FFT_COMMON,
-            "fft_common.wgsl",
-            Shader::from_wgsl
-        );
-        load_internal_asset!(
-            app,
-            shaders::RESOLVE_OUTPUTS,
-            "resolve_outputs.wgsl",
-            Shader::from_wgsl
-        );
+        use bevy::shader::load_shader_library;
+        crate::complex::register_shaders(app);
+        load_shader_library!(app, "bindings.wesl");
+        load_shader_library!(app, "buffer.wesl");
+        load_shader_library!(app, "plot.wesl");
+        load_shader_library!(app, "fft_common.wesl");
+        load_shader_library!(app, "resolve_outputs.wesl");
         // Forward and inverse passes still load from `assets/` so they are easy to tweak.
 
         app.register_type::<FftSource>()

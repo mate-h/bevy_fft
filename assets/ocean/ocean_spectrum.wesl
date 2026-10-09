@@ -1,9 +1,9 @@
-#import bevy_fft::bindings::{
+import bevy_fft::fft::bindings::{
     settings,
     buffer_c_re,
     buffer_c_im,
 };
-#import bevy_fft::complex::c32_4;
+import bevy_fft::complex::c32::c32_4;
 
 const PI: f32 = 3.14159265359;
 

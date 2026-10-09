@@ -1,5 +1,3 @@
-#define_import_path bevy_fft::complex
-
 // TYPES
 
 struct c32 {
@@ -38,21 +36,10 @@ struct packed_c32_4 {
     value: vec4<u32>,
 }
 
-#ifdef CHANNELS
-#if CHANNELS == 1 
-    alias c32_n = c32;
-    alias packed_c32_n = packed_c32;
-#else if CHANNELS == 2;
-    alias c32_n = c32_2;
-    alias packed_c32_n = packed_c32_2;
-#else if CHANNELS == 3;
-    alias c32_n = c32_3;
-    alias packed_c32_n = packed_c32_3;
-#else if CHANNELS == 4;
-    alias c32_n = c32_4;
-    alias packed_c32_n = packed_c32_4;
-#endif
-#endif
+@if(CHANNELS)
+alias c32_n = c32_4;
+@if(CHANNELS)
+alias packed_c32_n = packed_c32_4;
 
 // UNPACKING
 
@@ -95,19 +82,6 @@ fn unpack_c32_4(p: packed_c32_4) -> c32_4 {
     );
 }
 
-#ifdef CHANNELS
-fn unpack_c32_n(packed: packed_c32_n) -> c32_n {
-#if CHANNELS == 1
-    return unpack_c32(packed);
-#else if CHANNELS == 2
-    return unpack_c32_2(packed);
-#else if CHANNELS == 3
-    return unpack_c32_3(packed);
-#else if CHANNELS == 4
-    return unpack_c32_4(packed);
-#endif
-}
-#endif
 
 // PACKING
 
@@ -137,19 +111,6 @@ fn pack_c32_4(unpacked: c32_4) -> packed_c32_4 {
     return packed_c32_4(vec4(packed_x, packed_y, packed_z, packed_w));
 }
 
-#ifdef CHANNELS
-fn pack_c32_n(unpacked: c32_n) -> packed_c32_n {
-#if CHANNELS == 1
-    return pack_c32(unpacked);
-#else if CHANNELS == 2
-    return pack_c32_2(unpacked);
-#else if CHANNELS == 3
-    return pack_c32_3(unpacked);
-#else if CHANNELS == 4
-    return pack_c32_4(unpacked);
-#endif
-}
-#endif
 
 // SPLATTING
 
@@ -169,19 +130,6 @@ fn splat_c32_4(c: c32) -> c32_4 {
     return c32_4(vec4(c.re), vec4(c.im));
 }
 
-#ifdef CHANNELS
-fn splat_c32_n(c: c32) -> c32_n {
-#if CHANNELS == 1
-    return splat_c32(c);
-#else if CHANNELS == 2
-    return splat_c32_2(c);
-#else if CHANNELS == 3
-    return splat_c32_3(c);
-#else if CHANNELS == 4
-    return splat_c32_4(c);
-#endif
-}
-#endif
 
 // ARITHMETIC
 
@@ -201,19 +149,6 @@ fn add_c32_4(c1: c32_4, c2: c32_4) -> c32_4 {
     return c32_4(c1.re + c2.re, c1.im + c2.im);
 }
 
-#ifdef CHANNELS
-fn add_c32_n(c1: c32_n, c2: c32_n) -> c32_n {
-#if CHANNELS == 1
-    return add_c32(c1, c2);
-#else if CHANNELS == 2
-    return add_c32_2(c1, c2);
-#else if CHANNELS == 3
-    return add_c32_3(c1, c2);
-#else if CHANNELS == 4
-    return add_c32_4(c1, c2);
-#endif
-}
-#endif
 
 fn neg_c32(c: c32) -> c32 {
     return c32(-c.re, -c.im);
@@ -231,19 +166,6 @@ fn neg_c32_4(c: c32_4) -> c32_4 {
     return c32_4(-c.re, -c.im);
 }
 
-#ifdef CHANNELS
-fn neg_c32_n(c: c32_n) -> c32_n {
-#if CHANNELS == 1
-    return neg_c32(c);
-#else if CHANNELS == 2
-    return neg_c32_2(c);
-#else if CHANNELS == 3
-    return neg_c32_3(c);
-#else if CHANNELS == 4
-    return neg_c32_4(c);
-#endif
-}
-#endif
 
 fn mul_c32(c1: c32, c2: c32) -> c32 {
     let real = c1.re * c2.re - c1.im * c2.im;
@@ -269,19 +191,6 @@ fn mul_c32_4(c1: c32_4, c2: c32_4) -> c32_4 {
     return c32_4(real, imag);
 }
 
-#ifdef CHANNELS
-fn mul_c32_n(c1: c32_n, c2: c32_n) -> c32_n {
-#if CHANNELS == 1
-    return mul_c32(c1, c2);
-#else if CHANNELS == 2
-    return mul_c32_2(c1, c2);
-#else if CHANNELS == 3
-    return mul_c32_3(c1, c2);
-#else if CHANNELS == 4
-    return mul_c32_4(c1, c2);
-#endif
-}
-#endif
 
 fn muls_c32(c1: c32, c2: c32) -> c32 {
     let real = c1.re * c2.re - c1.im * c2.im;
@@ -307,19 +216,6 @@ fn muls_c32_4(c1: c32_4, c2: c32) -> c32_4 {
     return c32_4(real, imag);
 }
 
-#ifdef CHANNELS
-fn muls_c32_n(c1: c32_n, c2: c32) -> c32_n {
-#if CHANNELS == 1
-    return muls_c32(c1, c2);
-#else if CHANNELS == 2
-    return muls_c32_2(c1, c2);
-#else if CHANNELS == 3
-    return muls_c32_3(c1, c2);
-#else if CHANNELS == 4
-    return muls_c32_4(c1, c2);
-#endif
-}
-#endif
 
 
 fn fma_c32(c1: c32, c2: c32, c3: c32) -> c32 {
@@ -338,19 +234,6 @@ fn fma_c32_4(c1: c32_4, c2: c32, c3: c32_4) -> c32_4 {
     return add_c32_4(muls_c32_4(c1, c2), c3);
 }
 
-#ifdef CHANNELS
-fn fma_c32_n(c1: c32_n, c2: c32, c3: c32_n) -> c32_n {
-#if CHANNELS == 1
-    return fma_c32(c1, c2, c3);
-#else if CHANNELS == 2
-    return fma_c32_2(c1, c2, c3);
-#else if CHANNELS == 3
-    return fma_c32_3(c1, c2, c3);
-#else if CHANNELS == 4
-    return fma_c32_4(c1, c2, c3);
-#endif
-}
-#endif
 
 fn cis_c32(theta: f32) -> c32 {
     return c32(cos(theta), sin(theta));
@@ -372,16 +255,3 @@ fn conj_c32_4(c: c32_4) -> c32_4 {
     return c32_4(c.re, -c.im);
 }
 
-#ifdef CHANNELS
-fn conj_c32_n(c: c32_n) -> c32_n {
-#if CHANNELS == 1
-    return conj_c32(c);
-#else if CHANNELS == 2
-    return conj_c32_2(c);
-#else if CHANNELS == 3
-    return conj_c32_3(c);
-#else if CHANNELS == 4
-    return conj_c32_4(c);
-#endif
-}
-#endif

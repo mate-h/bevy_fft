@@ -25,10 +25,11 @@ use bevy_fft::prelude::*;
 use bytemuck::cast_slice;
 use image::imageops::FilterType;
 
-const PATTERN_SHADER: &str = "examples/pattern.wgsl";
+const PATTERN_SHADER: &str = "examples/pattern.wesl";
 const WG: u32 = 16;
 
 #[derive(Resource, Clone, Copy, Default, PartialEq, Eq, ExtractResource)]
+#[extract_app(RenderApp)]
 pub(crate) struct InputPattern(InputPatternKind);
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -48,6 +49,7 @@ impl InputPatternKind {
 }
 
 #[derive(Component, Clone, ExtractComponent)]
+#[extract_app(RenderApp)]
 pub(crate) struct InputPatternTextures {
     pub(crate) re: Handle<Image>,
 }
@@ -236,7 +238,8 @@ impl FromWorld for ExamplePatternPipeline {
                 shader_defs: defs.clone(),
                 entry_point: Some(entry.into()),
                 zero_initialize_workgroup_memory: false,
-            })
+                constants: vec![],
+        })
         };
 
         Self {

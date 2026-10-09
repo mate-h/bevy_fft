@@ -1,36 +1,23 @@
-#define_import_path bevy_fft::buffer
-
-#import bevy_fft::{
-    complex::{
-        splat_c32_n,
-        c32,
-        c32_2,
-        c32_3,
-        c32_4,
-    },
-    bindings::{
-        buffer_a_re,
-        buffer_a_im,
-        buffer_b_re,
-        buffer_b_im,
-        buffer_c_re,
-        buffer_c_im,
-        buffer_d_re,
-        buffer_d_im,
-    }
+import bevy_fft::complex::c32::{
+    splat_c32_n,
+    c32,
+    c32_2,
+    c32_3,
+    c32_4,
+};
+import bevy_fft::fft::bindings::{
+    buffer_a_re,
+    buffer_a_im,
+    buffer_b_re,
+    buffer_b_im,
+    buffer_c_re,
+    buffer_c_im,
+    buffer_d_re,
+    buffer_d_im,
 };
 
-#ifdef CHANNELS
-#if CHANNELS == 1 
-    alias c32_n = c32;
-#else if CHANNELS == 2;
-    alias c32_n = c32_2;
-#else if CHANNELS == 3;
-    alias c32_n = c32_3;
-#else if CHANNELS == 4;
-    alias c32_n = c32_4;
-#endif
-#endif
+@if(CHANNELS)
+alias c32_n = c32_4;
 
 // Helper functions that take an explicit iteration parameter
 fn read_buffer_a(pos: vec2<u32>) -> c32_n {

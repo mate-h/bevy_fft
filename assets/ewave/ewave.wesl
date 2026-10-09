@@ -1,10 +1,10 @@
-#import bevy_fft::bindings::{
+import bevy_fft::fft::bindings::{
     buffer_a_re,
     buffer_a_im,
     buffer_b_re,
     buffer_c_re,
     buffer_c_im,
-}
+};
 
 struct EwaveSim {
     n: u32,

@@ -1,11 +1,11 @@
 // Hybrid dispersive: decomposition, bar SWE, pack/unpack, spectrum ops, transport, merge.
-#import bevy_fft::bindings::{
+import bevy_fft::fft::bindings::{
     buffer_a_re,
     buffer_a_im,
     buffer_b_re,
     buffer_c_re,
     buffer_c_im,
-}
+};
 
 struct DispersiveSim {
     n: u32,

@@ -15,11 +15,7 @@
 mod render;
 
 pub mod shaders {
-    use bevy::asset::{Handle, uuid_handle};
-    use bevy::shader::Shader;
-
-    pub const DISPERSIVE_SURFACE: Handle<Shader> =
-        uuid_handle!("6f1e0a1b-2c3d-4e5f-7890-abcdef000001");
+    pub const DISPERSIVE_SURFACE: &str = "embedded://bevy_fft/dispersive/surface.wesl";
 }
 
 pub use render::{
@@ -28,7 +24,7 @@ pub use render::{
 };
 
 use bevy::{
-    asset::load_internal_asset,
+    asset::embedded_asset,
     ecs::{query::QueryItem, system::lifetimeless::Read},
     image::Image,
     pbr::{ExtendedMaterial, MaterialExtension, MaterialPlugin, MeshMaterial3d, StandardMaterial},
@@ -41,7 +37,7 @@ use bevy::{
         render_resource::{AsBindGroup, ShaderType},
         sync_component::SyncComponent,
     },
-    shader::{Shader, ShaderRef},
+    shader::ShaderRef,
 };
 
 use crate::fft::{FftPlugin, FftSkipStockPipeline};
@@ -50,11 +46,11 @@ use crate::fft::{FftPlugin, FftSkipStockPipeline};
 #[derive(Component, Clone, Copy, Default, Reflect)]
 pub struct DispersiveSimRoot;
 
-impl SyncComponent for DispersiveSimRoot {
+impl SyncComponent<RenderApp> for DispersiveSimRoot {
     type Target = Self;
 }
 
-impl ExtractComponent for DispersiveSimRoot {
+impl ExtractComponent<RenderApp> for DispersiveSimRoot {
     type QueryData = Read<DispersiveSimRoot>;
     type QueryFilter = ();
     type Out = DispersiveSimRoot;
@@ -89,11 +85,11 @@ pub struct DispersiveGridImages {
     pub bar_vel_prev: Handle<Image>,
 }
 
-impl SyncComponent for DispersiveGridImages {
+impl SyncComponent<RenderApp> for DispersiveGridImages {
     type Target = Self;
 }
 
-impl ExtractComponent for DispersiveGridImages {
+impl ExtractComponent<RenderApp> for DispersiveGridImages {
     type QueryData = Read<DispersiveGridImages>;
     type QueryFilter = ();
     type Out = DispersiveGridImages;
@@ -169,6 +165,7 @@ impl DispersiveGridImages {
 
 /// Main-world parameters (extracted to render world).
 #[derive(Resource, Clone, ExtractResource, Reflect)]
+#[extract_app(RenderApp)]
 pub struct DispersiveController {
     pub sim_entity: Entity,
     pub state: Handle<Image>,
@@ -315,16 +312,16 @@ impl Default for DispersiveSurfaceExtension {
 
 impl MaterialExtension for DispersiveSurfaceExtension {
     fn vertex_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::DISPERSIVE_SURFACE.clone())
+        shaders::DISPERSIVE_SURFACE.into()
     }
     fn fragment_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::DISPERSIVE_SURFACE.clone())
+        shaders::DISPERSIVE_SURFACE.into()
     }
     fn deferred_vertex_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::DISPERSIVE_SURFACE.clone())
+        shaders::DISPERSIVE_SURFACE.into()
     }
     fn deferred_fragment_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::DISPERSIVE_SURFACE.clone())
+        shaders::DISPERSIVE_SURFACE.into()
     }
 }
 
@@ -353,12 +350,7 @@ pub struct DispersivePlugin;
 
 impl Plugin for DispersivePlugin {
     fn build(&self, app: &mut App) {
-        load_internal_asset!(
-            app,
-            shaders::DISPERSIVE_SURFACE,
-            "surface.wgsl",
-            Shader::from_wgsl
-        );
+        embedded_asset!(app, "surface.wesl");
         app.register_type::<DispersiveController>()
             .register_type::<DispersiveSimRoot>()
             .register_type::<DispersiveGridImages>()

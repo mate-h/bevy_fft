@@ -1,13 +1,5 @@
-#define_import_path bevy_fft::fft_common
-
-#import bevy_fft::{
-    complex::{
-        c32,
-    },
-    bindings::{
-        roots_buffer,
-    },
-};
+import bevy_fft::complex::c32::c32;
+import bevy_fft::fft::bindings::roots_buffer;
 
 fn fft_reverse_lower_bits(x: u32, order: u32) -> u32 {
     return reverseBits(x) >> (32u - order);
