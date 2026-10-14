@@ -5,7 +5,8 @@ use bevy::{
     image::Image,
     log::{info, trace, warn},
     prelude::*,
-    render::{RenderApp, 
+    render::{
+        RenderApp,
         extract_component::{ComponentUniforms, ExtractComponent},
         globals::{GlobalsBuffer, GlobalsUniform},
         render_asset::RenderAssets,
@@ -103,7 +104,7 @@ impl FromWorld for FftPipelines {
                 entry_point: Some("fft_forward_br_horizontal".into()),
                 zero_initialize_workgroup_memory: false,
                 constants: vec![],
-        });
+            });
 
         let forward_br_vertical =
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -115,7 +116,7 @@ impl FromWorld for FftPipelines {
                 entry_point: Some("fft_forward_br_vertical".into()),
                 zero_initialize_workgroup_memory: false,
                 constants: vec![],
-        });
+            });
 
         let radix2_dit = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("fft_radix2_dit".into()),
@@ -149,7 +150,7 @@ impl FromWorld for FftPipelines {
                 entry_point: Some("ifft_br_horizontal".into()),
                 zero_initialize_workgroup_memory: false,
                 constants: vec![],
-        });
+            });
 
         let inverse_br_vertical =
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -161,7 +162,7 @@ impl FromWorld for FftPipelines {
                 entry_point: Some("ifft_br_vertical".into()),
                 zero_initialize_workgroup_memory: false,
                 constants: vec![],
-        });
+            });
 
         let resolve_spectrum = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("fft_resolve_spectrum_pipeline".into()),

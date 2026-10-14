@@ -1,7 +1,7 @@
 use bevy::{
     app::{App, Plugin, Update},
     asset::Handle,
-        ecs::{
+    ecs::{
         component::Component,
         query::QueryItem,
         schedule::{IntoScheduleConfigs, SystemSet},

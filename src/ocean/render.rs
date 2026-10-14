@@ -12,7 +12,8 @@ use bevy::{
     pbr::MeshMaterial3d,
     prelude::*,
     reflect::Reflect,
-    render::{RenderApp, 
+    render::{
+        RenderApp,
         extract_component::{ComponentUniforms, ExtractComponent},
         render_asset::RenderAssets,
         render_resource::{

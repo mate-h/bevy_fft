@@ -241,7 +241,7 @@ impl FromWorld for DispersivePipelines {
                 entry_point: Some(entry.into()),
                 zero_initialize_workgroup_memory: false,
                 constants: vec![],
-        })
+            })
         };
         Self {
             data_layout: data_layout.clone(),

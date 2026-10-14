@@ -40,9 +40,7 @@ path = "examples/dispersive/main.rs"
 required-features = ["free_camera"]
 
 [dev-dependencies]
-# No crates.io release targets Bevy 0.20 yet (support table tops out at 0.19 / 0.40–0.42).
-# WIP PR: https://github.com/vladbat00/bevy_egui/pull/500
-bevy_egui = { git = "https://github.com/vladbat00/bevy_egui.git", rev = "cbefd381c5910ae0fb56022ab1637f22587c7e05" }
+bevy_egui = "0.43.1"
 
 [features]
 file_watcher = ["bevy/file_watcher"]

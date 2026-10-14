@@ -239,7 +239,7 @@ impl FromWorld for ExamplePatternPipeline {
                 entry_point: Some(entry.into()),
                 zero_initialize_workgroup_memory: false,
                 constants: vec![],
-        })
+            })
         };
 
         Self {

@@ -153,7 +153,6 @@ impl DivAssign for c32 {
     }
 }
 
-
 /// Registers the `c32` WESL library (`bevy_fft::complex::c32`).
 pub fn register_shaders(app: &mut bevy::prelude::App) {
     bevy::shader::load_shader_library!(app, "c32.wesl");
