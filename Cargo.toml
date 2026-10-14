@@ -1,6 +1,6 @@
 [package]
 name = "bevy_fft"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.97.1"
 description = "GPU FFT library for Bevy: frequency-domain filtering and synthesis on square power-of-two grids."
