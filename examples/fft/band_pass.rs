@@ -42,11 +42,11 @@ impl Default for BandPassParams {
     }
 }
 
-impl SyncComponent for BandPassParams {
+impl SyncComponent<RenderApp> for BandPassParams {
     type Target = Self;
 }
 
-impl ExtractComponent for BandPassParams {
+impl ExtractComponent<RenderApp> for BandPassParams {
     type QueryData = Read<BandPassParams>;
     type QueryFilter = ();
     type Out = Self;
@@ -67,7 +67,7 @@ impl FromWorld for BandPassPipelineRes {
         let pipeline_cache = world.resource::<PipelineCache>();
         let layouts = world.resource::<FftBindGroupLayouts>();
         let asset_server = world.resource::<AssetServer>();
-        let shader = asset_server.load("examples/band_pass.wgsl");
+        let shader = asset_server.load("examples/band_pass.wesl");
 
         let entries = BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
@@ -83,6 +83,7 @@ impl FromWorld for BandPassPipelineRes {
             shader_defs: vec![ShaderDefVal::UInt("CHANNELS".into(), 4)],
             entry_point: Some("radial_band_pass".into()),
             zero_initialize_workgroup_memory: false,
+            constants: vec![],
         });
 
         Self {

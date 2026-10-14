@@ -83,7 +83,7 @@ impl FromWorld for EwavePipelines {
         );
         let data_layout = BindGroupLayoutDescriptor::new("ewave_data_layout", &data_entries);
         let layout_two = vec![layouts.common.clone(), data_layout.clone()];
-        let shader = assets.load("ewave/ewave.wgsl");
+        let shader = assets.load("ewave/ewave.wesl");
         let ewave_shader_defs = vec![bevy::shader::ShaderDefVal::UInt("CHANNELS".into(), 4)];
         let q = |label: &'static str, entry: &'static str| {
             cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -94,6 +94,7 @@ impl FromWorld for EwavePipelines {
                 shader_defs: ewave_shader_defs.clone(),
                 entry_point: Some(entry.into()),
                 zero_initialize_workgroup_memory: false,
+                constants: vec![],
             })
         };
         Self {

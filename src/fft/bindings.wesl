@@ -1,7 +1,5 @@
-#define_import_path bevy_fft::bindings
-
-#import bevy_fft::complex::c32;
-#import bevy_render::globals::Globals;
+import bevy_fft::complex::c32::c32;
+import bevy_render::globals::Globals;
 // Keep this struct byte-for-byte identical to the Rust `FftSettings` uniform.
 struct FftSettings {
     size: vec2<u32>,

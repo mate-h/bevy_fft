@@ -1,5 +1,3 @@
-#define_import_path bevy_fft::resolve_outputs
-
 // Mirror `FftSettings` from `bindings.wgsl` whenever the uniform changes.
 struct FftSettings {
     size: vec2<u32>,

@@ -37,7 +37,7 @@ jobs:
             libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
       - &install-rust
         name: Install Rust toolchain
-        run: rustup toolchain install 1.96 --component rustfmt --component clippy --profile minimal
+        run: rustup toolchain install 1.97.1 --component rustfmt --component clippy --profile minimal
       - &rust-cache
         name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2

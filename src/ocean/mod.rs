@@ -20,7 +20,7 @@
 mod render;
 
 use bevy::{
-    asset::{Asset, Handle, load_internal_asset},
+    asset::{Asset, Handle, embedded_asset},
     pbr::{ExtendedMaterial, MaterialExtension, StandardMaterial},
     prelude::*,
     reflect::{Reflect, TypePath},
@@ -29,7 +29,7 @@ use bevy::{
         extract_component::{ExtractComponentPlugin, UniformComponentPlugin},
         render_resource::{AsBindGroup, ShaderType},
     },
-    shader::{Shader, ShaderRef},
+    shader::ShaderRef,
 };
 
 pub use render::{
@@ -146,19 +146,19 @@ impl Default for OceanSurfaceExtension {
 
 impl MaterialExtension for OceanSurfaceExtension {
     fn vertex_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::OCEAN_SURFACE.clone())
+        shaders::OCEAN_SURFACE.into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::OCEAN_SURFACE.clone())
+        shaders::OCEAN_SURFACE.into()
     }
 
     fn deferred_vertex_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::OCEAN_SURFACE.clone())
+        shaders::OCEAN_SURFACE.into()
     }
 
     fn deferred_fragment_shader() -> ShaderRef {
-        ShaderRef::Handle(shaders::OCEAN_SURFACE.clone())
+        shaders::OCEAN_SURFACE.into()
     }
 }
 
@@ -167,10 +167,7 @@ pub type OceanSurfaceMaterial = ExtendedMaterial<StandardMaterial, OceanSurfaceE
 
 /// Stable handles for WGSL registered by [`OceanPlugin`].
 pub mod shaders {
-    use bevy::asset::{Handle, uuid_handle};
-    use bevy::shader::Shader;
-
-    pub const OCEAN_SURFACE: Handle<Shader> = uuid_handle!("b7c8e9f0-1a2b-4c3d-9e8f-7a6b5c4d3e2f");
+    pub const OCEAN_SURFACE: &str = "embedded://bevy_fft/ocean/ocean.wesl";
 }
 
 /// Marks the entity that carries [`OceanSurfaceMaterial`] for the sim-driven ocean mesh.
@@ -181,7 +178,7 @@ pub struct OceanPlugin;
 
 impl Plugin for OceanPlugin {
     fn build(&self, app: &mut App) {
-        load_internal_asset!(app, shaders::OCEAN_SURFACE, "ocean.wgsl", Shader::from_wgsl);
+        embedded_asset!(app, "ocean.wesl");
 
         app.register_type::<OceanSimSettings>()
             .register_type::<OceanH0Uniform>()

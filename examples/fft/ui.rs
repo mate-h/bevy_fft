@@ -1,5 +1,6 @@
 //! Band-pass sliders and help text for the FFT demo.
 
+#![allow(deprecated)]
 use crate::band_pass::BandPassParams;
 use bevy::{
     ecs::system::ParamSet,

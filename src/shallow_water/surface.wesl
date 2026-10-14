@@ -1,10 +1,60 @@
-#import bevy_pbr::mesh_functions::{
+import bevy_pbr::render::mesh_functions::{
     get_world_from_local,
     get_visibility_range_dither_level,
     mesh_normal_local_to_world,
     mesh_position_local_to_clip,
     mesh_position_local_to_world,
-}
+};
+
+@if(PREPASS_PIPELINE)
+import bevy_pbr::prepass::io::{
+    Vertex,
+    VertexOutput,
+};
+@else
+import bevy_pbr::render::forward_io::{
+    Vertex,
+    VertexOutput,
+};
+
+@if(!PREPASS_PIPELINE)
+import bevy_pbr::render::pbr_fragment::pbr_input_from_standard_material;
+@if(!PREPASS_PIPELINE)
+import bevy_pbr::render::pbr_functions::alpha_discard;
+@if(!PREPASS_PIPELINE)
+import bevy_pbr::render::pbr_functions::prepare_world_normal;
+@if(!PREPASS_PIPELINE)
+import bevy_pbr::render::pbr_types;
+@if(!PREPASS_PIPELINE)
+import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT;
+@if(!PREPASS_PIPELINE)
+import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT;
+@if(!PREPASS_PIPELINE)
+import bevy_pbr::render::forward_io::{
+    VertexOutput as FragVertexOutput,
+    FragmentOutput,
+};
+@if(!PREPASS_PIPELINE)
+import bevy_pbr::render::pbr_functions::{
+    apply_pbr_lighting,
+    main_pass_post_lighting_processing,
+};
+
+@if(PREPASS_PIPELINE && PREPASS_FRAGMENT)
+import bevy_pbr::prepass::io::{
+    VertexOutput as FragVertexOutput,
+    FragmentOutput,
+};
+@if(PREPASS_PIPELINE && PREPASS_FRAGMENT && NORMAL_PREPASS_OR_DEFERRED_PREPASS)
+import bevy_pbr::render::pbr_fragment::pbr_input_from_standard_material;
+@if(PREPASS_PIPELINE && PREPASS_FRAGMENT && NORMAL_PREPASS_OR_DEFERRED_PREPASS)
+import bevy_pbr::render::pbr_functions::alpha_discard;
+@if(PREPASS_PIPELINE && PREPASS_FRAGMENT && NORMAL_PREPASS_OR_DEFERRED_PREPASS)
+import bevy_pbr::render::pbr_functions::prepare_world_normal;
+@if(PREPASS_PIPELINE && PREPASS_FRAGMENT && NORMAL_PREPASS_OR_DEFERRED_PREPASS)
+import bevy_pbr::deferred::functions::deferred_output;
+@if(PREPASS_PIPELINE && PREPASS_FRAGMENT && NORMAL_PREPASS_OR_DEFERRED_PREPASS)
+import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT;
 
 struct ShallowWaterMaterialUniform {
     height_scale: f32,
@@ -13,9 +63,9 @@ struct ShallowWaterMaterialUniform {
     _pad0: f32,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> sw_ext: ShallowWaterMaterialUniform;
-@group(#{MATERIAL_BIND_GROUP}) @binding(101) var bed_water_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(102) var bed_water_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> sw_ext: ShallowWaterMaterialUniform;
+@group(constants::MATERIAL_BIND_GROUP) @binding(101) var bed_water_texture: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(102) var bed_water_sampler: sampler;
 
 /// Texel-centered UV like `ocean.wgsl` so linear sampling lines up with the sim grid.
 fn sw_uv_texel(mesh_uv: vec2<f32>) -> vec2<f32> {
@@ -95,145 +145,94 @@ fn sw_shoreline_albedo(mesh_uv: vec2<f32>, base_color: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(rgb, base_color.a);
 }
 
-#ifdef PREPASS_PIPELINE
-#import bevy_pbr::prepass_io::{Vertex, VertexOutput};
-#else
-#import bevy_pbr::forward_io::{Vertex, VertexOutput};
-#endif
-
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
     let surf = sw_displace_surface(vertex.instance_index, vertex.position, vertex.uv);
 
-#ifdef PREPASS_PIPELINE
-#ifdef NORMAL_PREPASS_OR_DEFERRED_PREPASS
+@if(PREPASS_PIPELINE && NORMAL_PREPASS_OR_DEFERRED_PREPASS) {
     var out: VertexOutput;
     out.position = surf.clip_position;
     out.world_position = surf.world_position;
-#ifdef VERTEX_UVS_A
+@if(VERTEX_UVS_A)
     out.uv = vertex.uv;
-#endif
-#ifdef VERTEX_UVS_B
+@if(VERTEX_UVS_B)
     out.uv_b = vertex.uv_b;
-#endif
     out.world_normal = surf.world_normal;
-#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+@if(VERTEX_OUTPUT_INSTANCE_INDEX)
     out.instance_index = vertex.instance_index;
-#endif
-#ifdef MOTION_VECTOR_PREPASS
+@if(MOTION_VECTOR_PREPASS)
     out.previous_world_position = surf.world_position;
-#endif
-#ifdef VERTEX_COLORS
+@if(VERTEX_COLORS)
     out.color = vertex.color;
-#endif
-#ifdef VISIBILITY_RANGE_DITHER
+@if(VISIBILITY_RANGE_DITHER)
     out.visibility_range_dither = get_visibility_range_dither_level(
         vertex.instance_index,
         get_world_from_local(vertex.instance_index)[3],
     );
-#endif
     return out;
-#else
+} @elif(PREPASS_PIPELINE) {
     var out: VertexOutput;
     out.position = surf.clip_position;
     out.world_position = surf.world_position;
-#ifdef VERTEX_UVS_A
+@if(VERTEX_UVS_A)
     out.uv = vertex.uv;
-#endif
-#ifdef VERTEX_UVS_B
+@if(VERTEX_UVS_B)
     out.uv_b = vertex.uv_b;
-#endif
-#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+@if(VERTEX_OUTPUT_INSTANCE_INDEX)
     out.instance_index = vertex.instance_index;
-#endif
-#ifdef MOTION_VECTOR_PREPASS
+@if(MOTION_VECTOR_PREPASS)
     out.previous_world_position = surf.world_position;
-#endif
-#ifdef VERTEX_COLORS
+@if(VERTEX_COLORS)
     out.color = vertex.color;
-#endif
-#ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
+@if(UNCLIPPED_DEPTH_ORTHO_EMULATION) {
     out.unclipped_depth = surf.clip_position.z;
     out.position.z = min(out.position.z, 1.0);
-#endif
-#ifdef VISIBILITY_RANGE_DITHER
+}
+@if(VISIBILITY_RANGE_DITHER)
     out.visibility_range_dither = get_visibility_range_dither_level(
         vertex.instance_index,
         get_world_from_local(vertex.instance_index)[3],
     );
-#endif
     return out;
-#endif
-#else
+} @else {
     var out: VertexOutput;
     out.position = surf.clip_position;
     out.world_position = surf.world_position;
     out.world_normal = surf.world_normal;
-#ifdef VERTEX_UVS_A
+@if(VERTEX_UVS_A)
     out.uv = vertex.uv;
-#endif
-#ifdef VERTEX_UVS_B
+@if(VERTEX_UVS_B)
     out.uv_b = vertex.uv_b;
-#endif
-#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+@if(VERTEX_OUTPUT_INSTANCE_INDEX)
     out.instance_index = vertex.instance_index;
-#endif
-#ifdef VERTEX_COLORS
+@if(VERTEX_COLORS)
     out.color = vertex.color;
-#endif
-#ifdef VISIBILITY_RANGE_DITHER
+@if(VISIBILITY_RANGE_DITHER)
     out.visibility_range_dither = get_visibility_range_dither_level(
         vertex.instance_index,
         get_world_from_local(vertex.instance_index)[3],
     );
-#endif
     return out;
-#endif
+}
 }
 
-#ifndef PREPASS_PIPELINE
-#import bevy_pbr::{
-    pbr_fragment::pbr_input_from_standard_material,
-    pbr_functions::alpha_discard,
-    pbr_functions::prepare_world_normal,
-    pbr_types,
-    pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT,
-    pbr_types::STANDARD_MATERIAL_FLAGS_UNLIT_BIT,
-    forward_io::{VertexOutput as FragVertexOutput, FragmentOutput},
-    pbr_functions::{apply_pbr_lighting, main_pass_post_lighting_processing},
-}
-#endif
-
-#ifdef PREPASS_PIPELINE
-#ifdef PREPASS_FRAGMENT
-#import bevy_pbr::prepass_io::{VertexOutput as FragVertexOutput, FragmentOutput};
-#ifdef NORMAL_PREPASS_OR_DEFERRED_PREPASS
-#import bevy_pbr::{
-    pbr_fragment::pbr_input_from_standard_material,
-    pbr_functions::alpha_discard,
-    pbr_functions::prepare_world_normal,
-    pbr_deferred_functions::deferred_output,
-    pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT,
-}
-#endif
-#endif
-#endif
-
-#ifndef PREPASS_PIPELINE
+@if(!PREPASS_PIPELINE)
 @fragment
 fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
-    pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
-#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
-#ifdef VERTEX_UVS_A
+    pbr_input.material.base_color = alpha_discard(
+        pbr_input.material.flags,
+        pbr_input.material.alpha_cutoff,
+        pbr_input.material.base_color
+    );
+@if(VERTEX_OUTPUT_INSTANCE_INDEX && VERTEX_UVS_A) {
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
     let n_world = sw_highres_world_normal(in.instance_index, in.uv);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = sw_shoreline_albedo(in.uv, pbr_input.material.base_color);
-#endif
-#endif
+}
     var out: FragmentOutput;
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
         out.color = apply_pbr_lighting(pbr_input);
@@ -243,33 +242,30 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
     return out;
 }
-#endif
 
-#ifdef PREPASS_PIPELINE
-#ifdef PREPASS_FRAGMENT
+@if(PREPASS_PIPELINE && PREPASS_FRAGMENT)
 @fragment
 fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
-#ifndef NORMAL_PREPASS_OR_DEFERRED_PREPASS
+@if(!NORMAL_PREPASS_OR_DEFERRED_PREPASS) {
     var out: FragmentOutput;
-#ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
+@if(UNCLIPPED_DEPTH_ORTHO_EMULATION)
     out.frag_depth = in.position.z;
-#endif
     return out;
-#else
+} @else {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
-    pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
-#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
-#ifdef VERTEX_UVS_A
+    pbr_input.material.base_color = alpha_discard(
+        pbr_input.material.flags,
+        pbr_input.material.alpha_cutoff,
+        pbr_input.material.base_color
+    );
+@if(VERTEX_OUTPUT_INSTANCE_INDEX && VERTEX_UVS_A) {
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
     let n_world = sw_highres_world_normal(in.instance_index, in.uv);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = sw_shoreline_albedo(in.uv, pbr_input.material.base_color);
-#endif
-#endif
-    return deferred_output(in, pbr_input);
-#endif
 }
-#endif
-#endif
+    return deferred_output(in, pbr_input);
+}
+}

@@ -1,7 +1,5 @@
-#define_import_path bevy_fft::pattern
-
-#import bevy_fft::complex::c32;
-#import bevy_render::globals::Globals;
+import bevy_fft::complex::c32::c32;
+import bevy_render::globals::Globals;
 
 // Must match `FftSettings` / `FftRoots` and binding indices in `bevy_fft::bindings`
 // (pattern shares bind group 0 with FFT pipelines).

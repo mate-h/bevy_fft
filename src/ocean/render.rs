@@ -13,6 +13,7 @@ use bevy::{
     prelude::*,
     reflect::Reflect,
     render::{
+        RenderApp,
         extract_component::{ComponentUniforms, ExtractComponent},
         render_asset::RenderAssets,
         render_resource::{
@@ -59,11 +60,11 @@ pub struct OceanH0Uniform {
     pub _pad3: u32,
 }
 
-impl SyncComponent for OceanH0Uniform {
+impl SyncComponent<RenderApp> for OceanH0Uniform {
     type Target = Self;
 }
 
-impl ExtractComponent for OceanH0Uniform {
+impl ExtractComponent<RenderApp> for OceanH0Uniform {
     type QueryData = Read<Self>;
     type QueryFilter = ();
     type Out = Self;
@@ -89,11 +90,11 @@ pub struct OceanDynamicUniform {
     pub _pad3: f32,
 }
 
-impl SyncComponent for OceanDynamicUniform {
+impl SyncComponent<RenderApp> for OceanDynamicUniform {
     type Target = Self;
 }
 
-impl ExtractComponent for OceanDynamicUniform {
+impl ExtractComponent<RenderApp> for OceanDynamicUniform {
     type QueryData = Read<Self>;
     type QueryFilter = ();
     type Out = Self;
@@ -113,11 +114,11 @@ pub struct OceanH0Image {
     pub texture: Handle<Image>,
 }
 
-impl SyncComponent for OceanH0Image {
+impl SyncComponent<RenderApp> for OceanH0Image {
     type Target = Self;
 }
 
-impl ExtractComponent for OceanH0Image {
+impl ExtractComponent<RenderApp> for OceanH0Image {
     type QueryData = Read<Self>;
     type QueryFilter = ();
     type Out = Self;
@@ -161,11 +162,11 @@ pub struct OceanFoamUniform {
     pub _foam_uniform_pad4: f32,
 }
 
-impl SyncComponent for OceanFoamUniform {
+impl SyncComponent<RenderApp> for OceanFoamUniform {
     type Target = Self;
 }
 
-impl ExtractComponent for OceanFoamUniform {
+impl ExtractComponent<RenderApp> for OceanFoamUniform {
     type QueryData = Read<Self>;
     type QueryFilter = ();
     type Out = Self;
@@ -186,11 +187,11 @@ pub struct OceanFoamMask {
     pub texture_b: Handle<Image>,
 }
 
-impl SyncComponent for OceanFoamMask {
+impl SyncComponent<RenderApp> for OceanFoamMask {
     type Target = Self;
 }
 
-impl ExtractComponent for OceanFoamMask {
+impl ExtractComponent<RenderApp> for OceanFoamMask {
     type QueryData = Read<Self>;
     type QueryFilter = ();
     type Out = Self;
@@ -206,11 +207,11 @@ impl ExtractComponent for OceanFoamMask {
 #[derive(Component, Clone, Copy, Default, Reflect)]
 pub struct OceanFoamPhase(pub u32);
 
-impl SyncComponent for OceanFoamPhase {
+impl SyncComponent<RenderApp> for OceanFoamPhase {
     type Target = Self;
 }
 
-impl ExtractComponent for OceanFoamPhase {
+impl ExtractComponent<RenderApp> for OceanFoamPhase {
     type QueryData = Read<Self>;
     type QueryFilter = ();
     type Out = Self;
@@ -252,7 +253,7 @@ impl FromWorld for OceanFoamPipelines {
         );
         let layout = BindGroupLayoutDescriptor::new("ocean_foam_layout", &entries);
 
-        let shader = asset_server.load("ocean/ocean_foam.wgsl");
+        let shader = asset_server.load("ocean/ocean_foam.wesl");
         let foam = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("ocean_jacobian_foam".into()),
             layout: vec![layout.clone()],
@@ -261,6 +262,7 @@ impl FromWorld for OceanFoamPipelines {
             shader_defs: vec![],
             entry_point: Some("ocean_jacobian_foam".into()),
             zero_initialize_workgroup_memory: false,
+            constants: vec![],
         });
 
         Self { layout, foam }
@@ -307,8 +309,8 @@ impl FromWorld for OceanComputePipelines {
         let spectrum_layout_h0 =
             BindGroupLayoutDescriptor::new("ocean_spectrum_h0_read_layout", &spectrum_h0_entries);
 
-        let init_shader = asset_server.load("ocean/init_h0.wgsl");
-        let spectrum_shader = asset_server.load("ocean/ocean_spectrum.wgsl");
+        let init_shader = asset_server.load("ocean/init_h0.wesl");
+        let spectrum_shader = asset_server.load("ocean/ocean_spectrum.wesl");
 
         let init = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("ocean_init_h0".into()),
@@ -318,6 +320,7 @@ impl FromWorld for OceanComputePipelines {
             shader_defs: vec![],
             entry_point: Some("init_h0".into()),
             zero_initialize_workgroup_memory: false,
+            constants: vec![],
         });
 
         let fft_layouts = world.resource::<FftBindGroupLayouts>();
@@ -334,6 +337,7 @@ impl FromWorld for OceanComputePipelines {
             shader_defs: vec![ShaderDefVal::UInt("CHANNELS".into(), 4)],
             entry_point: Some("ocean_fill_spectrum_c".into()),
             zero_initialize_workgroup_memory: false,
+            constants: vec![],
         });
 
         Self {

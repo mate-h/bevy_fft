@@ -1,5 +1,3 @@
-#define_import_path bevy_fft::plot
-
 fn viridis_quintic(x: f32) -> vec3<f32> {
     let x_clamped = clamp(x, 0.0, 1.0);
     let x1 = vec4(1.0, x_clamped, x_clamped * x_clamped, x_clamped * x_clamped * x_clamped);

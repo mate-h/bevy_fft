@@ -97,7 +97,7 @@ impl FromWorld for ShallowWaterPipelines {
         );
 
         let layout = vec![layout_buffers.clone(), layout_settings.clone()];
-        let shader = asset_server.load("shallow_water/simulator.wgsl");
+        let shader = asset_server.load("shallow_water/simulator.wesl");
 
         let q = |label: &'static str, entry: &'static str| {
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
@@ -108,6 +108,7 @@ impl FromWorld for ShallowWaterPipelines {
                 shader_defs: vec![],
                 entry_point: Some(entry.into()),
                 zero_initialize_workgroup_memory: false,
+                constants: vec![],
             })
         };
 
@@ -146,6 +147,7 @@ impl FromWorld for ShallowWaterPipelines {
                 shader_defs: vec![],
                 entry_point: Some("updateParticles".into()),
                 zero_initialize_workgroup_memory: false,
+                constants: vec![],
             }),
         }
     }

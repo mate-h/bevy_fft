@@ -20,9 +20,11 @@ The [shallow_water](src/shallow_water/mod.rs) module is separate from the bulk F
 
 The [ewave](src/ewave/mod.rs) module runs Tessendorf-style iWave in k-space with its own FFT buffers; `cargo run --example ewave` shows a periodic heightfield next to the same stock graph path. Register `FftPlugin` before `EwavePlugin` for the same reason.
 
+The [dispersive](src/dispersive/mod.rs) module combines bulk shallow water with Airy surface waves (Jeschke and Wojtan). See [docs/dispersive.md](docs/dispersive.md) for the hybrid split and the NumPy reference. The `dispersive` example leaves boat-wake style ripples under a mouse drag. Register `FftPlugin` before `DispersivePlugin`. Do not enable `EwavePlugin` in the same app.
+
 ### FFT and k-space indexing
 
-The stock FFT places DC at index `(0,0)` on each axis, with the usual positive-then-wrapped-negative frequency order. If you add a per-texel multiply in frequency space, map each `(i, j)` to `(k_x, k_y)` with that same layout. A centered `2π (i - N/2) / L` style grid only matches the buffers if the spectrum is explicitly shifted, which the ocean path does when writing to buffer C. The eWave shader entry `ewave_k_step` in [`assets/ewave/ewave.wgsl`](assets/ewave/ewave.wgsl) follows the FFT-aligned convention. The module docs in `src/ewave/mod.rs` state the same rule for this crate’s FFT.
+The stock FFT places DC at index `(0,0)` on each axis, with the usual positive-then-wrapped-negative frequency order. If you add a per-texel multiply in frequency space, map each `(i, j)` to `(k_x, k_y)` with that same layout. A centered `2π (i - N/2) / L` style grid only matches the buffers if the spectrum is explicitly shifted, which the ocean path does when writing to buffer C. The eWave shader entry `ewave_k_step` in [`assets/ewave/ewave.wgsl`](assets/ewave/ewave.wgsl) and dispersive `k_xy` in [`assets/dispersive/dispersive.wgsl`](assets/dispersive/dispersive.wgsl) follow the FFT-aligned convention. Misaligned `k` has caused grid lattices in both paths before.
 
 Ambitious extras such as a full ocean sim or FFT bloom are sketched in [`ROADMAP.md`](ROADMAP.md).
 
@@ -42,6 +44,7 @@ cargo run --example fft --features file_watcher
 cargo run --example ocean --features free_camera
 cargo run --example shallow_water --features free_camera
 cargo run --example ewave --features free_camera
+cargo run --example dispersive --features free_camera
 ```
 
 The `fft` example drives `FftSchedule::ForwardThenInverse`. Data starts in spatial A, moves to spectrum C for a radial band-pass tuned with the sliders at the top-left, then returns through IFFT to B. The `ocean` example uses `FftSchedule::Inverse` with `OceanPlugin`: a compute pass fills spectrum C each frame, then the same IFFT and resolve path writes `spatial_output` for the ocean material.
