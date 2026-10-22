@@ -88,12 +88,67 @@ fn main() {
             Update,
             spawn_ocean_when_ready.after(FftSystemSet::PrepareTextures),
         )
+        .add_systems(Update, float_buoys)
         .add_systems(EguiPrimaryContextPass, ocean_egui_panel)
         .add_systems(
             PostUpdate,
             sync_free_camera_with_egui_focus.after(write_egui_wants_input_system),
         )
         .run();
+}
+
+/// A marker that rides the surface through [`OceanQueries`].
+#[derive(Component)]
+struct Buoy {
+    xz: Vec2,
+}
+
+/// World `xz` positions of the demo buoys, in meters.
+const BUOY_POSITIONS: [Vec2; 5] = [
+    Vec2::new(0.0, 0.0),
+    Vec2::new(6.0, -4.0),
+    Vec2::new(-7.0, -2.0),
+    Vec2::new(3.0, 8.0),
+    Vec2::new(-4.0, 10.0),
+];
+
+fn spawn_buoys(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    let mesh = meshes.add(Sphere::new(0.4).mesh().uv(24, 12));
+    let material = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.95, 0.35, 0.1),
+        perceptual_roughness: 0.5,
+        ..default()
+    });
+    for xz in BUOY_POSITIONS {
+        commands.spawn((
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(material.clone()),
+            Transform::from_xyz(xz.x, 0.0, xz.y),
+            Buoy { xz },
+        ));
+    }
+}
+
+/// Places each buoy on the latest queried surface height and tilts it to the surface normal.
+fn float_buoys(mut queries: ResMut<OceanQueries>, mut buoys: Query<(&Buoy, &mut Transform)>) {
+    if queries.points().is_empty() {
+        queries.set_points(BUOY_POSITIONS);
+    }
+    let Some(results) = queries.results() else {
+        return;
+    };
+    for (buoy, mut transform) in &mut buoys {
+        let Some(i) = results.points.iter().position(|p| *p == buoy.xz) else {
+            continue;
+        };
+        let sample = results.samples[i];
+        transform.translation = Vec3::new(buoy.xz.x, sample.height, buoy.xz.y);
+        transform.rotation = Quat::from_rotation_arc(Vec3::Y, sample.normal());
+    }
 }
 
 fn sync_free_camera_with_egui_focus(
@@ -134,7 +189,13 @@ fn cascade_band(index: usize) -> (f32, f32) {
     (k_min, k_max)
 }
 
-fn setup(mut commands: Commands, mut scattering_mediums: ResMut<Assets<ScatteringMedium>>) {
+fn setup(
+    mut commands: Commands,
+    mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut standard_materials: ResMut<Assets<StandardMaterial>>,
+) {
+    spawn_buoys(&mut commands, &mut meshes, &mut standard_materials);
     let n = 256u32;
     for (index, &tile) in CASCADE_TILES.iter().enumerate() {
         let (band_k_min, band_k_max) = cascade_band(index);
@@ -291,6 +352,7 @@ fn ocean_egui_panel(
     surface_mat: Query<&MeshMaterial3d<OceanSurfaceMaterial>, With<OceanSurfaceTag>>,
     mut sun_settings: ResMut<SunLightSettings>,
     mut sun_transform: Query<&mut Transform, With<SunLight>>,
+    queries: Res<OceanQueries>,
 ) {
     // The panel edits cascade 0. Shared fields are copied to the other cascades afterwards, while
     // each cascade keeps its own tile size and wavenumber band.
@@ -375,6 +437,16 @@ fn ocean_egui_panel(
             ui.label("Spawning ocean mesh after GPU init…");
         }
         ui.label(egui::RichText::new(format!("{smooth_ms:.2} ms/frame")).weak());
+        if let Some(results) = queries.results() {
+            let latency = queries.frame().wrapping_sub(results.frame);
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} buoy queries, {latency} frames behind",
+                    results.samples.len()
+                ))
+                .weak(),
+            );
+        }
         ui.add_space(2.0);
         ui.label("FFT resolution");
         egui::ComboBox::from_id_salt("ocean_fft_resolution")

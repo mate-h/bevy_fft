@@ -4,6 +4,7 @@ import bevy_pbr::render::mesh_functions::{
     mesh_position_local_to_world,
 };
 import bevy_pbr::render::view_transformations::position_world_to_clip;
+import bevy_fft::ocean::sampling::bilinear_wrap;
 
 @if(PREPASS_PIPELINE)
 import bevy_pbr::prepass::io::{
@@ -77,24 +78,6 @@ struct OceanExtensionUniform {
 @group(constants::MATERIAL_BIND_GROUP) @binding(106) var foam_1: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(107) var foam_2: texture_2d<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(108) var foam_3: texture_2d<f32>;
-
-fn wrap_texel(p: vec2<i32>, dims: vec2<i32>) -> vec2<i32> {
-    return ((p % dims) + dims) % dims;
-}
-
-/// Bilinear fetch with periodic wrap. `uv` is in tiles, so `uv = 1` is one full period.
-/// Uses `textureLoad` so float32 textures need no filterable sampler.
-fn bilinear_wrap(tex: texture_2d<f32>, uv: vec2<f32>) -> vec4<f32> {
-    let dims = vec2<i32>(textureDimensions(tex, 0));
-    let x = uv * vec2<f32>(dims) - 0.5;
-    let i0 = vec2<i32>(floor(x));
-    let f = x - floor(x);
-    let a = textureLoad(tex, wrap_texel(i0, dims), 0);
-    let b = textureLoad(tex, wrap_texel(i0 + vec2(1, 0), dims), 0);
-    let c = textureLoad(tex, wrap_texel(i0 + vec2(0, 1), dims), 0);
-    let d = textureLoad(tex, wrap_texel(i0 + vec2(1, 1), dims), 0);
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
 
 fn displacement_cascade(i: u32, xz: vec2<f32>) -> vec4<f32> {
     let uv = xz / ocean_ext.cascade_tile_sizes[i];

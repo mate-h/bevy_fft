@@ -17,7 +17,12 @@
 //! meaningful sea state in meters, calibrate variance in `init_h0` (and any global gain) so heights are
 //! correct after this normalization, rather than editing `inv_dim` in `ifft.wgsl`.
 
+mod query;
 mod render;
+
+pub use query::{
+    OCEAN_QUERY_MAX_POINTS, OceanQueries, OceanQueryReadback, OceanQueryResults, OceanSample,
+};
 
 use bevy::{
     asset::{Asset, Handle, embedded_asset},
@@ -259,6 +264,7 @@ pub type OceanSurfaceMaterial = ExtendedMaterial<StandardMaterial, OceanSurfaceE
 /// Stable handles for WGSL registered by [`OceanPlugin`].
 pub mod shaders {
     pub const OCEAN_SURFACE: &str = "embedded://bevy_fft/ocean/ocean.wesl";
+    pub const OCEAN_QUERY: &str = "embedded://bevy_fft/ocean/query.wesl";
 }
 
 /// Marks the entity that carries [`OceanSurfaceMaterial`] for the sim-driven ocean mesh.
@@ -270,7 +276,9 @@ pub struct OceanPlugin;
 impl Plugin for OceanPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "ocean.wesl");
+        embedded_asset!(app, "query.wesl");
         bevy::shader::load_shader_library!(app, "dispersion.wesl");
+        bevy::shader::load_shader_library!(app, "sampling.wesl");
 
         app.register_type::<OceanSimSettings>()
             .register_type::<OceanH0Uniform>()
@@ -308,7 +316,16 @@ impl Plugin for OceanPlugin {
                 Update,
                 sync_ocean_foam_uniform.after(sync_ocean_dynamic_uniform),
             )
-            .add_systems(PostUpdate, sync_ocean_foam_display);
+            .add_systems(PostUpdate, sync_ocean_foam_display)
+            .init_resource::<query::OceanQueryFrame>()
+            .add_plugins(bevy::render::extract_resource::ExtractResourcePlugin::<
+                query::OceanQueryFrame,
+            >::default())
+            .add_systems(Startup, query::setup_ocean_queries)
+            .add_systems(
+                PostUpdate,
+                query::submit_ocean_queries.after(sync_ocean_foam_display),
+            );
     }
 
     fn finish(&self, app: &mut App) {
@@ -328,6 +345,12 @@ impl Plugin for OceanPlugin {
             .init_resource::<OceanComputePipelines>()
             .init_resource::<OceanFoamPipelines>()
             .init_resource::<OceanInitTracker>()
+            .init_resource::<query::OceanQueryPipeline>()
+            .init_resource::<query::OceanQueryBindGroup>()
+            .add_systems(
+                Render,
+                query::prepare_ocean_query_bind_group.in_set(RenderSystems::PrepareBindGroups),
+            )
             .add_systems(
                 Render,
                 prepare_ocean_compute_bind_groups
@@ -349,6 +372,9 @@ impl Plugin for OceanPlugin {
                     .after(run_fft_forward)
                     .before(run_fft_resolve_spectrum),
                 run_ocean_foam
+                    .after(run_fft_resolve_outputs)
+                    .before(bevy::core_pipeline::schedule::camera_driver),
+                query::run_ocean_query
                     .after(run_fft_resolve_outputs)
                     .before(bevy::core_pipeline::schedule::camera_driver),
             )
