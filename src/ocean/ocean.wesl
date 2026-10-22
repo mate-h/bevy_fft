@@ -4,7 +4,7 @@ import bevy_pbr::render::mesh_functions::{
     mesh_position_local_to_world,
 };
 import bevy_pbr::render::view_transformations::position_world_to_clip;
-import bevy_fft::ocean::sampling::bilinear_wrap;
+import bevy_fft::water::lod::{WaterLodSlices, sample_lod};
 
 @if(PREPASS_PIPELINE)
 import bevy_pbr::prepass::io::{
@@ -57,94 +57,25 @@ import bevy_pbr::deferred::functions::deferred_output;
 import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT;
 
 struct OceanExtensionUniform {
-    /// World-space tile edge in meters for cascades 0 to 3.
-    cascade_tile_sizes: vec4<f32>,
     amplitude: f32,
     choppiness: f32,
     wind_direction: f32,
-    cascade_count: u32,
     foam_intensity: f32,
     foam_cutoff: f32,
     foam_falloff: f32,
     foam_trail_decay: f32,
-    lod_base_spacing: f32,
-    lod_cells_per_level: f32,
-    _lod_pad0: f32,
-    _lod_pad1: f32,
+    vertex_lod_bias: f32,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> ocean_ext: OceanExtensionUniform;
-@group(constants::MATERIAL_BIND_GROUP) @binding(101) var displacement_0: texture_2d<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(102) var displacement_1: texture_2d<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(103) var displacement_2: texture_2d<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(104) var displacement_3: texture_2d<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(105) var foam_0: texture_2d<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(106) var foam_1: texture_2d<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(107) var foam_2: texture_2d<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(108) var foam_3: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(101) var<uniform> ocean_lod: WaterLodSlices;
+@group(constants::MATERIAL_BIND_GROUP) @binding(102) var lod_displacement: texture_2d_array<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(103) var lod_foam: texture_2d_array<f32>;
 
-fn displacement_cascade(i: u32, xz: vec2<f32>) -> vec4<f32> {
-    let uv = xz / ocean_ext.cascade_tile_sizes[i];
-    if i == 0u {
-        return bilinear_wrap(displacement_0, uv);
-    } else if i == 1u {
-        return bilinear_wrap(displacement_1, uv);
-    } else if i == 2u {
-        return bilinear_wrap(displacement_2, uv);
-    }
-    return bilinear_wrap(displacement_3, uv);
-}
-
-fn foam_cascade(i: u32, xz: vec2<f32>) -> f32 {
-    let uv = xz / ocean_ext.cascade_tile_sizes[i];
-    if i == 0u {
-        return bilinear_wrap(foam_0, uv).r;
-    } else if i == 1u {
-        return bilinear_wrap(foam_1, uv).r;
-    } else if i == 2u {
-        return bilinear_wrap(foam_2, uv).r;
-    }
-    return bilinear_wrap(foam_3, uv).r;
-}
-
-/// Weight of cascade `i` for vertex displacement at a local vertex spacing of `spacing` meters.
-/// Waves much shorter than the spacing cannot be resolved by the vertices, and sampling them
-/// would make coarse rings shimmer as the mesh moves. Pixel normals still show them.
-fn cascade_vertex_weight(i: u32, spacing: f32) -> f32 {
-    let tile = ocean_ext.cascade_tile_sizes[i];
-    return 1.0 - smoothstep(tile / 16.0, tile / 4.0, spacing);
-}
-
-/// Cascade sum for vertex displacement, fading cascades too fine for `spacing`.
-fn ocean_sample_lod(xz: vec2<f32>, spacing: f32) -> vec4<f32> {
-    var sum = vec4<f32>(0.0);
-    let count = min(ocean_ext.cascade_count, 4u);
-    for (var i = 0u; i < count; i++) {
-        sum += displacement_cascade(i, xz) * cascade_vertex_weight(i, spacing);
-    }
-    let amp = ocean_ext.amplitude;
-    return vec4<f32>(sum.rgb * amp, sum.a * amp * ocean_ext.choppiness);
-}
-
-/// Estimated clipmap vertex spacing at `world_xz`. Zero base spacing turns the fade off.
-fn lod_spacing(world_xz: vec2<f32>, mesh_center_xz: vec2<f32>) -> f32 {
-    if ocean_ext.lod_base_spacing <= 0.0 {
-        return 0.0;
-    }
-    let d = max(abs(world_xz.x - mesh_center_xz.x), abs(world_xz.y - mesh_center_xz.y));
-    return max(ocean_ext.lod_base_spacing, d / max(ocean_ext.lod_cells_per_level, 1.0));
-}
-
-/// Sum of all cascades at world `xz`, scaled by amplitude. R/G = height slopes along X and Z,
-/// B = elevation, A = wind-aligned horizontal chop in meters (choppiness applied).
-fn ocean_sample(xz: vec2<f32>) -> vec4<f32> {
-    var sum = vec4<f32>(0.0);
-    let count = min(ocean_ext.cascade_count, 4u);
-    for (var i = 0u; i < count; i++) {
-        sum += displacement_cascade(i, xz);
-    }
-    let amp = ocean_ext.amplitude;
-    return vec4<f32>(sum.rgb * amp, sum.a * amp * ocean_ext.choppiness);
+/// Water LOD data at world `xz`: R/G = height slopes along X and Z, B = elevation in meters,
+/// A = wind-aligned horizontal chop in meters. `bias` moves to coarser slices.
+fn ocean_sample(xz: vec2<f32>, bias: f32) -> vec4<f32> {
+    return sample_lod(lod_displacement, ocean_lod, xz, bias);
 }
 
 fn wind_dir() -> vec2<f32> {
@@ -153,7 +84,7 @@ fn wind_dir() -> vec2<f32> {
 
 /// Undisplaced position whose chop lands on `xz`, found with one fixed-point step.
 fn ocean_undisplace(xz: vec2<f32>) -> vec2<f32> {
-    let chop = ocean_sample(xz).a;
+    let chop = ocean_sample(xz, 0.0).a;
     return xz - chop * wind_dir();
 }
 
@@ -168,11 +99,11 @@ struct DisplacedSurface {
 }
 
 /// Displaces the mesh in world space so any mesh layout (plane, clipmap) samples the same ocean.
+/// Vertices read slightly coarser data than pixels so the mesh never undersamples it.
 fn ocean_displace_surface(instance_index: u32, position_local: vec3<f32>) -> DisplacedSurface {
     let world_from_local = get_world_from_local(instance_index);
     var world = mesh_position_local_to_world(world_from_local, vec4<f32>(position_local, 1.0));
-    let spacing = lod_spacing(world.xz, world_from_local[3].xz);
-    let s = ocean_sample_lod(world.xz, spacing);
+    let s = ocean_sample(world.xz, ocean_ext.vertex_lod_bias);
     let w = wind_dir();
     world = vec4<f32>(world.x + s.a * w.x, world.y + s.b, world.z + s.a * w.y, 1.0);
 
@@ -183,19 +114,13 @@ fn ocean_displace_surface(instance_index: u32, position_local: vec3<f32>) -> Dis
     return out;
 }
 
-/// Per-pixel normal from the summed cascade slopes at the undisplaced position under this pixel.
+/// Per-pixel normal from the LOD data at the undisplaced position under this pixel.
 fn ocean_pixel_normal(world_position: vec3<f32>) -> vec3<f32> {
-    return ocean_normal_from_slopes(ocean_sample(ocean_undisplace(world_position.xz)));
+    return ocean_normal_from_slopes(ocean_sample(ocean_undisplace(world_position.xz), 0.0));
 }
 
 fn ocean_foam_coverage(world_position: vec3<f32>) -> f32 {
-    let xz = ocean_undisplace(world_position.xz);
-    var foam = 0.0;
-    let count = min(ocean_ext.cascade_count, 4u);
-    for (var i = 0u; i < count; i++) {
-        foam = max(foam, foam_cascade(i, xz));
-    }
-    return foam;
+    return sample_lod(lod_foam, ocean_lod, ocean_undisplace(world_position.xz), 0.0).r;
 }
 
 fn ocean_mix_foam_into_base_color(world_position: vec3<f32>, base_color: vec4<f32>) -> vec4<f32> {

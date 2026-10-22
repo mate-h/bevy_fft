@@ -1,9 +1,9 @@
-// Samples the summed ocean cascades at CPU-provided world positions for gameplay and physics.
+// Samples the water LOD data at CPU-provided world positions for gameplay and physics.
 //
 // The input buffer starts with a header the main world writes each frame, then one `vec2` per query
 // point. The output starts with a header that echoes the frame id, then one `vec4` per point.
 
-import bevy_fft::ocean::sampling::bilinear_wrap;
+import bevy_fft::water::lod::{WaterLodSlices, sample_lod_finest};
 
 /// Fixed-point steps that undo horizontal chop, so a query returns the surface above the point.
 const INVERT_STEPS: u32 = 4u;
@@ -11,13 +11,8 @@ const INVERT_STEPS: u32 = 4u;
 struct QueryHeader {
     frame: u32,
     count: u32,
-    cascade_count: u32,
-    _pad: u32,
-    cascade_tile_sizes: vec4<f32>,
-    amplitude: f32,
-    choppiness: f32,
     wind_direction: f32,
-    _pad2: f32,
+    _pad: u32,
 }
 
 struct QueryInput {
@@ -34,32 +29,13 @@ struct QueryOutput {
 
 @group(0) @binding(0) var<storage, read> query_in: QueryInput;
 @group(0) @binding(1) var<storage, read_write> query_out: QueryOutput;
-@group(0) @binding(2) var displacement_0: texture_2d<f32>;
-@group(0) @binding(3) var displacement_1: texture_2d<f32>;
-@group(0) @binding(4) var displacement_2: texture_2d<f32>;
-@group(0) @binding(5) var displacement_3: texture_2d<f32>;
+@group(0) @binding(2) var lod_displacement: texture_2d_array<f32>;
+@group(0) @binding(3) var<uniform> lod: WaterLodSlices;
 
-fn cascade(i: u32, xz: vec2<f32>) -> vec4<f32> {
-    let uv = xz / query_in.header.cascade_tile_sizes[i];
-    if i == 0u {
-        return bilinear_wrap(displacement_0, uv);
-    } else if i == 1u {
-        return bilinear_wrap(displacement_1, uv);
-    } else if i == 2u {
-        return bilinear_wrap(displacement_2, uv);
-    }
-    return bilinear_wrap(displacement_3, uv);
-}
-
-/// Same sum and scaling as `ocean_sample` in the surface material.
+/// Finest available LOD data at `xz`, in the lane order the surface uses
+/// (slope x, slope z, height, chop).
 fn ocean_sample(xz: vec2<f32>) -> vec4<f32> {
-    var sum = vec4<f32>(0.0);
-    let count = min(query_in.header.cascade_count, 4u);
-    for (var i = 0u; i < count; i++) {
-        sum += cascade(i, xz);
-    }
-    let amp = query_in.header.amplitude;
-    return vec4<f32>(sum.rgb * amp, sum.a * amp * query_in.header.choppiness);
+    return sample_lod_finest(lod_displacement, lod, xz);
 }
 
 @compute @workgroup_size(64, 1, 1)

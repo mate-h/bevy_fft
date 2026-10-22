@@ -2,9 +2,9 @@
 //!
 //! Gameplay and physics code often needs the water surface at a few points: a boat's hull probes,
 //! a swimmer's head, a camera that must stay above the waves. [`OceanQueries`] holds those points.
-//! Each frame they are uploaded with the cascade parameters, a compute pass samples the same summed
-//! cascades the [`crate::ocean::OceanSurfaceMaterial`] draws, and Bevy's [`Readback`] returns the
-//! results asynchronously.
+//! Each frame they are uploaded, a compute pass samples the shared
+//! [`WaterLodData`](crate::water::WaterLodData) that the [`crate::ocean::OceanSurfaceMaterial`]
+//! draws, and Bevy's [`Readback`] returns the results asynchronously.
 //!
 //! Results arrive one to three frames after the points were submitted. [`OceanQueryResults`]
 //! carries the positions that were actually sampled and the frame they belong to, so callers can
@@ -28,17 +28,15 @@ use bevy::{
 };
 
 use crate::{
-    fft::FftTextures,
-    ocean::{
-        OCEAN_MAX_CASCADES, OceanCascade, OceanSimSettings, OceanSurfaceMaterial, OceanSurfaceTag,
-    },
+    ocean::{OceanSurfaceMaterial, OceanSurfaceTag},
+    water::{WaterLodData, WaterLodGpu, WaterLodSlices},
 };
 
 /// Most points one frame can query.
 pub const OCEAN_QUERY_MAX_POINTS: usize = 1024;
 
 /// Byte size of the input header in `query.wesl` (`QueryHeader`).
-const INPUT_HEADER_BYTES: usize = 48;
+const INPUT_HEADER_BYTES: usize = 16;
 /// Byte size of the output header in `query.wesl` (`vec4<u32>`).
 const OUTPUT_HEADER_BYTES: usize = 16;
 /// Submitted frames kept for pairing results with their positions. Covers the readback latency.
@@ -60,7 +58,7 @@ pub struct OceanSample {
 
 impl OceanSample {
     /// Height extrapolated `seconds` past the time the sample was taken. Use it with
-    /// [`OceanQueryResults::age`] to hide the readback latency.
+    /// the time since [`OceanQueryResults::time`] to hide the readback latency.
     pub fn height_after(&self, seconds: f32) -> f32 {
         self.height + self.vertical_velocity * seconds
     }
@@ -225,16 +223,16 @@ pub struct OceanQueryFrame {
     pub(super) count: u32,
     pub(super) input: Handle<ShaderBuffer>,
     pub(super) output: Handle<ShaderBuffer>,
-    pub(super) textures: Vec<Handle<Image>>,
+    pub(super) lod_displacement: Handle<Image>,
 }
 
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn submit_ocean_queries(
     mut commands: Commands,
     mut queries: ResMut<OceanQueries>,
     mut frame_out: ResMut<OceanQueryFrame>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
-    cascades: Query<(&OceanSimSettings, &FftTextures, Option<&OceanCascade>)>,
+    lod: Option<Res<WaterLodData>>,
     surface: Query<&MeshMaterial3d<OceanSurfaceMaterial>, With<OceanSurfaceTag>>,
     materials: Res<Assets<OceanSurfaceMaterial>>,
     readback: Query<(Entity, Has<Readback>), With<OceanQueryReadback>>,
@@ -245,50 +243,22 @@ pub(super) fn submit_ocean_queries(
         return;
     };
     let material = surface.iter().next().and_then(|m| materials.get(&m.0));
-    let (Some(material), false) = (material, queries.points.is_empty()) else {
+    let (Some(material), Some(lod), false) = (material, lod, queries.points.is_empty()) else {
         if has_readback {
             commands.entity(readback_entity).remove::<Readback>();
         }
         return;
     };
 
-    let mut slots: Vec<(usize, f32, Handle<Image>)> = cascades
-        .iter()
-        .map(|(sim, tex, cascade)| {
-            (
-                cascade.map_or(0, |c| c.index as usize),
-                sim.tile_size,
-                tex.spatial_output.clone(),
-            )
-        })
-        .filter(|(slot, _, _)| *slot < OCEAN_MAX_CASCADES)
-        .collect();
-    slots.sort_by_key(|(slot, _, _)| *slot);
-    if slots.is_empty() {
-        return;
-    }
-
     queries.frame = queries.frame.wrapping_add(1).max(1);
     let frame = queries.frame;
     let count = queries.points.len() as u32;
-    let settings = &material.extension.settings;
 
-    let mut tiles = [1.0f32; OCEAN_MAX_CASCADES];
-    for (slot, tile, _) in &slots {
-        tiles[*slot] = *tile;
-    }
     let mut bytes = Vec::with_capacity(INPUT_HEADER_BYTES + queries.points.len() * 8);
-    for v in [frame, count, slots.len() as u32, 0] {
-        bytes.extend_from_slice(&v.to_le_bytes());
-    }
-    for v in tiles.into_iter().chain([
-        settings.amplitude,
-        settings.choppiness,
-        settings.wind_direction,
-        0.0,
-    ]) {
-        bytes.extend_from_slice(&v.to_le_bytes());
-    }
+    bytes.extend_from_slice(&frame.to_le_bytes());
+    bytes.extend_from_slice(&count.to_le_bytes());
+    bytes.extend_from_slice(&material.extension.settings.wind_direction.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
     for p in &queries.points {
         bytes.extend_from_slice(&p.x.to_le_bytes());
         bytes.extend_from_slice(&p.y.to_le_bytes());
@@ -309,19 +279,10 @@ pub(super) fn submit_ocean_queries(
         queries.pending.pop_front();
     }
 
-    // Unused slots repeat cascade 0 so every binding is valid.
-    let first = slots[0].2.clone();
-    frame_out.textures = (0..OCEAN_MAX_CASCADES)
-        .map(|i| {
-            slots
-                .iter()
-                .find(|(slot, _, _)| *slot == i)
-                .map_or_else(|| first.clone(), |(_, _, h)| h.clone())
-        })
-        .collect();
     frame_out.count = count;
     frame_out.input = queries.input.clone();
     frame_out.output = queries.output.clone();
+    frame_out.lod_displacement = lod.displacement.clone();
 
     if !has_readback {
         commands
@@ -345,10 +306,8 @@ impl FromWorld for OceanQueryPipeline {
             (
                 storage_buffer_read_only_sized(false, None),
                 storage_buffer_sized(false, None),
-                texture_2d(TextureSampleType::Float { filterable: false }),
-                texture_2d(TextureSampleType::Float { filterable: false }),
-                texture_2d(TextureSampleType::Float { filterable: false }),
-                texture_2d(TextureSampleType::Float { filterable: false }),
+                texture_2d_array(TextureSampleType::Float { filterable: false }),
+                uniform_buffer::<WaterLodSlices>(false),
             ),
         );
         let layout = BindGroupLayoutDescriptor::new("ocean_query_layout", &entries);
@@ -370,6 +329,7 @@ impl FromWorld for OceanQueryPipeline {
 #[derive(Resource, Default)]
 pub struct OceanQueryBindGroup(Option<BindGroup>);
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_ocean_query_bind_group(
     render_device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
@@ -377,22 +337,21 @@ pub(super) fn prepare_ocean_query_bind_group(
     frame: Res<OceanQueryFrame>,
     buffers: Res<RenderAssets<GpuShaderBuffer>>,
     images: Res<RenderAssets<GpuImage>>,
+    lod_gpu: Res<WaterLodGpu>,
     mut bind_group: ResMut<OceanQueryBindGroup>,
 ) {
     bind_group.0 = None;
-    if frame.count == 0 || frame.textures.len() < OCEAN_MAX_CASCADES {
+    if frame.count == 0 {
         return;
     }
     let (Some(input), Some(output)) = (buffers.get(&frame.input), buffers.get(&frame.output))
     else {
         return;
     };
-    let views: Option<Vec<_>> = frame
-        .textures
-        .iter()
-        .map(|h| images.get(h).map(|g| &g.texture_view))
-        .collect();
-    let Some(views) = views else {
+    let (Some(lod_view), Some(slices)) = (
+        images.get(&frame.lod_displacement).map(|g| &g.texture_view),
+        lod_gpu.slices.binding(),
+    ) else {
         return;
     };
     let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
@@ -402,10 +361,8 @@ pub(super) fn prepare_ocean_query_bind_group(
         &BindGroupEntries::sequential((
             input.buffer.as_entire_binding(),
             output.buffer.as_entire_binding(),
-            views[0],
-            views[1],
-            views[2],
-            views[3],
+            lod_view,
+            slices,
         )),
     ));
 }

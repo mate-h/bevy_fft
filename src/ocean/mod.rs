@@ -1,13 +1,16 @@
-//! Ocean-style mesh displacement driven by the FFT pipeline `spatial_output` texture.
+//! FFT ocean: spectrum synthesis, cascades, the surface material, and height queries.
 //!
 //! Register [`crate::fft::FftPlugin`] **before** [`OceanPlugin`]. `OceanPlugin::finish` expects FFT render
-//! resources to exist; reversing the order will panic at startup. Use [`OceanSurfaceMaterial`] ([`ExtendedMaterial`]
-//! of [`StandardMaterial`] and [`OceanSurfaceExtension`]) on a subdivided plane; drive FFT with
-//! [`OceanSimSettings`] and [`crate::fft::FftSchedule::Inverse`]. One inverse FFT writes height in B,
-//! slopes in R and G, and wind-aligned horizontal chop (scalar) in W.
-//! [`OceanFoamMask`] ping-pong targets are updated after the FFT resolve from a Jacobian of that chop field, with temporal decay so foam leaves trails.
-//! The vertex shader applies the chop scalar along [`OceanMaterialUniform::wind_direction`] on XZ.
-//! A full 2D chop still needs another band or pass.
+//! resources to exist; reversing the order will panic at startup. `OceanPlugin` also adds
+//! [`crate::water::WaterPlugin`] when it is missing.
+//!
+//! Spawn one [`crate::fft::FftSource`] with [`OceanSimSettings`] per cascade, each with its own tile
+//! size, wavenumber band, and [`OceanCascade`] slot. One inverse FFT per cascade writes height in B,
+//! slopes in R and G, and wind-aligned horizontal chop (scalar) in W, and [`OceanFoamMask`] keeps a
+//! decaying Jacobian foam history. Each frame the cascades are summed into the shared
+//! [`crate::water::WaterLodData`] slices. [`OceanSurfaceMaterial`] and [`OceanQueries`] read only
+//! those slices, so other solvers that write there show up in the same surface. Put the material on
+//! an [`OceanClipmap`] for a camera-following mesh, or on any other mesh.
 //!
 //! Treat Bevy X, Z, and up (Y) as meters. [`OceanSimSettings::tile_size`] is the periodic patch size in meters
 //! on the horizontal plane (shaders use Δk = 2π / tile_size).
@@ -18,10 +21,11 @@
 //! correct after this normalization, rather than editing `inv_dim` in `ifft.wgsl`.
 
 mod clipmap;
+mod lod_write;
 mod query;
 mod render;
 
-pub use clipmap::{OceanClipmap, OceanClipmapTarget};
+pub use clipmap::OceanClipmap;
 
 pub use query::{
     OCEAN_QUERY_MAX_POINTS, OceanQueries, OceanQueryReadback, OceanQueryResults, OceanSample,
@@ -114,21 +118,17 @@ impl Default for OceanSimSettings {
     }
 }
 
-/// Maximum number of FFT cascades one [`OceanSurfaceMaterial`] can sum.
+/// Maximum number of FFT cascades the ocean writes into the water LOD data.
 pub const OCEAN_MAX_CASCADES: usize = 4;
 
 #[derive(Clone, Copy, ShaderType, Reflect)]
 pub struct OceanMaterialUniform {
-    /// World-space tile edge in meters for each cascade slot. Must match each cascade's
-    /// [`OceanSimSettings::tile_size`].
-    pub cascade_tile_sizes: Vec4,
+    /// Multiplier on the summed cascade heights and slopes.
     pub amplitude: f32,
     /// Multiplier on horizontal wind-aligned displacement (alpha channel), same sense as amplitude on height. Typical range about 0 to 2.
     pub choppiness: f32,
     /// Radians on XZ: horizontal unit vector `(cos θ, sin θ)` matches `OceanSimSettings::wind_direction` and the chop factor in `ocean_spectrum`.
     pub wind_direction: f32,
-    /// Number of filled cascade slots, from 1 to [`OCEAN_MAX_CASCADES`].
-    pub cascade_count: u32,
     /// Brighter foam in lit shading. Blends albedo toward white by `foam_coverage * foam_intensity`.
     pub foam_intensity: f32,
     /// Jacobian below this value (wave folding) ramps up foam; typical 0.6 to 1.0.
@@ -138,118 +138,52 @@ pub struct OceanMaterialUniform {
     /// Per-frame retention of foam from the previous tick (lower = shorter trails). Typical 0.9 to 0.99.
     /// Read by the foam compute shader.
     pub foam_trail_decay: f32,
-    /// Vertex spacing in meters of the innermost clipmap level. Zero turns off the distance fade
-    /// of vertex displacement. [`OceanClipmap`] fills this in.
-    pub lod_base_spacing: f32,
-    /// Half-width of the innermost clipmap level in cells. The vertex shader estimates local
-    /// spacing as `max(lod_base_spacing, distance / lod_cells_per_level)`.
-    pub lod_cells_per_level: f32,
-    pub _lod_pad0: f32,
-    pub _lod_pad1: f32,
+    /// Extra slices added when vertices sample the LOD data, so vertex spacing never undersamples
+    /// the data. Pixels sample at the natural level.
+    pub vertex_lod_bias: f32,
 }
 
-/// Sums up to four FFT cascades in world space. Bindings start at 100 so they stack with [`StandardMaterial`].
+/// Ocean surface that reads the shared [`WaterLodData`](crate::water::WaterLodData). Bindings
+/// start at 100 so they stack with [`StandardMaterial`].
 ///
-/// Each slot holds one cascade's `FftTextures::spatial_output` and foam mask. Slots at or past
-/// [`OceanMaterialUniform::cascade_count`] are ignored. The surface samples by world position, so any
-/// mesh layout works and the ocean stays anchored when the mesh moves.
+/// The FFT cascades reach the material only through the LOD data, so the same material shows
+/// any solver that writes there. The surface samples by world position, so any mesh layout works
+/// and the ocean stays anchored when the mesh moves. [`OceanPlugin`] keeps `lod`,
+/// `lod_displacement`, and `lod_foam` in sync with the LOD data each frame.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct OceanSurfaceExtension {
     #[uniform(100)]
     pub settings: OceanMaterialUniform,
-    #[texture(101, filterable = false)]
-    pub displacement_0: Handle<Image>,
-    #[texture(102, filterable = false)]
-    pub displacement_1: Handle<Image>,
-    #[texture(103, filterable = false)]
-    pub displacement_2: Handle<Image>,
-    #[texture(104, filterable = false)]
-    pub displacement_3: Handle<Image>,
-    #[texture(105, filterable = false)]
-    pub foam_0: Handle<Image>,
-    #[texture(106, filterable = false)]
-    pub foam_1: Handle<Image>,
-    #[texture(107, filterable = false)]
-    pub foam_2: Handle<Image>,
-    #[texture(108, filterable = false)]
-    pub foam_3: Handle<Image>,
-}
-
-impl OceanSurfaceExtension {
-    /// Puts one cascade's textures into slot `index` (0 to 3) and records its tile size.
-    pub fn set_cascade(
-        &mut self,
-        index: usize,
-        tile_size: f32,
-        displacement: Handle<Image>,
-        foam: Handle<Image>,
-    ) {
-        assert!(
-            index < OCEAN_MAX_CASCADES,
-            "cascade index {index} out of range"
-        );
-        self.settings.cascade_tile_sizes[index] = tile_size;
-        let (d, f) = match index {
-            0 => (&mut self.displacement_0, &mut self.foam_0),
-            1 => (&mut self.displacement_1, &mut self.foam_1),
-            2 => (&mut self.displacement_2, &mut self.foam_2),
-            _ => (&mut self.displacement_3, &mut self.foam_3),
-        };
-        *d = displacement;
-        *f = foam;
-    }
-
-    /// Foam texture handle in slot `index`.
-    pub fn foam(&self, index: usize) -> &Handle<Image> {
-        match index {
-            0 => &self.foam_0,
-            1 => &self.foam_1,
-            2 => &self.foam_2,
-            _ => &self.foam_3,
-        }
-    }
-
-    fn foam_mut(&mut self, index: usize) -> &mut Handle<Image> {
-        match index {
-            0 => &mut self.foam_0,
-            1 => &mut self.foam_1,
-            2 => &mut self.foam_2,
-            _ => &mut self.foam_3,
-        }
-    }
+    #[uniform(101)]
+    pub lod: crate::water::WaterLodSlices,
+    #[texture(102, dimension = "2d_array", filterable = false)]
+    pub lod_displacement: Handle<Image>,
+    #[texture(103, dimension = "2d_array", filterable = false)]
+    pub lod_foam: Handle<Image>,
 }
 
 impl Default for OceanSurfaceExtension {
     fn default() -> Self {
         Self {
             settings: OceanMaterialUniform {
-                cascade_tile_sizes: Vec4::splat(16.0),
                 amplitude: 1.0,
                 choppiness: 0.35,
                 wind_direction: 0.0,
-                cascade_count: 1,
                 foam_intensity: 0.65,
                 foam_cutoff: 0.88,
                 foam_falloff: 0.22,
                 foam_trail_decay: 0.94,
-                lod_base_spacing: 0.0,
-                lod_cells_per_level: 1.0,
-                _lod_pad0: 0.0,
-                _lod_pad1: 0.0,
+                vertex_lod_bias: 1.0,
             },
-            displacement_0: Handle::default(),
-            displacement_1: Handle::default(),
-            displacement_2: Handle::default(),
-            displacement_3: Handle::default(),
-            foam_0: Handle::default(),
-            foam_1: Handle::default(),
-            foam_2: Handle::default(),
-            foam_3: Handle::default(),
+            lod: crate::water::WaterLodSlices::default(),
+            lod_displacement: Handle::default(),
+            lod_foam: Handle::default(),
         }
     }
 }
 
-/// Slot of an ocean FFT entity inside [`OceanSurfaceExtension`]. Entities without it use slot 0.
+/// Cascade slot of an ocean FFT entity, from 0 to [`OCEAN_MAX_CASCADES`] - 1. Entities without it
+/// use slot 0.
 #[derive(Component, Clone, Copy, Default, Debug, PartialEq, Eq, Reflect)]
 pub struct OceanCascade {
     pub index: u32,
@@ -280,6 +214,7 @@ pub type OceanSurfaceMaterial = ExtendedMaterial<StandardMaterial, OceanSurfaceE
 pub mod shaders {
     pub const OCEAN_SURFACE: &str = "embedded://bevy_fft/ocean/ocean.wesl";
     pub const OCEAN_QUERY: &str = "embedded://bevy_fft/ocean/query.wesl";
+    pub const OCEAN_LOD_WRITE: &str = "embedded://bevy_fft/ocean/lod_write.wesl";
 }
 
 /// Marks the entity that carries [`OceanSurfaceMaterial`] for the sim-driven ocean mesh.
@@ -292,6 +227,10 @@ impl Plugin for OceanPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "ocean.wesl");
         embedded_asset!(app, "query.wesl");
+        embedded_asset!(app, "lod_write.wesl");
+        if !app.is_plugin_added::<crate::water::WaterPlugin>() {
+            app.add_plugins(crate::water::WaterPlugin);
+        }
         bevy::shader::load_shader_library!(app, "dispersion.wesl");
         bevy::shader::load_shader_library!(app, "sampling.wesl");
 
@@ -302,7 +241,6 @@ impl Plugin for OceanPlugin {
             .register_type::<OceanMaterialUniform>()
             .register_type::<OceanCascade>()
             .register_type::<OceanClipmap>()
-            .register_type::<OceanClipmapTarget>()
             .add_systems(Update, clipmap::build_ocean_clipmaps)
             .add_systems(
                 PostUpdate,
@@ -343,6 +281,17 @@ impl Plugin for OceanPlugin {
             .add_plugins(bevy::render::extract_resource::ExtractResourcePlugin::<
                 query::OceanQueryFrame,
             >::default())
+            .init_resource::<lod_write::OceanLodWriteFrame>()
+            .add_plugins(bevy::render::extract_resource::ExtractResourcePlugin::<
+                lod_write::OceanLodWriteFrame,
+            >::default())
+            .add_systems(
+                PostUpdate,
+                (
+                    lod_write::gather_ocean_lod_write.after(sync_ocean_foam_display),
+                    sync_ocean_material_lod.after(crate::water::WaterLodSystems),
+                ),
+            )
             .add_systems(Startup, query::setup_ocean_queries)
             .add_systems(
                 PostUpdate,
@@ -367,6 +316,12 @@ impl Plugin for OceanPlugin {
             .init_resource::<OceanComputePipelines>()
             .init_resource::<OceanFoamPipelines>()
             .init_resource::<OceanInitTracker>()
+            .init_resource::<lod_write::OceanLodWritePipeline>()
+            .init_resource::<lod_write::OceanLodWriteBindGroup>()
+            .add_systems(
+                Render,
+                lod_write::prepare_ocean_lod_write.in_set(RenderSystems::PrepareBindGroups),
+            )
             .init_resource::<query::OceanQueryPipeline>()
             .init_resource::<query::OceanQueryBindGroup>()
             .add_systems(
@@ -396,11 +351,37 @@ impl Plugin for OceanPlugin {
                 run_ocean_foam
                     .after(run_fft_resolve_outputs)
                     .before(bevy::core_pipeline::schedule::camera_driver),
+                lod_write::run_ocean_lod_write
+                    .after(run_ocean_foam)
+                    .before(bevy::core_pipeline::schedule::camera_driver),
                 query::run_ocean_query
-                    .after(run_fft_resolve_outputs)
+                    .after(lod_write::run_ocean_lod_write)
                     .before(bevy::core_pipeline::schedule::camera_driver),
             )
                 .in_set(bevy::render::renderer::RenderGraphSystems::Render),
         );
+    }
+}
+
+/// Copies the current slice placement and texture handles from the
+/// [`WaterLodData`](crate::water::WaterLodData) into every ocean surface material.
+fn sync_ocean_material_lod(
+    lod: Option<Res<crate::water::WaterLodData>>,
+    surface: Query<&MeshMaterial3d<OceanSurfaceMaterial>, With<OceanSurfaceTag>>,
+    mut materials: ResMut<Assets<OceanSurfaceMaterial>>,
+) {
+    let Some(lod) = lod else {
+        return;
+    };
+    for handle in &surface {
+        if let Some(mut mat) = materials.get_mut(handle) {
+            mat.extension.lod = lod.slices;
+            if mat.extension.lod_displacement != lod.displacement {
+                mat.extension.lod_displacement = lod.displacement.clone();
+            }
+            if mat.extension.lod_foam != lod.foam {
+                mat.extension.lod_foam = lod.foam.clone();
+            }
+        }
     }
 }

@@ -241,10 +241,8 @@ fn setup(
 struct OceanFftPreviewEgui {
     spectrum: Option<egui::TextureId>,
     displacement: Option<egui::TextureId>,
-    foam: Option<egui::TextureId>,
     registered_sp: Option<AssetId<Image>>,
     registered_dp: Option<AssetId<Image>>,
-    registered_foam: Option<AssetId<Image>>,
 }
 
 #[allow(clippy::type_complexity)]
@@ -273,15 +271,8 @@ fn spawn_ocean_when_ready(
     }
 
     let mut extension = OceanSurfaceExtension::default();
-    extension.settings.cascade_count = CASCADE_TILES.len() as u32;
-    for (tex, foam, sim, cascade) in &q {
+    if let Some(sim) = q.iter().next().map(|(_, _, sim, _)| sim) {
         extension.settings.wind_direction = sim.wind_direction;
-        extension.set_cascade(
-            cascade.index as usize,
-            sim.tile_size,
-            tex.spatial_output.clone(),
-            foam.texture_a.clone(),
-        );
     }
 
     let material = OceanSurfaceMaterial {
@@ -372,15 +363,6 @@ fn ocean_egui_panel(
 
     let sp_tex = cache.spectrum;
     let dp_tex = cache.displacement;
-
-    if let Some(m) = surface_ready {
-        let fm_id = m.extension.foam(0).id();
-        if cache.registered_foam != Some(fm_id) {
-            cache.foam = Some(contexts.add_image(EguiTextureHandle::Weak(fm_id)));
-            cache.registered_foam = Some(fm_id);
-        }
-    }
-    let fm_tex = cache.foam;
 
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -504,12 +486,6 @@ fn ocean_egui_panel(
             if let Some(id) = dp_tex {
                 ui.vertical(|ui| {
                     ui.label("spatial output");
-                    ui.add(egui::Image::new(egui::load::SizedTexture::new(id, size)));
-                });
-            }
-            if let Some(id) = fm_tex {
-                ui.vertical(|ui| {
-                    ui.label("foam mask");
                     ui.add(egui::Image::new(egui::load::SizedTexture::new(id, size)));
                 });
             }

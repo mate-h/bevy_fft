@@ -39,3 +39,4 @@ pub mod fft;
 pub mod ocean;
 pub mod prelude;
 pub mod shallow_water;
+pub mod water;

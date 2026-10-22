@@ -487,34 +487,11 @@ pub(super) fn sync_ocean_foam_uniform(
     }
 }
 
-pub(super) fn sync_ocean_foam_display(
-    mut oceans: Query<
-        (
-            &OceanFoamMask,
-            &mut OceanFoamPhase,
-            Option<&crate::ocean::OceanCascade>,
-        ),
-        With<FftSource>,
-    >,
-    surface: Query<
-        &MeshMaterial3d<crate::ocean::OceanSurfaceMaterial>,
-        With<crate::ocean::OceanSurfaceTag>,
-    >,
-    mut materials: ResMut<Assets<crate::ocean::OceanSurfaceMaterial>>,
-) {
-    for (mask, mut phase, cascade) in &mut oceans {
+/// Advances each ocean entity's foam ping-pong phase once per frame. The LOD writer reads the
+/// half written last (see `lod_write::gather_ocean_lod_write`).
+pub(super) fn sync_ocean_foam_display(mut phases: Query<&mut OceanFoamPhase, With<FftSource>>) {
+    for mut phase in &mut phases {
         phase.0 = phase.0.wrapping_add(1);
-        let latest = if phase.0 % 2 == 0 {
-            &mask.texture_b
-        } else {
-            &mask.texture_a
-        };
-        let slot = cascade.map_or(0, |c| c.index as usize);
-        for handle in &surface {
-            if let Some(mut mat) = materials.get_mut(handle) {
-                *mat.extension.foam_mut(slot) = latest.clone();
-            }
-        }
     }
 }
 

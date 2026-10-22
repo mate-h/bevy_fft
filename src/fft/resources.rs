@@ -286,7 +286,7 @@ pub struct FftResolveBindGroups {
 
 /// Binds one entity's element of a [`ComponentUniforms`] buffer.
 ///
-/// [`ComponentUniforms::binding`] covers only the first element, so with several entities every
+/// `ComponentUniforms::binding` covers only the first element, so with several entities every
 /// bind group would read the first entity's values. The layouts in this crate use non-dynamic
 /// uniforms, so the entity's byte offset is baked into the binding instead.
 pub fn component_uniform_binding<'a, T: Component + ShaderType>(

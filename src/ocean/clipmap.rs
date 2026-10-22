@@ -1,5 +1,7 @@
 //! Camera-centred LOD mesh for the ocean surface.
 //!
+//! The mesh follows the [`WaterViewer`] camera, or the first [`Camera3d`] when none is marked.
+//!
 //! A single plane cannot cover a large level with enough detail near the viewer. [`OceanClipmap`]
 //! builds concentric square rings whose vertex spacing doubles with each level, then keeps the
 //! mesh under the camera. The surface material samples the ocean by world position, so the waves
@@ -7,8 +9,8 @@
 //!
 //! The mesh moves in steps of [`OceanClipmap::snap_spacing`]. Levels at or finer than that step
 //! keep the same world vertex positions after a move, so they never swim. Coarser levels shift
-//! inside their cells, and the vertex shader fades out waves too short for their spacing (see
-//! [`crate::ocean::OceanMaterialUniform::lod_base_spacing`]), which hides that shift.
+//! inside their cells, but they sample coarse water LOD slices that hold no waves short enough to
+//! show that shift.
 
 use std::collections::HashMap;
 
@@ -18,9 +20,9 @@ use bevy::{
     prelude::*,
 };
 
-use crate::ocean::{OceanSurfaceMaterial, OceanSurfaceTag};
+use crate::{ocean::OceanSurfaceTag, water::WaterViewer};
 
-/// Camera-following LOD mesh settings. Add it with an [`OceanSurfaceMaterial`] and
+/// Camera-following LOD mesh settings. Add it with an [`OceanSurfaceMaterial`](crate::ocean::OceanSurfaceMaterial) and
 /// [`OceanSurfaceTag`]; the plugin builds the [`Mesh3d`] and moves the entity each frame.
 #[derive(Component, Clone, Copy, Debug, Reflect)]
 #[require(Transform, Visibility)]
@@ -73,10 +75,6 @@ impl OceanClipmap {
         builder.into_mesh(self.base_spacing)
     }
 }
-
-/// Picks which camera an [`OceanClipmap`] follows. Without it, the first [`Camera3d`] is used.
-#[derive(Component, Clone, Copy, Debug, Default, Reflect)]
-pub struct OceanClipmapTarget;
 
 #[derive(Default)]
 struct MeshBuilder {
@@ -187,35 +185,22 @@ impl MeshBuilder {
     }
 }
 
-/// Builds the mesh for new or changed clipmaps and writes the LOD parameters into their material.
-#[allow(clippy::type_complexity)]
+/// Builds the mesh for new or changed clipmaps.
 pub(super) fn build_ocean_clipmaps(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<OceanSurfaceMaterial>>,
-    clipmaps: Query<
-        (
-            Entity,
-            &OceanClipmap,
-            Option<&MeshMaterial3d<OceanSurfaceMaterial>>,
-        ),
-        Changed<OceanClipmap>,
-    >,
+    clipmaps: Query<(Entity, &OceanClipmap), Changed<OceanClipmap>>,
 ) {
-    for (entity, clipmap, material) in &clipmaps {
+    for (entity, clipmap) in &clipmaps {
         commands
             .entity(entity)
             .insert((Mesh3d(meshes.add(clipmap.build_mesh())), OceanSurfaceTag));
-        if let Some(mut mat) = material.and_then(|m| materials.get_mut(&m.0)) {
-            mat.extension.settings.lod_base_spacing = clipmap.base_spacing;
-            mat.extension.settings.lod_cells_per_level = clipmap.cells_per_level as f32;
-        }
     }
 }
 
 /// Moves each clipmap under its camera in whole snap steps.
 pub(super) fn follow_ocean_clipmaps(
-    targets: Query<&GlobalTransform, With<OceanClipmapTarget>>,
+    targets: Query<&GlobalTransform, With<WaterViewer>>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
     mut clipmaps: Query<(&OceanClipmap, &mut Transform)>,
 ) {
