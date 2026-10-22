@@ -17,8 +17,11 @@
 //! meaningful sea state in meters, calibrate variance in `init_h0` (and any global gain) so heights are
 //! correct after this normalization, rather than editing `inv_dim` in `ifft.wgsl`.
 
+mod clipmap;
 mod query;
 mod render;
+
+pub use clipmap::{OceanClipmap, OceanClipmapTarget};
 
 pub use query::{
     OCEAN_QUERY_MAX_POINTS, OceanQueries, OceanQueryReadback, OceanQueryResults, OceanSample,
@@ -135,6 +138,14 @@ pub struct OceanMaterialUniform {
     /// Per-frame retention of foam from the previous tick (lower = shorter trails). Typical 0.9 to 0.99.
     /// Read by the foam compute shader.
     pub foam_trail_decay: f32,
+    /// Vertex spacing in meters of the innermost clipmap level. Zero turns off the distance fade
+    /// of vertex displacement. [`OceanClipmap`] fills this in.
+    pub lod_base_spacing: f32,
+    /// Half-width of the innermost clipmap level in cells. The vertex shader estimates local
+    /// spacing as `max(lod_base_spacing, distance / lod_cells_per_level)`.
+    pub lod_cells_per_level: f32,
+    pub _lod_pad0: f32,
+    pub _lod_pad1: f32,
 }
 
 /// Sums up to four FFT cascades in world space. Bindings start at 100 so they stack with [`StandardMaterial`].
@@ -221,6 +232,10 @@ impl Default for OceanSurfaceExtension {
                 foam_cutoff: 0.88,
                 foam_falloff: 0.22,
                 foam_trail_decay: 0.94,
+                lod_base_spacing: 0.0,
+                lod_cells_per_level: 1.0,
+                _lod_pad0: 0.0,
+                _lod_pad1: 0.0,
             },
             displacement_0: Handle::default(),
             displacement_1: Handle::default(),
@@ -286,6 +301,13 @@ impl Plugin for OceanPlugin {
             .register_type::<OceanH0Image>()
             .register_type::<OceanMaterialUniform>()
             .register_type::<OceanCascade>()
+            .register_type::<OceanClipmap>()
+            .register_type::<OceanClipmapTarget>()
+            .add_systems(Update, clipmap::build_ocean_clipmaps)
+            .add_systems(
+                PostUpdate,
+                clipmap::follow_ocean_clipmaps.before(bevy::transform::TransformSystems::Propagate),
+            )
             .register_type::<OceanFoamUniform>()
             .register_type::<OceanFoamMask>()
             .register_type::<OceanFoamPhase>()

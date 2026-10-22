@@ -39,31 +39,6 @@ const CASCADE_TILES: [f32; 3] = [256.0, 48.0, 9.0];
 /// Keeping a few periods inside the smaller tile avoids its coarse lowest bins.
 const CASCADE_HANDOFF_WAVES: f32 = 6.0;
 
-/// Edge length in meters of the ocean plane mesh.
-const OCEAN_PLANE_SIZE: f32 = 256.0;
-
-/// Vertices per axis on the ocean plane (`Plane3d` uses `subdivisions + 2` vertices).
-const OCEAN_MESH_VERTEX_OPTIONS: [u32; 6] = [16, 32, 64, 128, 256, 512];
-
-#[derive(Resource, Clone, Copy)]
-struct OceanMeshSelection {
-    vertices_per_edge: u32,
-}
-
-impl Default for OceanMeshSelection {
-    fn default() -> Self {
-        Self {
-            vertices_per_edge: 256,
-        }
-    }
-}
-
-impl OceanMeshSelection {
-    fn plane_subdivisions(self) -> u32 {
-        self.vertices_per_edge.saturating_sub(2)
-    }
-}
-
 #[path = "../common/screenshot.rs"]
 mod screenshot;
 
@@ -74,7 +49,6 @@ fn main() {
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(GlobalAmbientLight::NONE)
         .init_resource::<SunLightSettings>()
-        .init_resource::<OceanMeshSelection>()
         .add_plugins((
             DefaultPlugins,
             FreeCameraPlugin,
@@ -133,8 +107,13 @@ fn spawn_buoys(
     }
 }
 
-/// Places each buoy on the latest queried surface height and tilts it to the surface normal.
-fn float_buoys(mut queries: ResMut<OceanQueries>, mut buoys: Query<(&Buoy, &mut Transform)>) {
+/// Places each buoy on the queried surface height, extrapolated to now, and tilts it to the
+/// surface normal.
+fn float_buoys(
+    mut queries: ResMut<OceanQueries>,
+    mut buoys: Query<(&Buoy, &mut Transform)>,
+    time: Res<Time>,
+) {
     if queries.points().is_empty() {
         queries.set_points(BUOY_POSITIONS);
     }
@@ -146,7 +125,9 @@ fn float_buoys(mut queries: ResMut<OceanQueries>, mut buoys: Query<(&Buoy, &mut 
             continue;
         };
         let sample = results.samples[i];
-        transform.translation = Vec3::new(buoy.xz.x, sample.height, buoy.xz.y);
+        // Extrapolate over the readback latency so the buoy keeps up with the waves.
+        let age = time.elapsed_secs() - results.time;
+        transform.translation = Vec3::new(buoy.xz.x, sample.height_after(age), buoy.xz.y);
         transform.rotation = Quat::from_rotation_arc(Vec3::Y, sample.normal());
     }
 }
@@ -269,9 +250,7 @@ struct OceanFftPreviewEgui {
 #[allow(clippy::type_complexity)]
 fn spawn_ocean_when_ready(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<OceanSurfaceMaterial>>,
-    mesh_sel: Res<OceanMeshSelection>,
     q: Query<
         (
             &FftTextures,
@@ -292,11 +271,6 @@ fn spawn_ocean_when_ready(
     if !existing.is_empty() || q.iter().count() < CASCADE_TILES.len() {
         return;
     }
-
-    let mesh = Plane3d::new(Vec3::Y, Vec2::splat(OCEAN_PLANE_SIZE * 0.5))
-        .mesh()
-        .subdivisions(mesh_sel.plane_subdivisions())
-        .build();
 
     let mut extension = OceanSurfaceExtension::default();
     extension.settings.cascade_count = CASCADE_TILES.len() as u32;
@@ -322,9 +296,8 @@ fn spawn_ocean_when_ready(
     };
 
     commands.spawn((
-        Mesh3d(meshes.add(mesh)),
+        OceanClipmap::default(),
         MeshMaterial3d(materials.add(material)),
-        Transform::from_xyz(0.0, 0.0, 0.0),
         OceanSurfaceTag,
     ));
 }
@@ -334,7 +307,7 @@ fn ocean_egui_panel(
     fft_textures: Query<(&FftTextures, &OceanCascade), With<FftSource>>,
     mut contexts: EguiContexts,
     mut commands: Commands,
-    mut mesh_sel: ResMut<OceanMeshSelection>,
+    mut clipmaps: Query<&mut OceanClipmap>,
     mut cache: Local<OceanFftPreviewEgui>,
     mut smoothed_frame_ms: Local<Option<f32>>,
     time: Res<Time>,
@@ -419,12 +392,6 @@ fn ocean_egui_panel(
         .unwrap_or(2);
     let mut new_idx = size_idx;
 
-    let mesh_idx = OCEAN_MESH_VERTEX_OPTIONS
-        .iter()
-        .position(|&n| n == mesh_sel.vertices_per_edge)
-        .unwrap_or(3);
-    let mut new_mesh_idx = mesh_idx;
-
     let dt = time.delta_secs();
     let inst_ms = dt * 1000.0;
     let tau = 0.25_f32;
@@ -460,19 +427,6 @@ fn ocean_egui_panel(
                 }
             });
 
-        ui.add_space(4.0);
-        ui.label("Mesh vertices");
-        egui::ComboBox::from_id_salt("ocean_mesh_subdivisions")
-            .selected_text(format!(
-                "{} × {}",
-                OCEAN_MESH_VERTEX_OPTIONS[new_mesh_idx], OCEAN_MESH_VERTEX_OPTIONS[new_mesh_idx]
-            ))
-            .show_ui(ui, |ui| {
-                for (i, &v) in OCEAN_MESH_VERTEX_OPTIONS.iter().enumerate() {
-                    ui.selectable_value(&mut new_mesh_idx, i, format!("{v} × {v}"));
-                }
-            });
-
         let new_n = OCEAN_GRID_SIZES[new_idx];
         if new_n != s.texture_size {
             commands
@@ -500,11 +454,11 @@ fn ocean_egui_panel(
             *cache = OceanFftPreviewEgui::default();
         }
 
-        let new_mesh_vertices = OCEAN_MESH_VERTEX_OPTIONS[new_mesh_idx];
-        if new_mesh_vertices != mesh_sel.vertices_per_edge {
-            mesh_sel.vertices_per_edge = new_mesh_vertices;
-            for entity in &surface {
-                commands.entity(entity).despawn();
+        if let Ok(mut clipmap) = clipmaps.single_mut() {
+            let mut levels = clipmap.levels;
+            ui.add(egui::Slider::new(&mut levels, 3..=12).text("Clipmap levels"));
+            if levels != clipmap.levels {
+                clipmap.levels = levels;
             }
         }
 

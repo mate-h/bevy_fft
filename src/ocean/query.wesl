@@ -82,6 +82,8 @@ fn ocean_query(@builtin(global_invocation_id) gid: vec3<u32>) {
         let s = ocean_sample(xz);
         xz = target_xz - s.a * wind;
     }
+    // `ocean_sample` keeps the FFT lane order (slope x, slope z, height, chop). The output puts
+    // height first, matching `OceanSample` on the CPU.
     let s = ocean_sample(xz);
-    query_out.samples[gid.x] = s;
+    query_out.samples[gid.x] = vec4<f32>(s.b, s.r, s.g, s.a);
 }

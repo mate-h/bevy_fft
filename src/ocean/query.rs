@@ -53,9 +53,18 @@ pub struct OceanSample {
     pub slope: Vec2,
     /// Horizontal chop offset in meters along the wind direction at the sampled point.
     pub chop: f32,
+    /// Rate of change of [`Self::height`] in m/s, from this result and the previous one for the
+    /// same point. Zero until two results for the point have arrived.
+    pub vertical_velocity: f32,
 }
 
 impl OceanSample {
+    /// Height extrapolated `seconds` past the time the sample was taken. Use it with
+    /// [`OceanQueryResults::age`] to hide the readback latency.
+    pub fn height_after(&self, seconds: f32) -> f32 {
+        self.height + self.vertical_velocity * seconds
+    }
+
     /// Unit surface normal from the slope.
     pub fn normal(&self) -> Vec3 {
         Vec3::new(-self.slope.x, 1.0, -self.slope.y).normalize()
@@ -66,6 +75,8 @@ impl OceanSample {
 pub struct OceanQueryResults<'a> {
     /// Value of [`OceanQueries::frame`] when these points were submitted.
     pub frame: u32,
+    /// [`Time::elapsed_secs`] when these points were submitted.
+    pub time: f32,
     pub points: &'a [Vec2],
     pub samples: &'a [OceanSample],
 }
@@ -78,8 +89,9 @@ pub struct OceanQueryResults<'a> {
 pub struct OceanQueries {
     points: Vec<Vec2>,
     frame: u32,
-    pending: VecDeque<(u32, Vec<Vec2>)>,
+    pending: VecDeque<(u32, f32, Vec<Vec2>)>,
     results_frame: Option<u32>,
+    results_time: f32,
     results_points: Vec<Vec2>,
     results: Vec<OceanSample>,
     input: Handle<ShaderBuffer>,
@@ -110,6 +122,7 @@ impl OceanQueries {
     pub fn results(&self) -> Option<OceanQueryResults<'_>> {
         self.results_frame.map(|frame| OceanQueryResults {
             frame,
+            time: self.results_time,
             points: &self.results_points,
             samples: &self.results,
         })
@@ -124,26 +137,38 @@ impl OceanQueries {
         if self.results_frame.is_some_and(|f| f >= frame) {
             return;
         }
-        let Some(pos) = self.pending.iter().position(|(f, _)| *f == frame) else {
+        let Some(pos) = self.pending.iter().position(|(f, _, _)| *f == frame) else {
             return;
         };
-        let (_, points) = self.pending.remove(pos).unwrap();
-        self.pending.retain(|(f, _)| *f > frame);
+        let (_, time, points) = self.pending.remove(pos).unwrap();
+        self.pending.retain(|(f, _, _)| *f > frame);
 
         let samples = &data[OUTPUT_HEADER_BYTES..];
         let count = count.min(points.len()).min(samples.len() / 16);
-        self.results.clear();
+        let dt = time - self.results_time;
+        let previous = std::mem::take(&mut self.results);
+        let previous_points = std::mem::take(&mut self.results_points);
+        let mut points = points;
+        points.truncate(count);
         self.results.extend((0..count).map(|i| {
             let o = i * 16;
+            let height = read_f32(samples, o);
+            let vertical_velocity = match previous.get(i) {
+                Some(prev) if dt > 0.0 && previous_points.get(i) == points.get(i) => {
+                    (height - prev.height) / dt
+                }
+                _ => 0.0,
+            };
             OceanSample {
-                height: read_f32(samples, o),
+                height,
                 slope: Vec2::new(read_f32(samples, o + 4), read_f32(samples, o + 8)),
                 chop: read_f32(samples, o + 12),
+                vertical_velocity,
             }
         }));
         self.results_points = points;
-        self.results_points.truncate(count);
         self.results_frame = Some(frame);
+        self.results_time = time;
     }
 }
 
@@ -185,6 +210,7 @@ pub(super) fn setup_ocean_queries(
         frame: 0,
         pending: VecDeque::new(),
         results_frame: None,
+        results_time: 0.0,
         results_points: Vec::new(),
         results: Vec::new(),
         input,
@@ -212,6 +238,7 @@ pub(super) fn submit_ocean_queries(
     surface: Query<&MeshMaterial3d<OceanSurfaceMaterial>, With<OceanSurfaceTag>>,
     materials: Res<Assets<OceanSurfaceMaterial>>,
     readback: Query<(Entity, Has<Readback>), With<OceanQueryReadback>>,
+    time: Res<Time>,
 ) {
     frame_out.count = 0;
     let Ok((readback_entity, has_readback)) = readback.single() else {
@@ -275,7 +302,9 @@ pub(super) fn submit_ocean_queries(
     }
 
     let points = queries.points.clone();
-    queries.pending.push_back((frame, points));
+    queries
+        .pending
+        .push_back((frame, time.elapsed_secs(), points));
     while queries.pending.len() > PENDING_FRAMES {
         queries.pending.pop_front();
     }
@@ -413,8 +442,9 @@ mod tests {
         OceanQueries {
             points: points.clone(),
             frame,
-            pending: VecDeque::from([(frame, points)]),
+            pending: VecDeque::from([(frame, frame as f32, points)]),
             results_frame: None,
+            results_time: 0.0,
             results_points: Vec::new(),
             results: Vec::new(),
             input: Handle::default(),
@@ -457,9 +487,21 @@ mod tests {
         q.accept_readback(&readback_bytes(99, &[[1.0, 0.0, 0.0, 0.0]]));
         assert!(q.results().is_none());
         q.accept_readback(&readback_bytes(3, &[[2.0, 0.0, 0.0, 0.0]]));
-        q.pending.push_back((2, vec![Vec2::ONE]));
+        q.pending.push_back((2, 2.0, vec![Vec2::ONE]));
         q.accept_readback(&readback_bytes(2, &[[5.0, 0.0, 0.0, 0.0]]));
         assert_eq!(q.results().unwrap().samples[0].height, 2.0);
+    }
+
+    #[test]
+    fn consecutive_results_give_vertical_velocity() {
+        let p = vec![Vec2::ZERO];
+        let mut q = queries_with_pending(4, p.clone());
+        q.accept_readback(&readback_bytes(4, &[[1.0, 0.0, 0.0, 0.0]]));
+        q.pending.push_back((6, 6.0, p));
+        q.accept_readback(&readback_bytes(6, &[[2.0, 0.0, 0.0, 0.0]]));
+        let s = q.results().unwrap().samples[0];
+        assert_eq!(s.vertical_velocity, 0.5);
+        assert_eq!(s.height_after(2.0), 3.0);
     }
 
     #[test]

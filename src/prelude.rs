@@ -22,10 +22,10 @@ pub use crate::fft::{
     run_fft_resolve_outputs, run_fft_resolve_spectrum,
 };
 pub use crate::ocean::{
-    OCEAN_MAX_CASCADES, OCEAN_QUERY_MAX_POINTS, OceanCascade, OceanDynamicUniform, OceanFoamMask,
-    OceanFoamPhase, OceanFoamUniform, OceanH0Image, OceanH0Uniform, OceanMaterialUniform,
-    OceanPlugin, OceanQueries, OceanQueryResults, OceanSample, OceanSimSettings,
-    OceanSurfaceExtension, OceanSurfaceMaterial, OceanSurfaceTag,
+    OCEAN_MAX_CASCADES, OCEAN_QUERY_MAX_POINTS, OceanCascade, OceanClipmap, OceanClipmapTarget,
+    OceanDynamicUniform, OceanFoamMask, OceanFoamPhase, OceanFoamUniform, OceanH0Image,
+    OceanH0Uniform, OceanMaterialUniform, OceanPlugin, OceanQueries, OceanQueryResults,
+    OceanSample, OceanSimSettings, OceanSurfaceExtension, OceanSurfaceMaterial, OceanSurfaceTag,
 };
 pub use crate::shallow_water::{
     ShallowWaterBorder, ShallowWaterController, ShallowWaterMaterialUniform, ShallowWaterPlugin,

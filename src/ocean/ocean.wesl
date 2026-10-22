@@ -67,6 +67,10 @@ struct OceanExtensionUniform {
     foam_cutoff: f32,
     foam_falloff: f32,
     foam_trail_decay: f32,
+    lod_base_spacing: f32,
+    lod_cells_per_level: f32,
+    _lod_pad0: f32,
+    _lod_pad1: f32,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> ocean_ext: OceanExtensionUniform;
@@ -101,6 +105,34 @@ fn foam_cascade(i: u32, xz: vec2<f32>) -> f32 {
         return bilinear_wrap(foam_2, uv).r;
     }
     return bilinear_wrap(foam_3, uv).r;
+}
+
+/// Weight of cascade `i` for vertex displacement at a local vertex spacing of `spacing` meters.
+/// Waves much shorter than the spacing cannot be resolved by the vertices, and sampling them
+/// would make coarse rings shimmer as the mesh moves. Pixel normals still show them.
+fn cascade_vertex_weight(i: u32, spacing: f32) -> f32 {
+    let tile = ocean_ext.cascade_tile_sizes[i];
+    return 1.0 - smoothstep(tile / 16.0, tile / 4.0, spacing);
+}
+
+/// Cascade sum for vertex displacement, fading cascades too fine for `spacing`.
+fn ocean_sample_lod(xz: vec2<f32>, spacing: f32) -> vec4<f32> {
+    var sum = vec4<f32>(0.0);
+    let count = min(ocean_ext.cascade_count, 4u);
+    for (var i = 0u; i < count; i++) {
+        sum += displacement_cascade(i, xz) * cascade_vertex_weight(i, spacing);
+    }
+    let amp = ocean_ext.amplitude;
+    return vec4<f32>(sum.rgb * amp, sum.a * amp * ocean_ext.choppiness);
+}
+
+/// Estimated clipmap vertex spacing at `world_xz`. Zero base spacing turns the fade off.
+fn lod_spacing(world_xz: vec2<f32>, mesh_center_xz: vec2<f32>) -> f32 {
+    if ocean_ext.lod_base_spacing <= 0.0 {
+        return 0.0;
+    }
+    let d = max(abs(world_xz.x - mesh_center_xz.x), abs(world_xz.y - mesh_center_xz.y));
+    return max(ocean_ext.lod_base_spacing, d / max(ocean_ext.lod_cells_per_level, 1.0));
 }
 
 /// Sum of all cascades at world `xz`, scaled by amplitude. R/G = height slopes along X and Z,
@@ -139,7 +171,8 @@ struct DisplacedSurface {
 fn ocean_displace_surface(instance_index: u32, position_local: vec3<f32>) -> DisplacedSurface {
     let world_from_local = get_world_from_local(instance_index);
     var world = mesh_position_local_to_world(world_from_local, vec4<f32>(position_local, 1.0));
-    let s = ocean_sample(world.xz);
+    let spacing = lod_spacing(world.xz, world_from_local[3].xz);
+    let s = ocean_sample_lod(world.xz, spacing);
     let w = wind_dir();
     world = vec4<f32>(world.x + s.a * w.x, world.y + s.b, world.z + s.a * w.y, 1.0);
 
