@@ -55,8 +55,10 @@ pub struct OceanH0Uniform {
     pub gravity: f32,
     pub amplitude_scale: f32,
     pub h0_serial: u32,
-    pub _pad1: u32,
-    pub _pad2: u32,
+    /// Mean water depth in meters, see [`crate::ocean::OceanSimSettings::depth`].
+    pub depth: f32,
+    /// Horvath swell parameter, see [`crate::ocean::OceanSimSettings::swell`].
+    pub swell: f32,
     pub _pad3: u32,
 }
 
@@ -86,7 +88,8 @@ pub struct OceanDynamicUniform {
     pub gravity: f32,
     /// Same radians as [`crate::ocean::OceanSimSettings::wind_direction`] and `init_h0` (`atan2(k.y, k.x)` on the XZ plane; texture row is Z).
     pub wind_direction: f32,
-    pub _pad2: f32,
+    /// Mean water depth in meters for the finite-depth dispersion relation.
+    pub depth: f32,
     pub _pad3: f32,
 }
 
@@ -393,6 +396,8 @@ pub(super) fn sync_ocean_h0_uniform(
         u.gravity = s.gravity;
         u.amplitude_scale = s.amplitude_scale;
         u.h0_serial = s.h0_serial;
+        u.depth = s.depth;
+        u.swell = s.swell;
     }
 }
 
@@ -406,6 +411,7 @@ pub(super) fn sync_ocean_dynamic_uniform(
         d.elapsed_seconds = time.elapsed_secs() * s.time_scale;
         d.gravity = s.gravity;
         d.wind_direction = s.wind_direction;
+        d.depth = s.depth;
     }
 }
 

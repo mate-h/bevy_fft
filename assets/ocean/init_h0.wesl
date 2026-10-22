@@ -1,4 +1,8 @@
+import bevy_fft::ocean::dispersion::{omega_finite_depth, domega_dk_finite_depth, tma_factor};
+
 const PI: f32 = 3.14159265359;
+/// θ samples used to renormalize the swell-shaped directional spread.
+const SWELL_NORM_SAMPLES: u32 = 64u;
 /// Fully developed Pierson–Moskowitz peak in rad/s: `ω_pm ≈ PM_PEAK_COEFF * g / U` with fetch-limited U in m/s.
 const PM_PEAK_COEFF: f32 = 0.87;
 /// After using PM peak `ω_pm`, clamp `ω_p` (rad/s) for numerical stability only. Not a physical prior.
@@ -20,8 +24,8 @@ struct OceanH0Params {
     // Linear multiplier on RMS after calibration; 1 is nominal. Not a clamp.
     amplitude_scale: f32,
     h0_serial: u32,
-    _pad1: u32,
-    _pad2: u32,
+    depth: f32,
+    swell: f32,
     _pad3: u32,
 }
 
@@ -68,7 +72,33 @@ fn directional_spread_D(diff_from_wind: f32, spread: f32) -> f32 {
     return pow(c, s) * (s + 1.0) / (2.0 * PI);
 }
 
-/// Omnidirectional variance density in k (rad/m): Φ(k) = S(ω) |dω/dk| D(θ) / k, with ω = √(g|k|).
+/// Horvath (2015) swell spread `|cos(Δθ/2)|^(2 s_ξ)` with `s_ξ = 16 tanh(ω_p/ω) ξ²`.
+fn swell_spread(diff_from_wind: f32, omega: f32, omega_p: f32, swell: f32) -> f32 {
+    let s_xi = 16.0 * tanh(omega_p / max(omega, 1e-6)) * swell * swell;
+    return pow(abs(cos(0.5 * diff_from_wind)), 2.0 * s_xi);
+}
+
+/// Wind-sea spread multiplied by the swell spread, rescaled so its integral over θ matches the
+/// wind-sea spread alone. With `swell = 0` this returns `directional_spread_D` unchanged.
+fn directional_D(diff_from_wind: f32, omega: f32, omega_p: f32) -> f32 {
+    let base = directional_spread_D(diff_from_wind, params.directional_spread);
+    if params.swell <= 0.0 {
+        return base;
+    }
+    var num = 0.0;
+    var den = 0.0;
+    for (var i = 0u; i < SWELL_NORM_SAMPLES; i++) {
+        let th = -PI + (f32(i) + 0.5) * (2.0 * PI / f32(SWELL_NORM_SAMPLES));
+        let d = directional_spread_D(th, params.directional_spread);
+        num += d;
+        den += d * swell_spread(th, omega, omega_p, params.swell);
+    }
+    let norm = num / max(den, 1e-12);
+    return base * swell_spread(diff_from_wind, omega, omega_p, params.swell) * norm;
+}
+
+/// Omnidirectional variance density in k (rad/m): Φ(k) = S(ω) |dω/dk| D(θ) / k, with the finite-depth
+/// relation ω² = g k tanh(k h). S is JONSWAP times the TMA depth factor.
 /// Pure physics only; RMS of each `h̃(k)` mode is fixed in `init_h0` from Φ, Δk, N, and the IFFT (1/N per axis).
 ///
 /// Uses `ω_pm = PM_PEAK_COEFF * g / U` as the PM peak before JONSWAP.
@@ -79,17 +109,18 @@ fn jonswap_phi_k(k: vec2<f32>) -> f32 {
     if k_len < 1e-9 {
         return 0.0;
     }
-    let omega = sqrt(g * k_len);
+    let omega = omega_finite_depth(k_len, params.depth, g);
     let u = params.wind_speed;
     let omega_p_raw = PM_PEAK_COEFF * g / max(u, 1e-6);
     let omega_p = clamp(omega_p_raw, OMEGA_P_MIN, OMEGA_P_MAX);
     let S_pm = pierson_moskowitz_S(omega, omega_p, g);
     let jf = jonswap_factor(omega, omega_p, params.peak_enhancement);
-    let S = S_pm * jf;
-    let dwdk = g / (2.0 * omega);
+    let S = S_pm * jf * tma_factor(omega, params.depth, g);
+    let dwdk = domega_dk_finite_depth(k_len, params.depth, g);
     let theta = atan2(k.y, k.x);
-    let diff = theta - params.wind_direction;
-    let D = directional_spread_D(diff, params.directional_spread);
+    let raw = theta - params.wind_direction;
+    let diff = atan2(sin(raw), cos(raw));
+    let D = directional_D(diff, omega, omega_p);
     var phi = S * abs(dwdk) * D / max(k_len, 1e-9);
     let l = max(params.small_wave_cutoff, 1e-4);
     phi *= exp(-k2 * l * l);

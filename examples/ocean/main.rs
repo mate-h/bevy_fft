@@ -54,6 +54,9 @@ impl OceanMeshSelection {
     }
 }
 
+#[path = "../common/screenshot.rs"]
+mod screenshot;
+
 fn main() {
     App::new()
         // Same as `examples/3d/atmosphere.rs`: deferred opaques (water there uses `ExtendedMaterial` + deferred fragment).
@@ -68,6 +71,7 @@ fn main() {
             FftPlugin,
             OceanPlugin,
             EguiPlugin::default(),
+            screenshot::ScreenshotOnEnvPlugin,
         ))
         .add_systems(Startup, setup)
         .add_systems(
@@ -393,6 +397,12 @@ fn ocean_egui_panel(
         );
         ui.add(egui::Slider::new(&mut s.peak_enhancement, 1.0..=8.0).text("Peak enhancement"));
         ui.add(egui::Slider::new(&mut s.directional_spread, 0.0..=16.0).text("Spread"));
+        ui.add(egui::Slider::new(&mut s.swell, 0.0..=1.0).text("Swell"));
+        ui.add(
+            egui::Slider::new(&mut s.depth, 0.5..=1000.0)
+                .logarithmic(true)
+                .text("Depth (m)"),
+        );
         ui.add(egui::Slider::new(&mut s.small_wave_cutoff, 0.000..=0.1).text("Small wave cutoff"));
         ui.add(egui::Slider::new(&mut s.amplitude_scale, 0.0..=4.0).text("H0 amplitude scale"));
         ui.add(egui::Slider::new(&mut s.time_scale, 0.0..=3.0).text("Time scale"));

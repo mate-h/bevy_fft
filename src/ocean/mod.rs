@@ -69,6 +69,12 @@ pub struct OceanSimSettings {
     pub amplitude_scale: f32,
     /// Multiplier for [`Time::elapsed_secs`] inside [`OceanDynamicUniform::elapsed_seconds`].
     pub time_scale: f32,
+    /// Mean water depth in meters. Sets the finite-depth dispersion ω² = gk·tanh(kh) and the TMA
+    /// spectrum factor. Values above roughly half the longest wavelength behave like deep water.
+    pub depth: f32,
+    /// Horvath swell parameter ξ in `[0, 1]`. Zero keeps the wind-sea spreading. Larger values
+    /// stretch long waves into parallel trains, as swell that has left its storm does.
+    pub swell: f32,
     /// Increment to force regeneration of the `H0` texture on the GPU.
     pub h0_serial: u32,
 }
@@ -86,6 +92,8 @@ impl Default for OceanSimSettings {
             gravity: 9.81,
             amplitude_scale: 1.0,
             time_scale: 1.0,
+            depth: 1000.0,
+            swell: 0.0,
             h0_serial: 1,
         }
     }
@@ -179,6 +187,7 @@ pub struct OceanPlugin;
 impl Plugin for OceanPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "ocean.wesl");
+        bevy::shader::load_shader_library!(app, "dispersion.wesl");
 
         app.register_type::<OceanSimSettings>()
             .register_type::<OceanH0Uniform>()
