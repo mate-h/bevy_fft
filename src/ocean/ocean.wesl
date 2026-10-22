@@ -1,10 +1,9 @@
 import bevy_pbr::render::mesh_functions::{
     get_world_from_local,
     get_visibility_range_dither_level,
-    mesh_normal_local_to_world,
-    mesh_position_local_to_clip,
     mesh_position_local_to_world,
 };
+import bevy_pbr::render::view_transformations::position_world_to_clip;
 
 @if(PREPASS_PIPELINE)
 import bevy_pbr::prepass::io::{
@@ -57,26 +56,94 @@ import bevy_pbr::deferred::functions::deferred_output;
 import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT;
 
 struct OceanExtensionUniform {
+    /// World-space tile edge in meters for cascades 0 to 3.
+    cascade_tile_sizes: vec4<f32>,
     amplitude: f32,
     choppiness: f32,
-    ocean_tile_world_size: f32,
-    grid_size: f32,
     wind_direction: f32,
+    cascade_count: u32,
     foam_intensity: f32,
     foam_cutoff: f32,
     foam_falloff: f32,
+    foam_trail_decay: f32,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> ocean_ext: OceanExtensionUniform;
-@group(constants::MATERIAL_BIND_GROUP) @binding(101) var displacement_texture: texture_2d<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(102) var displacement_sampler: sampler;
-@group(constants::MATERIAL_BIND_GROUP) @binding(103) var foam_mask_texture: texture_2d<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(104) var foam_mask_sampler: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(101) var displacement_0: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(102) var displacement_1: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(103) var displacement_2: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(104) var displacement_3: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(105) var foam_0: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(106) var foam_1: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(107) var foam_2: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(108) var foam_3: texture_2d<f32>;
 
-fn ocean_load_disp(tex: texture_2d<f32>, cx: i32, cz: i32, dims: i32) -> vec4<f32> {
-    let ii = clamp(cx, 0, dims - 1);
-    let jj = clamp(cz, 0, dims - 1);
-    return textureLoad(tex, vec2<i32>(ii, jj), 0);
+fn wrap_texel(p: vec2<i32>, dims: vec2<i32>) -> vec2<i32> {
+    return ((p % dims) + dims) % dims;
+}
+
+/// Bilinear fetch with periodic wrap. `uv` is in tiles, so `uv = 1` is one full period.
+/// Uses `textureLoad` so float32 textures need no filterable sampler.
+fn bilinear_wrap(tex: texture_2d<f32>, uv: vec2<f32>) -> vec4<f32> {
+    let dims = vec2<i32>(textureDimensions(tex, 0));
+    let x = uv * vec2<f32>(dims) - 0.5;
+    let i0 = vec2<i32>(floor(x));
+    let f = x - floor(x);
+    let a = textureLoad(tex, wrap_texel(i0, dims), 0);
+    let b = textureLoad(tex, wrap_texel(i0 + vec2(1, 0), dims), 0);
+    let c = textureLoad(tex, wrap_texel(i0 + vec2(0, 1), dims), 0);
+    let d = textureLoad(tex, wrap_texel(i0 + vec2(1, 1), dims), 0);
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+fn displacement_cascade(i: u32, xz: vec2<f32>) -> vec4<f32> {
+    let uv = xz / ocean_ext.cascade_tile_sizes[i];
+    if i == 0u {
+        return bilinear_wrap(displacement_0, uv);
+    } else if i == 1u {
+        return bilinear_wrap(displacement_1, uv);
+    } else if i == 2u {
+        return bilinear_wrap(displacement_2, uv);
+    }
+    return bilinear_wrap(displacement_3, uv);
+}
+
+fn foam_cascade(i: u32, xz: vec2<f32>) -> f32 {
+    let uv = xz / ocean_ext.cascade_tile_sizes[i];
+    if i == 0u {
+        return bilinear_wrap(foam_0, uv).r;
+    } else if i == 1u {
+        return bilinear_wrap(foam_1, uv).r;
+    } else if i == 2u {
+        return bilinear_wrap(foam_2, uv).r;
+    }
+    return bilinear_wrap(foam_3, uv).r;
+}
+
+/// Sum of all cascades at world `xz`, scaled by amplitude. R/G = height slopes along X and Z,
+/// B = elevation, A = wind-aligned horizontal chop in meters (choppiness applied).
+fn ocean_sample(xz: vec2<f32>) -> vec4<f32> {
+    var sum = vec4<f32>(0.0);
+    let count = min(ocean_ext.cascade_count, 4u);
+    for (var i = 0u; i < count; i++) {
+        sum += displacement_cascade(i, xz);
+    }
+    let amp = ocean_ext.amplitude;
+    return vec4<f32>(sum.rgb * amp, sum.a * amp * ocean_ext.choppiness);
+}
+
+fn wind_dir() -> vec2<f32> {
+    return vec2<f32>(cos(ocean_ext.wind_direction), sin(ocean_ext.wind_direction));
+}
+
+/// Undisplaced position whose chop lands on `xz`, found with one fixed-point step.
+fn ocean_undisplace(xz: vec2<f32>) -> vec2<f32> {
+    let chop = ocean_sample(xz).a;
+    return xz - chop * wind_dir();
+}
+
+fn ocean_normal_from_slopes(s: vec4<f32>) -> vec3<f32> {
+    return normalize(vec3<f32>(-s.r, 1.0, -s.g));
 }
 
 struct DisplacedSurface {
@@ -85,88 +152,39 @@ struct DisplacedSurface {
     world_normal: vec3<f32>,
 }
 
-/// `spatial_output`: R/G/B = height slopes X and Z and elevation; A = wind-along chop scalar (before amplitude and choppiness).
-fn ocean_displace_surface(instance_index: u32, position_local: vec3<f32>, mesh_uv: vec2<f32>) -> DisplacedSurface {
-    let size = ocean_ext.grid_size;
-    // Plane UVs match the undistorted patch; using them avoids chop / interpolation pushing lookups past the tile edge.
-    let x = mesh_uv.x * (size - 1.0);
-    let z = mesh_uv.y * (size - 1.0);
-
-    let dims = i32(size);
-    let ix = clamp(i32(round(x)), 0, dims - 1);
-    let iz = clamp(i32(round(z)), 0, dims - 1);
-    let disp = ocean_load_disp(displacement_texture, ix, iz, dims);
-
-    let amp = ocean_ext.amplitude;
-    let tile = ocean_ext.ocean_tile_world_size;
-
-    let deta_dx = disp.r * amp;
-    let deta_dz = disp.g * amp;
-    let eta = disp.b * amp;
-    // Same linear scale as height; scalar field matches `((k dot w_hat)/|k|)(i*h)` in `ocean_spectrum`.
-    let chop = disp.a * amp * ocean_ext.choppiness;
-    let wx = cos(ocean_ext.wind_direction);
-    let wz = sin(ocean_ext.wind_direction);
-
-    var displaced_position = position_local;
-    displaced_position.x += chop * wx;
-    displaced_position.z += chop * wz;
-    displaced_position.y = eta;
-
-    // Tangents use spectral height slopes only (horizontal chop does not tilt the normal here).
-    let dx_cell = tile / max(size - 1.0, 1.0);
-    let dz_cell = dx_cell;
-    let tu = vec3<f32>(2.0 * dx_cell, deta_dx * 2.0 * dx_cell, 0.0);
-    let tv = vec3<f32>(0.0, deta_dz * 2.0 * dz_cell, 2.0 * dz_cell);
-
-    let n_raw = cross(tv, tu);
-    let len2 = dot(n_raw, n_raw);
-    let local_n = select(normalize(n_raw), vec3(0.0, 1.0, 0.0), len2 < 1e-12);
-
+/// Displaces the mesh in world space so any mesh layout (plane, clipmap) samples the same ocean.
+fn ocean_displace_surface(instance_index: u32, position_local: vec3<f32>) -> DisplacedSurface {
     let world_from_local = get_world_from_local(instance_index);
+    var world = mesh_position_local_to_world(world_from_local, vec4<f32>(position_local, 1.0));
+    let s = ocean_sample(world.xz);
+    let w = wind_dir();
+    world = vec4<f32>(world.x + s.a * w.x, world.y + s.b, world.z + s.a * w.y, 1.0);
+
     var out: DisplacedSurface;
-    out.clip_position = mesh_position_local_to_clip(world_from_local, vec4<f32>(displaced_position, 1.0));
-    out.world_position = mesh_position_local_to_world(world_from_local, vec4<f32>(displaced_position, 1.0));
-    out.world_normal = mesh_normal_local_to_world(local_n, instance_index);
+    out.clip_position = position_world_to_clip(world.xyz);
+    out.world_position = world;
+    out.world_normal = ocean_normal_from_slopes(s);
     return out;
 }
 
-/// Slopes from bilinear fetch on the FFT grid (mip 0), then the same local normal as the vertex path.
-/// `mesh_uv` is the plane attribute UV (0..1); we map to texel-centered coordinates so clamp-to-edge never pins the seam.
-fn ocean_highres_world_normal(instance_index: u32, mesh_uv: vec2<f32>) -> vec3<f32> {
-    let size = ocean_ext.grid_size;
-    let amp = ocean_ext.amplitude;
-    let tile = ocean_ext.ocean_tile_world_size;
-
-    let n_tex = max(size, 1.0);
-    let uv_tex = mesh_uv * (n_tex - 1.0) / n_tex + vec2<f32>(0.5 / n_tex);
-    let disp = textureSampleLevel(displacement_texture, displacement_sampler, uv_tex, 0.0);
-
-    let deta_dx = disp.r * amp;
-    let deta_dz = disp.g * amp;
-
-    let dx_cell = tile / max(size - 1.0, 1.0);
-    let dz_cell = dx_cell;
-    let tu = vec3<f32>(2.0 * dx_cell, deta_dx * 2.0 * dx_cell, 0.0);
-    let tv = vec3<f32>(0.0, deta_dz * 2.0 * dz_cell, 2.0 * dz_cell);
-    let n_raw = cross(tv, tu);
-    let len2 = dot(n_raw, n_raw);
-    let local_n = select(normalize(n_raw), vec3(0.0, 1.0, 0.0), len2 < 1e-12);
-    return mesh_normal_local_to_world(local_n, instance_index);
+/// Per-pixel normal from the summed cascade slopes at the undisplaced position under this pixel.
+fn ocean_pixel_normal(world_position: vec3<f32>) -> vec3<f32> {
+    return ocean_normal_from_slopes(ocean_sample(ocean_undisplace(world_position.xz)));
 }
 
-fn ocean_foam_coverage(mesh_uv: vec2<f32>) -> f32 {
-    let size = ocean_ext.grid_size;
-    let n_tex = max(size, 1.0);
-    let uv_tex = mesh_uv * (n_tex - 1.0) / n_tex + vec2<f32>(0.5 / n_tex);
-    return textureSampleLevel(foam_mask_texture, foam_mask_sampler, uv_tex, 0.0).r;
+fn ocean_foam_coverage(world_position: vec3<f32>) -> f32 {
+    let xz = ocean_undisplace(world_position.xz);
+    var foam = 0.0;
+    let count = min(ocean_ext.cascade_count, 4u);
+    for (var i = 0u; i < count; i++) {
+        foam = max(foam, foam_cascade(i, xz));
+    }
+    return foam;
 }
 
-fn ocean_mix_foam_into_base_color(mesh_uv: vec2<f32>, base_color: vec4<f32>) -> vec4<f32> {
-    let foam_cov = ocean_foam_coverage(mesh_uv);
-    let foam_mix = saturate(foam_cov * ocean_ext.foam_intensity);
-    let foam_white = vec3<f32>(1.0, 1.0, 1.0);
-    return vec4<f32>(mix(base_color.rgb, foam_white, foam_mix), base_color.a);
+fn ocean_mix_foam_into_base_color(world_position: vec3<f32>, base_color: vec4<f32>) -> vec4<f32> {
+    let foam_mix = saturate(ocean_foam_coverage(world_position) * ocean_ext.foam_intensity);
+    return vec4<f32>(mix(base_color.rgb, vec3<f32>(1.0), foam_mix), base_color.a);
 }
 
 // `PREPASS_PIPELINE` is only set for actual prepass draw pipelines. The main mesh pipeline can still
@@ -176,7 +194,7 @@ fn ocean_mix_foam_into_base_color(mesh_uv: vec2<f32>, base_color: vec4<f32>) -> 
 
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
-    let surf = ocean_displace_surface(vertex.instance_index, vertex.position, vertex.uv);
+    let surf = ocean_displace_surface(vertex.instance_index, vertex.position);
 
 @if(PREPASS_PIPELINE && NORMAL_PREPASS_OR_DEFERRED_PREPASS) {
     var out: VertexOutput;
@@ -254,14 +272,12 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
         pbr_input.material.alpha_cutoff,
         pbr_input.material.base_color
     );
-@if(VERTEX_OUTPUT_INSTANCE_INDEX && VERTEX_UVS_A) {
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
-    let n_world = ocean_highres_world_normal(in.instance_index, in.uv);
+    let n_world = ocean_pixel_normal(in.world_position.xyz);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
-    pbr_input.material.base_color = ocean_mix_foam_into_base_color(in.uv, pbr_input.material.base_color);
-}
+    pbr_input.material.base_color = ocean_mix_foam_into_base_color(in.world_position.xyz, pbr_input.material.base_color);
     var out: FragmentOutput;
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
         out.color = apply_pbr_lighting(pbr_input);
@@ -287,14 +303,12 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
         pbr_input.material.alpha_cutoff,
         pbr_input.material.base_color
     );
-@if(VERTEX_OUTPUT_INSTANCE_INDEX && VERTEX_UVS_A) {
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
-    let n_world = ocean_highres_world_normal(in.instance_index, in.uv);
+    let n_world = ocean_pixel_normal(in.world_position.xyz);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
-    pbr_input.material.base_color = ocean_mix_foam_into_base_color(in.uv, pbr_input.material.base_color);
-}
+    pbr_input.material.base_color = ocean_mix_foam_into_base_color(in.world_position.xyz, pbr_input.material.base_color);
     return deferred_output(in, pbr_input);
 }
 }

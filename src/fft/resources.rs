@@ -13,6 +13,7 @@ use bevy::{
         render_resource::{binding_types::*, *},
         renderer::{RenderDevice, RenderQueue},
         texture::GpuImage,
+        uniform::DynamicUniformIndex,
     },
     shader::ShaderDefVal,
     utils::once,
@@ -283,6 +284,23 @@ pub struct FftResolveBindGroups {
     pub group: BindGroup,
 }
 
+/// Binds one entity's element of a [`ComponentUniforms`] buffer.
+///
+/// [`ComponentUniforms::binding`] covers only the first element, so with several entities every
+/// bind group would read the first entity's values. The layouts in this crate use non-dynamic
+/// uniforms, so the entity's byte offset is baked into the binding instead.
+pub fn component_uniform_binding<'a, T: Component + ShaderType>(
+    uniforms: &'a ComponentUniforms<T>,
+    index: &DynamicUniformIndex<T>,
+) -> Option<BindingResource<'a>> {
+    let buffer = uniforms.uniforms().buffer()?;
+    Some(BindingResource::Buffer(BufferBinding {
+        buffer,
+        offset: u64::from(index.index()),
+        size: Some(T::min_size()),
+    }))
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Rebuilds the main FFT bind groups once per frame.
 ///
@@ -298,15 +316,18 @@ pub fn prepare_fft_bind_groups(
     fft_roots_buffer: Res<FftRootsBuffer>,
     globals_buffer: Res<GlobalsBuffer>,
     gpu_images: Res<RenderAssets<GpuImage>>,
-    query: Query<(Entity, &FftTextures, &FftSettings), Without<FftSkipStockPipeline>>,
+    query: Query<
+        (Entity, &FftTextures, &DynamicUniformIndex<FftSettings>),
+        Without<FftSkipStockPipeline>,
+    >,
 ) {
     // `ComponentUniforms<FftSettings>` exists only when at least one entity has an extracted
     // `FftSettings` (from `FftSource`). Apps with no FFT entities hit this path every frame; that
     // is not an error. Use `RUST_LOG=trace` to see these diagnostics.
-    let Some(settings_binding) = fft_uniforms.binding() else {
+    if fft_uniforms.uniforms().buffer().is_none() {
         trace!("Skipping entity FftBindGroups: no FftSettings component uniform");
         return;
-    };
+    }
 
     let Some(roots_binding) = fft_roots_buffer.buffer.binding() else {
         trace!("Skipping entity FftBindGroups: FftRootsBuffer not ready for binding");
@@ -318,7 +339,11 @@ pub fn prepare_fft_bind_groups(
         return;
     };
 
-    for (entity, textures, _settings) in &query {
+    for (entity, textures, settings_index) in &query {
+        let Some(settings_binding) = component_uniform_binding(&fft_uniforms, settings_index)
+        else {
+            continue;
+        };
         let Some(buffer_a_re) = gpu_images.get(&textures.buffer_a_re) else {
             continue;
         };
@@ -350,7 +375,7 @@ pub fn prepare_fft_bind_groups(
             &common_layout,
             &BindGroupEntries::sequential((
                 globals_binding.clone(),
-                settings_binding.clone(),
+                settings_binding,
                 roots_binding.clone(),
                 &buffer_a_re.texture_view,
                 &buffer_a_im.texture_view,
@@ -367,8 +392,16 @@ pub fn prepare_fft_bind_groups(
     }
 }
 
-type PrepareFftResolveBindGroupsQuery<'w, 's> =
-    Query<'w, 's, (Entity, &'static FftTextures), With<FftBindGroups>>;
+type PrepareFftResolveBindGroupsQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static FftTextures,
+        &'static DynamicUniformIndex<FftSettings>,
+    ),
+    With<FftBindGroups>,
+>;
 
 #[allow(clippy::too_many_arguments)]
 /// Rebuilds resolve bind groups every frame so `texture_view`s stay aligned with [`prepare_fft_bind_groups`].
@@ -381,11 +414,11 @@ pub(crate) fn prepare_fft_resolve_bind_groups(
     gpu_images: Res<RenderAssets<GpuImage>>,
     query: PrepareFftResolveBindGroupsQuery,
 ) {
-    let Some(settings_binding) = fft_uniforms.binding() else {
-        return;
-    };
-
-    for (entity, textures) in &query {
+    for (entity, textures, settings_index) in &query {
+        let Some(settings_binding) = component_uniform_binding(&fft_uniforms, settings_index)
+        else {
+            continue;
+        };
         let Some(c_re) = gpu_images.get(&textures.buffer_c_re) else {
             continue;
         };
@@ -407,7 +440,7 @@ pub(crate) fn prepare_fft_resolve_bind_groups(
             "fft_resolve_outputs_bind_group",
             &layout,
             &BindGroupEntries::sequential((
-                settings_binding.clone(),
+                settings_binding,
                 &c_re.texture_view,
                 &c_im.texture_view,
                 &b_re.texture_view,
@@ -452,11 +485,18 @@ pub(crate) fn prepare_fft_roots_buffer(
     query: Query<(&FftRoots, &FftSettings), With<FftSettings>>,
     mut fft_roots_buffer: ResMut<FftRootsBuffer>,
 ) {
-    // One shared GPU storage buffer backs every FFT bind group. All entities must use the same
-    // twiddle table (typical when every `FftSource` shares the forward layout for its `orders`).
-    let Ok((roots, _)) = query.single() else {
+    // One shared GPU storage buffer backs every FFT bind group. `forward_fft_twiddle_table` fills
+    // every stage up to the largest supported size, so all sources carry the same table and the
+    // first one is enough.
+    let mut sources = query.iter();
+    let Some((roots, _)) = sources.next() else {
         return;
     };
+    if sources.any(|(other, _)| other.roots != roots.roots) {
+        once!(warn!(
+            "FftSource entities carry different twiddle tables; using the first one for all"
+        ));
+    }
 
     once!(info!("Prepared FFT roots buffer"));
 

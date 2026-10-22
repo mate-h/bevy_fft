@@ -26,7 +26,8 @@ struct OceanH0Params {
     h0_serial: u32,
     depth: f32,
     swell: f32,
-    _pad3: u32,
+    band_k_min: f32,
+    band_k_max: f32,
 }
 
 @group(0) @binding(1) var<uniform> params: OceanH0Params;
@@ -106,7 +107,7 @@ fn jonswap_phi_k(k: vec2<f32>) -> f32 {
     let g = params.gravity;
     let k2 = dot(k, k);
     let k_len = sqrt(k2);
-    if k_len < 1e-9 {
+    if k_len < 1e-9 || k_len < params.band_k_min || k_len >= params.band_k_max {
         return 0.0;
     }
     let omega = omega_finite_depth(k_len, params.depth, g);
@@ -142,7 +143,8 @@ fn init_h0(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = vec2<f32>(nx, nz) * delta_k;
 
     let dk_sq = delta_k * delta_k;
-    let seed = gid.x + gid.y * n + params.h0_serial * 7919u;
+    // Mixing in the tile size keeps cascades with the same serial statistically independent.
+    let seed = gid.x + gid.y * n + params.h0_serial * 7919u + pcg32(bitcast<u32>(params.tile_size));
     let xi = gaussian2(seed);
     let phi_k = jonswap_phi_k(k);
     // Two separable IFFTs each apply 1/N. For independent Fourier coefficients on an N×N Hermitian grid,

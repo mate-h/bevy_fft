@@ -75,6 +75,11 @@ pub struct OceanSimSettings {
     /// Horvath swell parameter ξ in `[0, 1]`. Zero keeps the wind-sea spreading. Larger values
     /// stretch long waves into parallel trains, as swell that has left its storm does.
     pub swell: f32,
+    /// Lowest wavenumber (rad/m) this spectrum keeps. Waves below it belong to a larger cascade.
+    pub band_k_min: f32,
+    /// Highest wavenumber (rad/m) this spectrum keeps. Waves at or above it belong to a smaller
+    /// cascade. Use `f32::INFINITY` for no upper limit.
+    pub band_k_max: f32,
     /// Increment to force regeneration of the `H0` texture on the GPU.
     pub h0_serial: u32,
 }
@@ -94,20 +99,28 @@ impl Default for OceanSimSettings {
             time_scale: 1.0,
             depth: 1000.0,
             swell: 0.0,
+            band_k_min: 0.0,
+            band_k_max: f32::INFINITY,
             h0_serial: 1,
         }
     }
 }
 
+/// Maximum number of FFT cascades one [`OceanSurfaceMaterial`] can sum.
+pub const OCEAN_MAX_CASCADES: usize = 4;
+
 #[derive(Clone, Copy, ShaderType, Reflect)]
 pub struct OceanMaterialUniform {
+    /// World-space tile edge in meters for each cascade slot. Must match each cascade's
+    /// [`OceanSimSettings::tile_size`].
+    pub cascade_tile_sizes: Vec4,
     pub amplitude: f32,
     /// Multiplier on horizontal wind-aligned displacement (alpha channel), same sense as amplitude on height. Typical range about 0 to 2.
     pub choppiness: f32,
-    pub ocean_tile_world_size: f32,
-    pub grid_size: f32,
     /// Radians on XZ: horizontal unit vector `(cos θ, sin θ)` matches `OceanSimSettings::wind_direction` and the chop factor in `ocean_spectrum`.
     pub wind_direction: f32,
+    /// Number of filled cascade slots, from 1 to [`OCEAN_MAX_CASCADES`].
+    pub cascade_count: u32,
     /// Brighter foam in lit shading. Blends albedo toward white by `foam_coverage * foam_intensity`.
     pub foam_intensity: f32,
     /// Jacobian below this value (wave folding) ramps up foam; typical 0.6 to 1.0.
@@ -115,41 +128,111 @@ pub struct OceanMaterialUniform {
     /// Width of the transition in Jacobian units (larger = softer edges).
     pub foam_falloff: f32,
     /// Per-frame retention of foam from the previous tick (lower = shorter trails). Typical 0.9 to 0.99.
-    /// Passed to the foam compute shader only. It is not part of the material `OceanExtensionUniform` struct in `ocean.wgsl`.
+    /// Read by the foam compute shader.
     pub foam_trail_decay: f32,
 }
 
-/// GPU displacement uniforms and FFT height map. Bindings start at 100 so they stack with [`StandardMaterial`].
+/// Sums up to four FFT cascades in world space. Bindings start at 100 so they stack with [`StandardMaterial`].
+///
+/// Each slot holds one cascade's `FftTextures::spatial_output` and foam mask. Slots at or past
+/// [`OceanMaterialUniform::cascade_count`] are ignored. The surface samples by world position, so any
+/// mesh layout works and the ocean stays anchored when the mesh moves.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct OceanSurfaceExtension {
     #[uniform(100)]
     pub settings: OceanMaterialUniform,
-    #[texture(101)]
-    #[sampler(102)]
-    pub displacement: Handle<Image>,
-    #[texture(103)]
-    #[sampler(104)]
-    pub foam_mask: Handle<Image>,
+    #[texture(101, filterable = false)]
+    pub displacement_0: Handle<Image>,
+    #[texture(102, filterable = false)]
+    pub displacement_1: Handle<Image>,
+    #[texture(103, filterable = false)]
+    pub displacement_2: Handle<Image>,
+    #[texture(104, filterable = false)]
+    pub displacement_3: Handle<Image>,
+    #[texture(105, filterable = false)]
+    pub foam_0: Handle<Image>,
+    #[texture(106, filterable = false)]
+    pub foam_1: Handle<Image>,
+    #[texture(107, filterable = false)]
+    pub foam_2: Handle<Image>,
+    #[texture(108, filterable = false)]
+    pub foam_3: Handle<Image>,
+}
+
+impl OceanSurfaceExtension {
+    /// Puts one cascade's textures into slot `index` (0 to 3) and records its tile size.
+    pub fn set_cascade(
+        &mut self,
+        index: usize,
+        tile_size: f32,
+        displacement: Handle<Image>,
+        foam: Handle<Image>,
+    ) {
+        assert!(
+            index < OCEAN_MAX_CASCADES,
+            "cascade index {index} out of range"
+        );
+        self.settings.cascade_tile_sizes[index] = tile_size;
+        let (d, f) = match index {
+            0 => (&mut self.displacement_0, &mut self.foam_0),
+            1 => (&mut self.displacement_1, &mut self.foam_1),
+            2 => (&mut self.displacement_2, &mut self.foam_2),
+            _ => (&mut self.displacement_3, &mut self.foam_3),
+        };
+        *d = displacement;
+        *f = foam;
+    }
+
+    /// Foam texture handle in slot `index`.
+    pub fn foam(&self, index: usize) -> &Handle<Image> {
+        match index {
+            0 => &self.foam_0,
+            1 => &self.foam_1,
+            2 => &self.foam_2,
+            _ => &self.foam_3,
+        }
+    }
+
+    fn foam_mut(&mut self, index: usize) -> &mut Handle<Image> {
+        match index {
+            0 => &mut self.foam_0,
+            1 => &mut self.foam_1,
+            2 => &mut self.foam_2,
+            _ => &mut self.foam_3,
+        }
+    }
 }
 
 impl Default for OceanSurfaceExtension {
     fn default() -> Self {
         Self {
             settings: OceanMaterialUniform {
+                cascade_tile_sizes: Vec4::splat(16.0),
                 amplitude: 1.0,
                 choppiness: 0.35,
-                ocean_tile_world_size: 16.0,
-                grid_size: 256.0,
                 wind_direction: 0.0,
+                cascade_count: 1,
                 foam_intensity: 0.65,
                 foam_cutoff: 0.88,
                 foam_falloff: 0.22,
                 foam_trail_decay: 0.94,
             },
-            displacement: Handle::default(),
-            foam_mask: Handle::default(),
+            displacement_0: Handle::default(),
+            displacement_1: Handle::default(),
+            displacement_2: Handle::default(),
+            displacement_3: Handle::default(),
+            foam_0: Handle::default(),
+            foam_1: Handle::default(),
+            foam_2: Handle::default(),
+            foam_3: Handle::default(),
         }
     }
+}
+
+/// Slot of an ocean FFT entity inside [`OceanSurfaceExtension`]. Entities without it use slot 0.
+#[derive(Component, Clone, Copy, Default, Debug, PartialEq, Eq, Reflect)]
+pub struct OceanCascade {
+    pub index: u32,
 }
 
 impl MaterialExtension for OceanSurfaceExtension {
@@ -194,6 +277,7 @@ impl Plugin for OceanPlugin {
             .register_type::<OceanDynamicUniform>()
             .register_type::<OceanH0Image>()
             .register_type::<OceanMaterialUniform>()
+            .register_type::<OceanCascade>()
             .register_type::<OceanFoamUniform>()
             .register_type::<OceanFoamMask>()
             .register_type::<OceanFoamPhase>()

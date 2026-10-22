@@ -32,6 +32,16 @@ use bevy_fft::prelude::*;
 /// Grid edge lengths for the ocean FFT (powers of two).
 const OCEAN_GRID_SIZES: [u32; 4] = [128, 256, 512, 1024];
 
+/// World-space tile edge in meters for each FFT cascade, largest first.
+const CASCADE_TILES: [f32; 3] = [256.0, 48.0, 9.0];
+
+/// A cascade hands waves to the next smaller one at this many wavelengths per smaller tile.
+/// Keeping a few periods inside the smaller tile avoids its coarse lowest bins.
+const CASCADE_HANDOFF_WAVES: f32 = 6.0;
+
+/// Edge length in meters of the ocean plane mesh.
+const OCEAN_PLANE_SIZE: f32 = 256.0;
+
 /// Vertices per axis on the ocean plane (`Plane3d` uses `subdivisions + 2` vertices).
 const OCEAN_MESH_VERTEX_OPTIONS: [u32; 6] = [16, 32, 64, 128, 256, 512];
 
@@ -43,7 +53,7 @@ struct OceanMeshSelection {
 impl Default for OceanMeshSelection {
     fn default() -> Self {
         Self {
-            vertices_per_edge: 128,
+            vertices_per_edge: 256,
         }
     }
 }
@@ -111,19 +121,41 @@ impl Default for SunLightSettings {
 #[derive(Component)]
 struct SunLight;
 
+/// Wavenumber band in rad/m kept by cascade `index`. Bands touch but never overlap, so each
+/// wave is counted once across the cascades.
+fn cascade_band(index: usize) -> (f32, f32) {
+    let handoff = |i: usize| CASCADE_HANDOFF_WAVES * std::f32::consts::TAU / CASCADE_TILES[i];
+    let k_min = if index == 0 { 0.0 } else { handoff(index) };
+    let k_max = if index + 1 < CASCADE_TILES.len() {
+        handoff(index + 1)
+    } else {
+        f32::INFINITY
+    };
+    (k_min, k_max)
+}
+
 fn setup(mut commands: Commands, mut scattering_mediums: ResMut<Assets<ScatteringMedium>>) {
-    let n = 512u32;
-    commands.spawn((
-        FftSource::square_inverse_only(n),
-        OceanSimSettings {
-            texture_size: n,
-            ..default()
-        },
-        OceanH0Uniform::default(),
-        OceanDynamicUniform::default(),
-        OceanFoamUniform::default(),
-        OceanFoamPhase(0),
-    ));
+    let n = 256u32;
+    for (index, &tile) in CASCADE_TILES.iter().enumerate() {
+        let (band_k_min, band_k_max) = cascade_band(index);
+        commands.spawn((
+            FftSource::square_inverse_only(n),
+            OceanSimSettings {
+                texture_size: n,
+                tile_size: tile,
+                band_k_min,
+                band_k_max,
+                ..default()
+            },
+            OceanCascade {
+                index: index as u32,
+            },
+            OceanH0Uniform::default(),
+            OceanDynamicUniform::default(),
+            OceanFoamUniform::default(),
+            OceanFoamPhase(0),
+        ));
+    }
 
     // Match `examples/3d/atmosphere.rs`: no transform on the atmosphere entity; the on_add hook
     // places the planet center below the origin so the scene sits near the surface.
@@ -173,13 +205,19 @@ struct OceanFftPreviewEgui {
     registered_foam: Option<AssetId<Image>>,
 }
 
+#[allow(clippy::type_complexity)]
 fn spawn_ocean_when_ready(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<OceanSurfaceMaterial>>,
     mesh_sel: Res<OceanMeshSelection>,
     q: Query<
-        (&FftTextures, &OceanFoamMask, &OceanSimSettings),
+        (
+            &FftTextures,
+            &OceanFoamMask,
+            &OceanSimSettings,
+            &OceanCascade,
+        ),
         (
             With<FftSource>,
             With<OceanH0Uniform>,
@@ -190,43 +228,36 @@ fn spawn_ocean_when_ready(
     >,
     existing: Query<Entity, With<OceanSurfaceTag>>,
 ) {
-    if !existing.is_empty() {
+    if !existing.is_empty() || q.iter().count() < CASCADE_TILES.len() {
         return;
     }
 
-    let Ok((tex, foam, sim)) = q.single() else {
-        return;
-    };
-
-    let tile = sim.tile_size;
-    let mesh = Plane3d::new(Vec3::Y, Vec2::splat(tile * 0.5))
+    let mesh = Plane3d::new(Vec3::Y, Vec2::splat(OCEAN_PLANE_SIZE * 0.5))
         .mesh()
         .subdivisions(mesh_sel.plane_subdivisions())
         .build();
 
+    let mut extension = OceanSurfaceExtension::default();
+    extension.settings.cascade_count = CASCADE_TILES.len() as u32;
+    for (tex, foam, sim, cascade) in &q {
+        extension.settings.wind_direction = sim.wind_direction;
+        extension.set_cascade(
+            cascade.index as usize,
+            sim.tile_size,
+            tex.spatial_output.clone(),
+            foam.texture_a.clone(),
+        );
+    }
+
     let material = OceanSurfaceMaterial {
         base: StandardMaterial {
-            base_color: Color::srgb(0.04, 0.12, 0.22).into(),
+            base_color: Color::srgb(0.04, 0.12, 0.22),
             perceptual_roughness: 0.08,
             metallic: 0.0,
             opaque_render_method: OpaqueRendererMethod::Auto,
             ..default()
         },
-        extension: OceanSurfaceExtension {
-            settings: OceanMaterialUniform {
-                amplitude: 1.0,
-                choppiness: 0.35,
-                ocean_tile_world_size: tile,
-                grid_size: sim.texture_size as f32,
-                wind_direction: sim.wind_direction,
-                foam_intensity: 0.65,
-                foam_cutoff: 0.88,
-                foam_falloff: 0.22,
-                foam_trail_decay: 0.94,
-            },
-            displacement: tex.spatial_output.clone(),
-            foam_mask: foam.texture_a.clone(),
-        },
+        extension,
     };
 
     commands.spawn((
@@ -237,8 +268,9 @@ fn spawn_ocean_when_ready(
     ));
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn ocean_egui_panel(
-    fft_textures: Query<&FftTextures, With<FftSource>>,
+    fft_textures: Query<(&FftTextures, &OceanCascade), With<FftSource>>,
     mut contexts: EguiContexts,
     mut commands: Commands,
     mut mesh_sel: ResMut<OceanMeshSelection>,
@@ -246,7 +278,7 @@ fn ocean_egui_panel(
     mut smoothed_frame_ms: Local<Option<f32>>,
     time: Res<Time>,
     mut sim: Query<
-        (Entity, &mut FftSource, &mut OceanSimSettings),
+        (Entity, &mut FftSource, &mut OceanSimSettings, &OceanCascade),
         (
             With<OceanH0Uniform>,
             With<OceanDynamicUniform>,
@@ -260,11 +292,18 @@ fn ocean_egui_panel(
     mut sun_settings: ResMut<SunLightSettings>,
     mut sun_transform: Query<&mut Transform, With<SunLight>>,
 ) {
-    let Ok((sim_entity, mut fft_source, mut s)) = sim.single_mut() else {
+    // The panel edits cascade 0. Shared fields are copied to the other cascades afterwards, while
+    // each cascade keeps its own tile size and wavenumber band.
+    let mut cascades: Vec<_> = sim.iter_mut().collect();
+    cascades.sort_by_key(|c| c.3.index);
+    let Some((first, rest)) = cascades.split_first_mut() else {
         return;
     };
+    let sim_entity = first.0;
+    let fft_source = &mut *first.1;
+    let s = &mut *first.2;
 
-    if let Ok(tex) = fft_textures.single() {
+    if let Some((tex, _)) = fft_textures.iter().find(|(_, c)| c.index == 0) {
         let sp_id = tex.power_spectrum.id();
         let dp_id = tex.spatial_output.id();
         if cache.registered_sp != Some(sp_id) {
@@ -300,7 +339,7 @@ fn ocean_egui_panel(
     let dp_tex = cache.displacement;
 
     if let Some(m) = surface_ready {
-        let fm_id = m.extension.foam_mask.id();
+        let fm_id = m.extension.foam(0).id();
         if cache.registered_foam != Some(fm_id) {
             cache.foam = Some(contexts.add_image(EguiTextureHandle::Weak(fm_id)));
             cache.registered_foam = Some(fm_id);
@@ -373,6 +412,16 @@ fn ocean_egui_panel(
             *fft_source = FftSource::square_inverse_only(new_n);
             s.texture_size = new_n;
             s.h0_serial = s.h0_serial.wrapping_add(1);
+            for (entity, other_source, other, _) in rest.iter_mut() {
+                commands
+                    .entity(*entity)
+                    .remove::<FftTextures>()
+                    .remove::<OceanH0Image>()
+                    .remove::<OceanFoamMask>()
+                    .insert(OceanFoamPhase(0));
+                **other_source = FftSource::square_inverse_only(new_n);
+                other.texture_size = new_n;
+            }
             for entity in &surface {
                 commands.entity(entity).despawn();
             }
@@ -387,7 +436,7 @@ fn ocean_egui_panel(
             }
         }
 
-        ui.add(egui::Slider::new(&mut s.wind_speed, 0.0..=6.0).text("Wind speed"));
+        ui.add(egui::Slider::new(&mut s.wind_speed, 0.0..=20.0).text("Wind speed"));
         ui.add(
             egui::Slider::new(
                 &mut s.wind_direction,
@@ -441,6 +490,20 @@ fn ocean_egui_panel(
         });
     });
 
+    for (_, _, other, _) in rest.iter_mut() {
+        other.wind_speed = s.wind_speed;
+        other.wind_direction = s.wind_direction;
+        other.peak_enhancement = s.peak_enhancement;
+        other.directional_spread = s.directional_spread;
+        other.swell = s.swell;
+        other.depth = s.depth;
+        other.small_wave_cutoff = s.small_wave_cutoff;
+        other.amplitude_scale = s.amplitude_scale;
+        other.time_scale = s.time_scale;
+        other.gravity = s.gravity;
+        other.h0_serial = s.h0_serial;
+    }
+
     let Ok(handle) = surface_mat.single() else {
         return;
     };
@@ -449,8 +512,6 @@ fn ocean_egui_panel(
     };
     mat.extension.settings.amplitude = mesh_amplitude;
     mat.extension.settings.choppiness = choppiness;
-    mat.extension.settings.ocean_tile_world_size = s.tile_size;
-    mat.extension.settings.grid_size = s.texture_size as f32;
     mat.extension.settings.wind_direction = s.wind_direction;
     mat.extension.settings.foam_intensity = foam_intensity;
     mat.extension.settings.foam_cutoff = foam_cutoff;
