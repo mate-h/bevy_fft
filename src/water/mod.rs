@@ -8,6 +8,8 @@
 //! [`WaterViewer`]; without it the first [`Camera3d`] is used.
 //!
 //! [`WaterSurfaceMaterial`] draws the data on any mesh tagged with [`WaterSurfaceTag`].
+//! [`WaterQuadtree`] provides a view-dependent mesh for it, with tiles that grow with distance and
+//! are culled to the camera frustum.
 //!
 //! Writers run in the render graph in the order of [`WaterLodGraphSystems`]. A base writer such
 //! as the ocean covers every texel. Regional solvers such as shallow water then blend over it
@@ -17,11 +19,16 @@
 
 mod blend;
 mod lod_data;
+mod quadtree;
 mod surface;
 
 pub use blend::WaterLodScratch;
 pub use lod_data::{
     WATER_LOD_MAX_SLICES, WaterLodData, WaterLodGpu, WaterLodSettings, WaterLodSlices, WaterViewer,
+};
+pub use quadtree::{
+    WaterQuadtree, WaterQuadtreeBuffer, WaterQuadtreeFallback, WaterQuadtreeStats,
+    WaterQuadtreeTile,
 };
 pub use surface::{
     WATER_SURFACE_SHADER, WaterSurfaceExtension, WaterSurfaceMaterial, WaterSurfaceTag,
@@ -65,16 +72,27 @@ impl Plugin for WaterPlugin {
         app.register_type::<WaterLodSettings>()
             .register_type::<WaterViewer>()
             .register_type::<WaterSurfaceUniform>()
+            .register_type::<WaterQuadtree>()
+            .register_type::<WaterQuadtreeStats>()
             .init_resource::<WaterLodSettings>()
             .add_plugins(ExtractResourcePlugin::<WaterLodData>::default())
             .add_plugins(MaterialPlugin::<WaterSurfaceMaterial>::default())
-            .add_systems(PreStartup, lod_data::create_water_lod_data)
+            .add_systems(
+                PreStartup,
+                (
+                    lod_data::create_water_lod_data,
+                    quadtree::create_water_quadtree_fallback,
+                ),
+            )
+            .add_systems(Update, quadtree::build_water_quadtrees)
             .add_systems(
                 PostUpdate,
                 (
                     lod_data::update_water_lod_slices
                         .in_set(WaterLodSystems)
                         .after(bevy::transform::TransformSystems::Propagate),
+                    quadtree::select_water_quadtrees
+                        .after(bevy::camera::visibility::VisibilitySystems::UpdateFrusta),
                     surface::sync_water_surface_lod.after(WaterLodSystems),
                 ),
             );

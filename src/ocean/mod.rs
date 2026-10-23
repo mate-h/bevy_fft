@@ -11,7 +11,8 @@
 //! [`crate::water::WaterLodData`] slices, shaped by the [`OceanSurfaceSettings`] resource.
 //! [`crate::water::WaterSurfaceMaterial`] and [`OceanQueries`] read only those slices, so other
 //! solvers that write there show up in the same surface. Put the material on an [`OceanClipmap`]
-//! for a camera-following mesh, or on any other mesh.
+//! for a camera-following mesh, on a [`crate::water::WaterQuadtree`] for a frustum-culled mesh
+//! whose tiles grow with distance, or on any other mesh.
 //!
 //! Treat Bevy X, Z, and up (Y) as meters. [`OceanSimSettings::tile_size`] is the periodic patch size in meters
 //! on the horizontal plane (shaders use Δk = 2π / tile_size).

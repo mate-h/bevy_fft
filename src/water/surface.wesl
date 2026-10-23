@@ -68,6 +68,46 @@ struct WaterSurfaceUniform {
 @group(constants::MATERIAL_BIND_GROUP) @binding(102) var lod_displacement: texture_2d_array<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(103) var lod_foam: texture_2d_array<f32>;
 
+struct WaterQuadtreeTile {
+    /// Corner X and Z in meters, edge length in meters, level.
+    rect: vec4<f32>,
+    /// Distances where morphing to the next coarser grid starts and ends.
+    morph: vec4<f32>,
+}
+
+struct WaterQuadtreeTiles {
+    /// Viewer position the tiles were selected for.
+    eye: vec4<f32>,
+    count: u32,
+    /// Grid cells along each tile edge.
+    cells: u32,
+    /// Zero when the mesh is not a quadtree tile pool.
+    enabled: u32,
+    _pad: u32,
+    tiles: array<WaterQuadtreeTile>,
+}
+
+@group(constants::MATERIAL_BIND_GROUP) @binding(104) var<storage, read> quadtree: WaterQuadtreeTiles;
+
+/// World XZ of a tile pool vertex. Local X and Z hold the grid coordinate and Y the pool slot.
+/// Vertices near the far edge of the tile's range slide onto the next coarser grid, so the tile
+/// meets coarser neighbours without cracks. The third lane is zero for unused slots.
+fn water_quadtree_xz(position_local: vec3<f32>) -> vec3<f32> {
+    let slot = u32(position_local.y + 0.5);
+    if slot >= quadtree.count {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+    let tile = quadtree.tiles[slot];
+    let spacing = tile.rect.z / f32(quadtree.cells);
+    let g = position_local.xz;
+    let flat = tile.rect.xy + g * spacing;
+    let d = distance(quadtree.eye.xyz, vec3<f32>(flat.x, 0.0, flat.y));
+    let k = saturate((d - tile.morph.x) / max(tile.morph.y - tile.morph.x, 1e-4));
+    let odd = fract(g * 0.5) * 2.0;
+    let xz = tile.rect.xy + (g - odd * k) * spacing;
+    return vec3<f32>(xz, 1.0);
+}
+
 /// Water LOD data at world `xz`: R/G = height slopes along X and Z, B = elevation in meters,
 /// A = horizontal chop in meters along the chop direction. `bias` moves to coarser slices.
 fn water_sample(xz: vec2<f32>, bias: f32) -> vec4<f32> {
@@ -97,13 +137,26 @@ struct DisplacedSurface {
 /// Displaces the mesh in world space so any mesh layout, such as a plane or a clipmap, samples the same water.
 /// Vertices read slightly coarser data than pixels so the mesh never undersamples it.
 fn water_displace_surface(instance_index: u32, position_local: vec3<f32>) -> DisplacedSurface {
-    let world_from_local = get_world_from_local(instance_index);
-    var world = mesh_position_local_to_world(world_from_local, vec4<f32>(position_local, 1.0));
+    var out: DisplacedSurface;
+    var world: vec4<f32>;
+    if quadtree.enabled != 0u {
+        let q = water_quadtree_xz(position_local);
+        if q.z == 0.0 {
+            // Unused pool slot. Every vertex lands on one point outside the clip volume.
+            out.clip_position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+            out.world_position = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+            out.world_normal = vec3<f32>(0.0, 1.0, 0.0);
+            return out;
+        }
+        world = vec4<f32>(q.x, 0.0, q.y, 1.0);
+    } else {
+        let world_from_local = get_world_from_local(instance_index);
+        world = mesh_position_local_to_world(world_from_local, vec4<f32>(position_local, 1.0));
+    }
     let s = water_sample(world.xz, surface.vertex_lod_bias);
     let w = chop_dir();
     world = vec4<f32>(world.x + s.a * w.x, world.y + s.b, world.z + s.a * w.y, 1.0);
 
-    var out: DisplacedSurface;
     out.clip_position = position_world_to_clip(world.xyz);
     out.world_position = world;
     out.world_normal = water_normal_from_slopes(s);

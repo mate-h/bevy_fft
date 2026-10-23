@@ -3,11 +3,14 @@ use bevy::{
     pbr::{ExtendedMaterial, MaterialExtension, StandardMaterial},
     prelude::*,
     reflect::{Reflect, TypePath},
-    render::render_resource::{AsBindGroup, ShaderType},
+    render::{
+        render_resource::{AsBindGroup, ShaderType},
+        storage::ShaderBuffer,
+    },
     shader::ShaderRef,
 };
 
-use super::{WaterLodData, WaterLodSlices};
+use super::{WaterLodData, WaterLodSlices, WaterQuadtreeBuffer, WaterQuadtreeFallback};
 
 pub const WATER_SURFACE_SHADER: &str = "embedded://bevy_fft/water/surface.wesl";
 
@@ -28,7 +31,8 @@ pub struct WaterSurfaceUniform {
 /// Solvers reach the material only through the LOD data, so one material shows the FFT ocean,
 /// shallow water, and dispersive patches together. The surface samples by world position, so any
 /// mesh layout works and the water stays anchored when the mesh moves. [`super::WaterPlugin`]
-/// keeps `lod`, `lod_displacement`, and `lod_foam` in sync with the LOD data each frame.
+/// keeps `lod`, `lod_displacement`, and `lod_foam` in sync with the LOD data each frame, and
+/// points `quadtree` at the entity's [`WaterQuadtreeBuffer`] or at the shared fallback.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct WaterSurfaceExtension {
     #[uniform(100)]
@@ -39,6 +43,9 @@ pub struct WaterSurfaceExtension {
     pub lod_displacement: Handle<Image>,
     #[texture(103, dimension = "2d_array", filterable = false)]
     pub lod_foam: Handle<Image>,
+    /// Tile list that places a [`super::WaterQuadtree`] pool mesh.
+    #[storage(104, read_only)]
+    pub quadtree: Handle<ShaderBuffer>,
 }
 
 impl Default for WaterSurfaceExtension {
@@ -53,6 +60,7 @@ impl Default for WaterSurfaceExtension {
             lod: WaterLodSlices::default(),
             lod_displacement: Handle::default(),
             lod_foam: Handle::default(),
+            quadtree: Handle::default(),
         }
     }
 }
@@ -83,17 +91,28 @@ pub type WaterSurfaceMaterial = ExtendedMaterial<StandardMaterial, WaterSurfaceE
 pub struct WaterSurfaceTag;
 
 /// Copies the current slice placement and texture handles from the [`WaterLodData`] into every
-/// water surface material.
+/// water surface material, along with the tile list it draws.
 pub(super) fn sync_water_surface_lod(
     lod: Option<Res<WaterLodData>>,
-    surface: Query<&MeshMaterial3d<WaterSurfaceMaterial>, With<WaterSurfaceTag>>,
+    fallback: Option<Res<WaterQuadtreeFallback>>,
+    surface: Query<
+        (
+            &MeshMaterial3d<WaterSurfaceMaterial>,
+            Option<&WaterQuadtreeBuffer>,
+        ),
+        With<WaterSurfaceTag>,
+    >,
     mut materials: ResMut<Assets<WaterSurfaceMaterial>>,
 ) {
-    let Some(lod) = lod else {
+    let (Some(lod), Some(fallback)) = (lod, fallback) else {
         return;
     };
-    for handle in &surface {
+    for (handle, quadtree) in &surface {
         if let Some(mut mat) = materials.get_mut(handle) {
+            let tiles = quadtree.map_or(&fallback.0, |q| &q.0);
+            if mat.extension.quadtree != *tiles {
+                mat.extension.quadtree = tiles.clone();
+            }
             mat.extension.lod = lod.slices;
             if mat.extension.lod_displacement != lod.displacement {
                 mat.extension.lod_displacement = lod.displacement.clone();

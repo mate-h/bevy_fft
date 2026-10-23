@@ -63,7 +63,7 @@ fn main() {
             spawn_ocean_when_ready.after(FftSystemSet::PrepareTextures),
         )
         .add_systems(Update, float_buoys)
-        .add_systems(EguiPrimaryContextPass, ocean_egui_panel)
+        .add_systems(EguiPrimaryContextPass, (ocean_egui_panel, water_mesh_panel))
         .add_systems(
             PostUpdate,
             sync_free_camera_with_egui_focus.after(write_egui_wants_input_system),
@@ -281,11 +281,76 @@ fn spawn_ocean_when_ready(
         extension: WaterSurfaceExtension::default(),
     };
 
-    commands.spawn((
-        OceanClipmap::default(),
-        MeshMaterial3d(materials.add(material)),
-        WaterSurfaceTag,
-    ));
+    let mut surface = commands.spawn((MeshMaterial3d(materials.add(material)), WaterSurfaceTag));
+    if std::env::var("BEVY_FFT_OCEAN_MESH").as_deref() == Ok("quadtree") {
+        surface.insert(WaterQuadtree::default());
+    } else {
+        surface.insert(OceanClipmap::default());
+    }
+}
+
+/// Switches the surface between the clipmap and the quadtree and shows how many vertices each draws.
+#[allow(clippy::type_complexity)]
+fn water_mesh_panel(
+    mut contexts: EguiContexts,
+    mut commands: Commands,
+    mut surfaces: Query<
+        (
+            Entity,
+            Option<&mut OceanClipmap>,
+            Option<&WaterQuadtreeStats>,
+            Option<&Mesh3d>,
+        ),
+        With<WaterSurfaceTag>,
+    >,
+    meshes: Res<Assets<Mesh>>,
+) {
+    let Ok((entity, clipmap, stats, mesh)) = surfaces.single_mut() else {
+        return;
+    };
+    let Ok(ctx) = contexts.ctx_mut() else {
+        return;
+    };
+    egui::Window::new("Water mesh")
+        .default_pos([12.0, 520.0])
+        .show(ctx, |ui| {
+            let quadtree = stats.is_some();
+            let mut pick_quadtree = quadtree;
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut pick_quadtree, false, "Clipmap");
+                ui.selectable_value(&mut pick_quadtree, true, "Quadtree");
+            });
+            if let Some(mut clipmap) = clipmap {
+                let vertices = mesh
+                    .and_then(|m| meshes.get(&m.0))
+                    .map_or(0, |m| m.count_vertices());
+                ui.label(format!("{vertices} vertices, no culling"));
+                let mut levels = clipmap.levels;
+                ui.add(egui::Slider::new(&mut levels, 3..=12).text("Clipmap levels"));
+                if levels != clipmap.levels {
+                    clipmap.levels = levels;
+                }
+            }
+            if let Some(stats) = stats {
+                ui.label(format!(
+                    "{} vertices in {} tiles",
+                    stats.vertices, stats.tiles
+                ));
+                if stats.dropped > 0 {
+                    ui.label(format!("{} tiles did not fit the pool", stats.dropped));
+                }
+            }
+            if pick_quadtree != quadtree {
+                let mut e = commands.entity(entity);
+                e.remove::<(Mesh3d, WaterQuadtree, WaterQuadtreeBuffer, OceanClipmap)>()
+                    .insert(Transform::IDENTITY);
+                if pick_quadtree {
+                    e.insert(WaterQuadtree::default());
+                } else {
+                    e.insert(OceanClipmap::default());
+                }
+            }
+        });
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -293,7 +358,6 @@ fn ocean_egui_panel(
     fft_textures: Query<(&FftTextures, &OceanCascade), With<FftSource>>,
     mut contexts: EguiContexts,
     mut commands: Commands,
-    mut clipmaps: Query<&mut OceanClipmap>,
     mut cache: Local<OceanFftPreviewEgui>,
     mut smoothed_frame_ms: Local<Option<f32>>,
     time: Res<Time>,
@@ -416,14 +480,6 @@ fn ocean_egui_panel(
                 commands.entity(entity).despawn();
             }
             *cache = OceanFftPreviewEgui::default();
-        }
-
-        if let Ok(mut clipmap) = clipmaps.single_mut() {
-            let mut levels = clipmap.levels;
-            ui.add(egui::Slider::new(&mut levels, 3..=12).text("Clipmap levels"));
-            if levels != clipmap.levels {
-                clipmap.levels = levels;
-            }
         }
 
         ui.add(egui::Slider::new(&mut s.wind_speed, 0.0..=20.0).text("Wind speed"));
