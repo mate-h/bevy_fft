@@ -8,6 +8,7 @@ struct InteractionSettings {
     oldPosition : vec2f,
     position : vec2f,
     preset : u32,
+    fill_level : f32,
 }
 
 struct SimulationSettings {
@@ -321,7 +322,8 @@ fn loadPreset(@builtin(global_invocation_id) id: vec3u) {
         let noise = perlinNoise(vec2f(position.x, 0.0), baseNoiseGridSize * 2.0, simulationSettings.timestamp);
         bed = clamp(40.0 * (position.y / f32(simulationSettings.size.y) - mix(0.4, 0.6, noise)), 0.0, 10.0);
     }
-    textureStore(bedWaterTexture, id.xy, vec4f(bed, 0.0, 0.0, 0.0));
+    let water = max(interactionSettings.fill_level - bed, 0.0);
+    textureStore(bedWaterTexture, id.xy, vec4f(bed, water, 0.0, 0.0));
 }
 
 fn pointToSegmentDistance(p : vec2f, s0 : vec2f, s1 : vec2f) -> f32 {

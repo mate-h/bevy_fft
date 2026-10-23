@@ -8,8 +8,9 @@
 //! internals remain on [`crate::fft`] and [`crate::fft::resources`].
 
 pub use crate::dispersive::{
-    DispersiveController, DispersiveGridImages, DispersiveMaterialUniform, DispersivePlugin,
-    DispersiveSimRoot, DispersiveSurfaceExtension, DispersiveSurfaceMaterial, DispersiveSurfaceTag,
+    DispersiveController, DispersiveGridImages, DispersiveLodBlend, DispersiveMaterialUniform,
+    DispersivePlacement, DispersivePlugin, DispersiveSimRoot, DispersiveSurfaceExtension,
+    DispersiveSurfaceMaterial, DispersiveSurfaceTag,
 };
 pub use crate::ewave::{
     EwaveController, EwaveGridImages, EwaveMaterialUniform, EwavePlugin, EwaveSimRoot,
@@ -28,11 +29,11 @@ pub use crate::ocean::{
     OceanSimSettings, OceanSurfaceExtension, OceanSurfaceMaterial, OceanSurfaceTag,
 };
 pub use crate::shallow_water::{
-    ShallowWaterBorder, ShallowWaterController, ShallowWaterMaterialUniform, ShallowWaterPlugin,
-    ShallowWaterSurfaceExtension, ShallowWaterSurfaceMaterial, ShallowWaterSurfaceTag,
-    round_particle_count,
+    ShallowWaterBorder, ShallowWaterController, ShallowWaterMaterialUniform, ShallowWaterPlacement,
+    ShallowWaterPlugin, ShallowWaterSurfaceExtension, ShallowWaterSurfaceMaterial,
+    ShallowWaterSurfaceTag, round_particle_count,
 };
 pub use crate::water::{
-    WATER_LOD_MAX_SLICES, WaterLodData, WaterLodSettings, WaterLodSlices, WaterLodSystems,
-    WaterPlugin, WaterViewer,
+    WATER_LOD_MAX_SLICES, WaterLodData, WaterLodGraphSystems, WaterLodScratch, WaterLodSettings,
+    WaterLodSlices, WaterLodSystems, WaterPlugin, WaterViewer,
 };

@@ -128,6 +128,20 @@ fn ocean_mix_foam_into_base_color(world_position: vec3<f32>, base_color: vec4<f3
     return vec4<f32>(mix(base_color.rgb, vec3<f32>(1.0), foam_mix), base_color.a);
 }
 
+/// Share of the bed showing through at this pixel, from the water depth lane. One on dry ground,
+/// fading out over the first few decimeters of water.
+fn ocean_bed_visibility(world_position: vec3<f32>) -> f32 {
+    let depth = sample_lod(lod_foam, ocean_lod, world_position.xz, 0.0).g;
+    return exp(-max(depth, 0.0) * 6.0);
+}
+
+/// Sand tint for shallow and dry areas with bed visibility `bed`. Regions without a shallow water
+/// solver carry the ocean's depth, so `bed` is zero there and the color is unchanged.
+fn ocean_mix_bed_into_base_color(bed: f32, base_color: vec4<f32>) -> vec4<f32> {
+    let sand = vec3<f32>(0.52, 0.46, 0.32);
+    return vec4<f32>(mix(base_color.rgb, sand, bed), base_color.a);
+}
+
 // `PREPASS_PIPELINE` is only set for actual prepass draw pipelines. The main mesh pipeline can still
 // define `DEFERRED_PREPASS` (for example when sampling prepass normals) without
 // `NORMAL_PREPASS_OR_DEFERRED_PREPASS`, in which case `prepass_io::VertexOutput` has no `world_normal`.
@@ -219,6 +233,9 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = ocean_mix_foam_into_base_color(in.world_position.xyz, pbr_input.material.base_color);
+    let bed = ocean_bed_visibility(in.world_position.xyz);
+    pbr_input.material.base_color = ocean_mix_bed_into_base_color(bed, pbr_input.material.base_color);
+    pbr_input.material.perceptual_roughness = mix(pbr_input.material.perceptual_roughness, 0.9, bed);
     var out: FragmentOutput;
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
         out.color = apply_pbr_lighting(pbr_input);
@@ -250,6 +267,9 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = ocean_mix_foam_into_base_color(in.world_position.xyz, pbr_input.material.base_color);
+    let bed = ocean_bed_visibility(in.world_position.xyz);
+    pbr_input.material.base_color = ocean_mix_bed_into_base_color(bed, pbr_input.material.base_color);
+    pbr_input.material.perceptual_roughness = mix(pbr_input.material.perceptual_roughness, 0.9, bed);
     return deferred_output(in, pbr_input);
 }
 }

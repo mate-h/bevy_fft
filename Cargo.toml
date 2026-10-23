@@ -30,6 +30,16 @@ path = "examples/shallow_water/main.rs"
 required-features = ["free_camera"]
 
 [[example]]
+name = "beach"
+path = "examples/beach/main.rs"
+required-features = ["free_camera"]
+
+[[example]]
+name = "wake"
+path = "examples/wake/main.rs"
+required-features = ["free_camera"]
+
+[[example]]
 name = "ewave"
 path = "examples/ewave/main.rs"
 required-features = ["free_camera"]

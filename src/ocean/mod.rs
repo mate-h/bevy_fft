@@ -351,14 +351,17 @@ impl Plugin for OceanPlugin {
                 run_ocean_foam
                     .after(run_fft_resolve_outputs)
                     .before(bevy::core_pipeline::schedule::camera_driver),
-                lod_write::run_ocean_lod_write
-                    .after(run_ocean_foam)
-                    .before(bevy::core_pipeline::schedule::camera_driver),
-                query::run_ocean_query
-                    .after(lod_write::run_ocean_lod_write)
-                    .before(bevy::core_pipeline::schedule::camera_driver),
             )
                 .in_set(bevy::render::renderer::RenderGraphSystems::Render),
+        );
+        render_app.add_systems(
+            bevy::render::renderer::RenderGraph,
+            (
+                lod_write::run_ocean_lod_write
+                    .after(run_ocean_foam)
+                    .in_set(crate::water::WaterLodGraphSystems::Base),
+                query::run_ocean_query.in_set(crate::water::WaterLodGraphSystems::Read),
+            ),
         );
     }
 }

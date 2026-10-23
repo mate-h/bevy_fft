@@ -28,7 +28,8 @@ pub struct OceanLodWriteParams {
     pub cascade_count: u32,
     pub amplitude: f32,
     pub choppiness: f32,
-    pub _pad: f32,
+    /// Water depth in meters, written to the foam depth lane.
+    pub depth: f32,
 }
 
 /// What the writer needs from the main world this frame.
@@ -76,6 +77,7 @@ pub(super) fn gather_ocean_lod_write(
                     sim.tile_size,
                     tex.spatial_output.clone(),
                     latest.clone(),
+                    sim.depth,
                 )
             })
         })
@@ -86,7 +88,7 @@ pub(super) fn gather_ocean_lod_write(
     };
 
     let mut tiles = Vec4::ONE;
-    for (i, (_, tile, disp, foam)) in slots.iter().enumerate() {
+    for (i, (_, tile, disp, foam, _)) in slots.iter().enumerate() {
         tiles[i] = *tile;
         frame.displacement.push(disp.clone());
         frame.foam.push(foam.clone());
@@ -102,7 +104,7 @@ pub(super) fn gather_ocean_lod_write(
         cascade_count: slots.len() as u32,
         amplitude: settings.amplitude,
         choppiness: settings.choppiness,
-        _pad: 0.0,
+        depth: first.4,
     };
 }
 

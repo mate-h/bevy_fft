@@ -14,13 +14,13 @@ The stock pipeline uses your chosen grid edge length as long as it is a non-zero
 
 FFT compute registers as systems on Bevy’s root [`RenderGraph`](https://docs.rs/bevy_render/latest/bevy_render/renderer/struct.RenderGraph.html) schedule, ordered before `camera_driver`. Each frame the stock chain runs forward FFT, an optional spectrum pass, spectrum resolve, inverse FFT, and spatial resolve (`run_fft_forward` → spectrum slot → `run_fft_resolve_spectrum` → `run_fft_inverse` → `run_fft_resolve_outputs`). The spectrum slot is a no-op until something replaces it. From plugin `finish`, call `disable_spectrum_passthrough`, then add your compute system on the same schedule with `.after(FftNode::ComputeFFT).before(FftNode::ResolveSpectrum)`. Reuse `FftBindGroupLayouts::common` so bindings match the FFT passes. The `band_pass` example shows the pattern.
 
-There is also an [ocean](src/ocean/mod.rs) entry point. `OceanPlugin` registers ocean spectrum compute on that schedule and ships `OceanSurfaceMaterial`, which displaces a mesh using `FftTextures::spatial_output`. Register `FftPlugin` before `OceanPlugin` so plugin `finish` ordering is valid. It is a building block, not a complete water renderer.
+There is also an [ocean](src/ocean/mod.rs) entry point. `OceanPlugin` registers ocean spectrum compute on that schedule, writes its FFT cascades into the shared water LOD data in [src/water](src/water/mod.rs), and ships `OceanSurfaceMaterial`, which displaces a mesh from that data. Shallow water and dispersive patches write into the same data, so one surface draws all of them. Register `FftPlugin` before `OceanPlugin` so plugin `finish` ordering is valid. It is a building block, not a complete water renderer.
 
-The [shallow_water](src/shallow_water/mod.rs) module is separate from the bulk FFT entity path: GPU staggered shallow water (see [docs/shallow_water.md](docs/shallow_water.md)) with a PBR surface example.
+The [shallow_water](src/shallow_water/mod.rs) module is separate from the bulk FFT entity path: GPU staggered shallow water (see [docs/shallow_water.md](docs/shallow_water.md)) with a PBR surface example. Give the grid a world placement and it blends into the shared water LOD data, so the ocean surface draws it and it fades into the ocean waves at its edges. The `beach` example shows a shore grid inside the ocean.
 
 The [ewave](src/ewave/mod.rs) module runs Tessendorf-style iWave in k-space with its own FFT buffers; `cargo run --example ewave` shows a periodic heightfield next to the same stock graph path. Register `FftPlugin` before `EwavePlugin` for the same reason.
 
-The [dispersive](src/dispersive/mod.rs) module combines bulk shallow water with Airy surface waves (Jeschke and Wojtan). See [docs/dispersive.md](docs/dispersive.md) for the hybrid split and the NumPy reference. The `dispersive` example leaves boat-wake style ripples under a mouse drag. Register `FftPlugin` before `DispersivePlugin`. Do not enable `EwavePlugin` in the same app.
+The [dispersive](src/dispersive/mod.rs) module combines bulk shallow water with Airy surface waves (Jeschke and Wojtan). See [docs/dispersive.md](docs/dispersive.md) for the hybrid split and the NumPy reference. The `dispersive` example leaves boat-wake style ripples under a mouse drag, and the `wake` example adds such a patch onto the FFT ocean through the shared water LOD data. Register `FftPlugin` before `DispersivePlugin`. Do not enable `EwavePlugin` in the same app.
 
 ### FFT and k-space indexing
 
@@ -43,8 +43,10 @@ Then run the demo. The `file_watcher` feature hot-reloads WGSL while you iterate
 cargo run --example fft --features file_watcher
 cargo run --example ocean --features free_camera
 cargo run --example shallow_water --features free_camera
+cargo run --example beach --features free_camera
 cargo run --example ewave --features free_camera
 cargo run --example dispersive --features free_camera
+cargo run --example wake --features free_camera
 ```
 
 The `fft` example drives `FftSchedule::ForwardThenInverse`. Data starts in spatial A, moves to spectrum C for a radial band-pass tuned with the sliders at the top-left, then returns through IFFT to B. The `ocean` example uses `FftSchedule::Inverse` with `OceanPlugin`: a compute pass fills spectrum C each frame, then the same IFFT and resolve path writes `spatial_output` for the ocean material.

@@ -13,7 +13,8 @@ struct OceanLodWriteParams {
     cascade_count: u32,
     amplitude: f32,
     choppiness: f32,
-    _pad: f32,
+    /// Water depth in meters for the foam depth lane.
+    depth: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: OceanLodWriteParams;
@@ -83,5 +84,5 @@ fn ocean_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     let amp = params.amplitude;
     let scaled = vec4<f32>(disp.rgb * amp, disp.a * amp * params.choppiness);
     textureStore(displacement_out, gid.xy, slice, scaled);
-    textureStore(foam_out, gid.xy, slice, vec4<f32>(foam, 0.0, 0.0, 1.0));
+    textureStore(foam_out, gid.xy, slice, vec4<f32>(foam, params.depth, 0.0, 1.0));
 }

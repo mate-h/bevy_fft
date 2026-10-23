@@ -66,9 +66,10 @@ pub struct WaterLodSlices {
 /// Camera-centred LOD texture arrays and where each slice currently sits.
 ///
 /// `displacement` stores, per texel, the height slope along X, the slope along Z, the height in
-/// meters, and the wind-aligned horizontal chop in meters. These are the same lanes as the FFT
-/// spatial output, already scaled, so contributions from several solvers add up linearly.
-/// `foam` stores foam coverage in its red channel.
+/// meters above the surface mesh plane, and the wind-aligned horizontal chop in meters. These are
+/// the same lanes as the FFT spatial output, already scaled, so contributions from several solvers
+/// add up linearly. `foam` stores foam coverage in its red channel and the depth of the water
+/// column in meters in its green channel.
 #[derive(Resource, Clone, ExtractResource)]
 #[extract_app(RenderApp)]
 pub struct WaterLodData {
@@ -105,8 +106,10 @@ fn lod_array_image(settings: &WaterLodSettings) -> Image {
         TextureFormat::Rgba32Float,
         RenderAssetUsages::default(),
     );
-    image.texture_descriptor.usage =
-        TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    image.texture_descriptor.usage = TextureUsages::STORAGE_BINDING
+        | TextureUsages::TEXTURE_BINDING
+        | TextureUsages::COPY_DST
+        | TextureUsages::COPY_SRC;
     image.texture_view_descriptor = Some(TextureViewDescriptor {
         dimension: Some(TextureViewDimension::D2Array),
         ..default()

@@ -18,10 +18,19 @@ Simulation WGSL lives in [`assets/shallow_water/simulator.wgsl`](../assets/shall
 
 Default `dt` is **0.08**. Optional PML: set `ShallowWaterController::pml_width` (for example 10), `pml_eta_rest` (target free-surface height; rest depth in the layer is `max(0, η_rest − H)` per cell), **`pml_sigma_exponent`** (**2** = quadratic σ/γ ramp per [Joh08], **3** = cubic), and **`pml_cosine_blend`** (**0** = off, **1** = scale x-strip damping by `|u|/|v|` and y-strip by `|w|/|v|` at cell centers, in the spirit of CMF10 §2.1.4 citing [Joh08]).
 
+## Placing the grid in a larger scene
+
+Set `ShallowWaterController::placement` to a `ShallowWaterPlacement` to put the grid in the world. The placement gives the grid centre, the cell width in meters, the datum that lifts or lowers the solver's heights to the surface mesh plane, and the width of the fade band along the edges. The cell width also becomes the solver's `dx`, so gravity, velocities, and heights are in SI units.
+
+When `WaterPlugin` is in the app, which `OceanPlugin` adds on its own, a compute pass blends the grid into the shared water LOD data every frame. It runs after base writers such as the FFT ocean and before height queries. Inside the grid the solver replaces the ocean, and over the fade band it hands back to it. The foam texture's green channel receives the water depth, which the ocean surface uses to shade dry and very shallow cells as sand.
+
+`fill_level` fills each preset to a still water level on reset. Cells whose bed rises above it start dry.
+
 ## Try it
 
 ```bash
 cargo run --example shallow_water --features free_camera
+cargo run --example beach --features free_camera
 ```
 
 The example requests `FLOAT32_FILTERABLE` where supported so linear sampling on simulation textures is valid.

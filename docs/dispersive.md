@@ -45,6 +45,12 @@ After merge, the same soft high-k roll-off used in Airy is applied to the free s
 
 The surface mesh displaces by free-surface elevation η = h − rest depth in meters (flat bed at −4 m, rest h = 4 m).
 
+## Placing the patch in the ocean
+
+Set `DispersiveController::placement` to a `DispersivePlacement` to put the patch in the world. With `WaterPlugin` in the app, which `OceanPlugin` adds on its own, a compute pass writes the patch into the shared water LOD data every frame, after the FFT ocean and before height queries. The cell width is `tile_world / n`.
+
+`DispersiveLodBlend::Add` adds the free-surface elevation on top of the ocean, so swell keeps running through the patch and a wake rides on it. Linear waves superpose, so nothing is counted twice. `DispersiveLodBlend::Replace` takes over the height and the water depth lane instead, which suits flooding and shorelines. Both fade out over `blend_cells` along the patch edge. The domain is still periodic, so waves that reach the edge wrap around under the fade band.
+
 ## NumPy reference
 
 ```bash
@@ -61,8 +67,9 @@ Named scenarios live in `python/dispersive_ref/scenarios.py`. `baseline` is the 
 
 ```bash
 cargo run --example dispersive --features free_camera
+cargo run --example wake --features free_camera
 ```
 
-Runs unpaused from a flat basin. LMB splash or drag for a wake. Space adds a center splash. Pause and Step for single hybrid frames.
+Runs unpaused from a flat basin. LMB splash or drag for a wake. Space adds a center splash. Pause and Step for single hybrid frames. The `wake` example places a patch in the FFT ocean and circles it with a scripted disturbance.
 
 FFT bin layout matches the rest of the crate: DC at `(0,0)`, then positive bins, then wrapped negatives. `k_xy` in the dispersive WGSL must stay on that convention. A centered `i − N/2` grid only matches if the spectrum was fftshifted first.

@@ -217,7 +217,7 @@ fn build_simulation_uniform(
     controller: &ShallowWaterController,
     timestamp: u32,
 ) -> GpuSimulationUniform {
-    let dx = 1.0_f32;
+    let dx = controller.cell_size();
     let friction_factor = (1.0 - controller.friction.clamp(0.0, 1.0)).powf(controller.dt);
     GpuSimulationUniform {
         size: UVec2::new(controller.cells_x, controller.cells_y),
@@ -307,6 +307,7 @@ pub fn prepare_shallow_water_gpu(
         old_position: controller.pointer_prev_sim,
         position: controller.pointer_sim,
         preset: controller.preset_index,
+        fill_level: controller.fill_level,
     };
     write_uniform(&render_queue, interaction_buf, &interaction);
 
