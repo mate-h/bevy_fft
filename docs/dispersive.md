@@ -47,7 +47,7 @@ The surface mesh displaces by free-surface elevation η = h − rest depth in me
 
 ## Placing the patch in the ocean
 
-Set `DispersiveController::placement` to a `DispersivePlacement` to put the patch in the world. With `WaterPlugin` in the app, which `OceanPlugin` adds on its own, a compute pass writes the patch into the shared water LOD data every frame, after the FFT ocean and before height queries. The cell width is `tile_world / n`.
+Set `DispersiveController::placement` to a `DispersivePlacement` to put the patch in the world. With `WaterPlugin` in the app, which `OceanPlugin` adds on its own, a compute pass writes the patch into the shared water LOD data every frame, after the FFT ocean and before height queries. The cell width is `tile_world / n`. The flow texture receives velocity as flux divided by depth, blended by the same mode as height.
 
 `DispersiveLodBlend::Add` adds the free-surface elevation on top of the ocean, so swell keeps running through the patch and a wake rides on it. Linear waves superpose, so nothing is counted twice. `DispersiveLodBlend::Replace` takes over the height and the water depth lane instead, which suits flooding and shorelines. Both fade out over `blend_cells` along the patch edge. The domain is still periodic, so waves that reach the edge wrap around under the fade band.
 

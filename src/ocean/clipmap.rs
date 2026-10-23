@@ -20,10 +20,11 @@ use bevy::{
     prelude::*,
 };
 
-use crate::{ocean::OceanSurfaceTag, water::WaterViewer};
+use crate::water::{WaterSurfaceTag, WaterViewer};
 
-/// Camera-following LOD mesh settings. Add it with an [`OceanSurfaceMaterial`](crate::ocean::OceanSurfaceMaterial) and
-/// [`OceanSurfaceTag`]; the plugin builds the [`Mesh3d`] and moves the entity each frame.
+/// Camera-following LOD mesh settings. Add it with a
+/// [`WaterSurfaceMaterial`](crate::water::WaterSurfaceMaterial). The plugin builds the [`Mesh3d`],
+/// tags it with [`WaterSurfaceTag`], and moves the entity each frame.
 #[derive(Component, Clone, Copy, Debug, Reflect)]
 #[require(Transform, Visibility)]
 pub struct OceanClipmap {
@@ -194,7 +195,7 @@ pub(super) fn build_ocean_clipmaps(
     for (entity, clipmap) in &clipmaps {
         commands
             .entity(entity)
-            .insert((Mesh3d(meshes.add(clipmap.build_mesh())), OceanSurfaceTag));
+            .insert((Mesh3d(meshes.add(clipmap.build_mesh())), WaterSurfaceTag));
     }
 }
 

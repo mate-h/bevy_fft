@@ -1,4 +1,9 @@
 //! Writes the ocean FFT cascades into the shared [`WaterLodData`] slices each frame.
+//!
+//! Flow comes from the change in each cascade's displacement since the previous frame. In linear
+//! wave theory a surface particle moves with the time derivative of its displacement, so the
+//! difference of two frames gives the orbital velocity without extra FFT lanes. The writer keeps a
+//! copy of every cascade's output for the next frame.
 
 use bevy::{
     prelude::*,
@@ -16,7 +21,7 @@ use crate::{
     fft::FftTextures,
     ocean::{
         OCEAN_MAX_CASCADES, OceanCascade, OceanFoamMask, OceanFoamPhase, OceanSimSettings,
-        OceanSurfaceMaterial, OceanSurfaceTag,
+        OceanSurfaceSettings,
     },
     water::{WaterLodData, WaterLodGpu, WaterLodSlices},
 };
@@ -30,6 +35,12 @@ pub struct OceanLodWriteParams {
     pub choppiness: f32,
     /// Water depth in meters, written to the foam depth lane.
     pub depth: f32,
+    /// One over the simulated time since the previous frame, or zero when there is no previous
+    /// frame to difference against.
+    pub inv_dt: f32,
+    pub _pad0: f32,
+    pub _pad1: f32,
+    pub _pad2: f32,
 }
 
 /// What the writer needs from the main world this frame.
@@ -51,15 +62,12 @@ pub(super) fn gather_ocean_lod_write(
         &OceanFoamPhase,
         Option<&OceanCascade>,
     )>,
-    surface: Query<&MeshMaterial3d<OceanSurfaceMaterial>, With<OceanSurfaceTag>>,
-    materials: Res<Assets<OceanSurfaceMaterial>>,
+    settings: Res<OceanSurfaceSettings>,
+    time: Res<Time>,
 ) {
     frame.displacement.clear();
     frame.foam.clear();
     frame.params.cascade_count = 0;
-    let Some(material) = surface.iter().next().and_then(|m| materials.get(&m.0)) else {
-        return;
-    };
 
     let mut slots: Vec<_> = cascades
         .iter()
@@ -78,6 +86,7 @@ pub(super) fn gather_ocean_lod_write(
                     tex.spatial_output.clone(),
                     latest.clone(),
                     sim.depth,
+                    sim.time_scale,
                 )
             })
         })
@@ -88,7 +97,7 @@ pub(super) fn gather_ocean_lod_write(
     };
 
     let mut tiles = Vec4::ONE;
-    for (i, (_, tile, disp, foam, _)) in slots.iter().enumerate() {
+    for (i, (_, tile, disp, foam, _, _)) in slots.iter().enumerate() {
         tiles[i] = *tile;
         frame.displacement.push(disp.clone());
         frame.foam.push(foam.clone());
@@ -98,13 +107,15 @@ pub(super) fn gather_ocean_lod_write(
         frame.displacement.push(first.2.clone());
         frame.foam.push(first.3.clone());
     }
-    let settings = &material.extension.settings;
+    let dt = time.delta_secs() * first.5;
     frame.params = OceanLodWriteParams {
         cascade_tile_sizes: tiles,
         cascade_count: slots.len() as u32,
         amplitude: settings.amplitude,
         choppiness: settings.choppiness,
         depth: first.4,
+        inv_dt: if dt > 0.0 { dt.recip() } else { 0.0 },
+        ..default()
     };
 }
 
@@ -119,19 +130,21 @@ impl FromWorld for OceanLodWritePipeline {
         let pipeline_cache = world.resource::<PipelineCache>();
         let asset_server = world.resource::<AssetServer>();
         let tex = || texture_2d(TextureSampleType::Float { filterable: false });
+        let out = || {
+            texture_storage_2d_array(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly)
+        };
         let entries = BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
                 uniform_buffer::<OceanLodWriteParams>(false),
                 uniform_buffer::<WaterLodSlices>(false),
-                texture_storage_2d_array(
-                    TextureFormat::Rgba32Float,
-                    StorageTextureAccess::WriteOnly,
-                ),
-                texture_storage_2d_array(
-                    TextureFormat::Rgba32Float,
-                    StorageTextureAccess::WriteOnly,
-                ),
+                out(),
+                out(),
+                out(),
+                tex(),
+                tex(),
+                tex(),
+                tex(),
                 tex(),
                 tex(),
                 tex(),
@@ -157,11 +170,21 @@ impl FromWorld for OceanLodWritePipeline {
     }
 }
 
+/// Last frame's displacement for one cascade slot.
+struct PreviousDisplacement {
+    texture: Texture,
+    view: TextureView,
+    size: Extent3d,
+}
+
 #[derive(Resource, Default)]
 pub struct OceanLodWriteBindGroup {
     group: Option<BindGroup>,
     params: UniformBuffer<OceanLodWriteParams>,
     dispatch: UVec3,
+    previous: Vec<PreviousDisplacement>,
+    /// Pairs of cascade output and previous copy to refresh after the pass.
+    copies: Vec<(Texture, usize)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -177,32 +200,87 @@ pub(super) fn prepare_ocean_lod_write(
     mut state: ResMut<OceanLodWriteBindGroup>,
 ) {
     state.group = None;
+    state.copies.clear();
     let Some(lod) = lod else {
         return;
     };
     if frame.params.cascade_count == 0 || frame.displacement.len() < OCEAN_MAX_CASCADES {
         return;
     }
-    let (Some(disp_out), Some(foam_out)) = (images.get(&lod.displacement), images.get(&lod.foam))
-    else {
+    let (Some(disp_out), Some(foam_out), Some(flow_out)) = (
+        images.get(&lod.displacement),
+        images.get(&lod.foam),
+        images.get(&lod.flow),
+    ) else {
         return;
     };
-    let views: Option<Vec<_>> = frame
-        .displacement
+    let (Some(disp), Some(foam)) = (
+        frame
+            .displacement
+            .iter()
+            .map(|h| images.get(h))
+            .collect::<Option<Vec<_>>>(),
+        frame
+            .foam
+            .iter()
+            .map(|h| images.get(h).map(|g| &g.texture_view))
+            .collect::<Option<Vec<_>>>(),
+    ) else {
+        return;
+    };
+    let Some(slices) = lod_gpu.slices.binding() else {
+        return;
+    };
+
+    // A new or resized copy holds no previous frame, so flow stays zero until the next one.
+    let mut params = frame.params;
+    let active = frame.params.cascade_count as usize;
+    state.previous.truncate(OCEAN_MAX_CASCADES);
+    for (i, source) in disp.iter().enumerate().take(OCEAN_MAX_CASCADES) {
+        let size = source.texture_descriptor.size;
+        if state.previous.get(i).is_some_and(|p| p.size == size) {
+            continue;
+        }
+        let texture = device.create_texture(&TextureDescriptor {
+            label: Some("ocean_lod_previous_displacement"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: source.texture_descriptor.format,
+            usage: TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&TextureViewDescriptor::default());
+        let previous = PreviousDisplacement {
+            texture,
+            view,
+            size,
+        };
+        if i < state.previous.len() {
+            state.previous[i] = previous;
+        } else {
+            state.previous.push(previous);
+        }
+        if i < active {
+            params.inv_dt = 0.0;
+        }
+    }
+    state.copies = disp
         .iter()
-        .chain(frame.foam.iter())
-        .map(|h| images.get(h).map(|g| &g.texture_view))
+        .take(active)
+        .enumerate()
+        .map(|(i, g)| (g.texture.clone(), i))
         .collect();
-    let (Some(views), Some(slices)) = (views, lod_gpu.slices.binding()) else {
-        return;
-    };
-    state.params.set(frame.params);
+
+    state.params.set(params);
     state.params.write_buffer(&device, &queue);
     let Some(params) = state.params.binding() else {
         return;
     };
+    let prev = &state.previous;
     let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
-    state.group = Some(device.create_bind_group(
+    let group = device.create_bind_group(
         "ocean_lod_write_bind_group",
         &layout,
         &BindGroupEntries::sequential((
@@ -210,16 +288,22 @@ pub(super) fn prepare_ocean_lod_write(
             slices,
             &disp_out.texture_view,
             &foam_out.texture_view,
-            views[0],
-            views[1],
-            views[2],
-            views[3],
-            views[4],
-            views[5],
-            views[6],
-            views[7],
+            &flow_out.texture_view,
+            &disp[0].texture_view,
+            &disp[1].texture_view,
+            &disp[2].texture_view,
+            &disp[3].texture_view,
+            foam[0],
+            foam[1],
+            foam[2],
+            foam[3],
+            &prev[0].view,
+            &prev[1].view,
+            &prev[2].view,
+            &prev[3].view,
         )),
-    ));
+    );
+    state.group = Some(group);
     let res = lod.slices.resolution;
     state.dispatch = UVec3::new(res.div_ceil(8), res.div_ceil(8), lod.slices.count);
 }
@@ -233,16 +317,22 @@ pub fn run_ocean_lod_write(
     let Some(group) = &state.group else {
         return;
     };
-    let Some(compute) = cache.get_compute_pipeline(pipeline.pipeline) else {
-        return;
-    };
-    let mut pass = ctx
-        .command_encoder()
-        .begin_compute_pass(&ComputePassDescriptor {
+    let encoder = ctx.command_encoder();
+    if let Some(compute) = cache.get_compute_pipeline(pipeline.pipeline) {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("ocean_lod_write_pass"),
             timestamp_writes: None,
         });
-    pass.set_pipeline(compute);
-    pass.set_bind_group(0, group, &[]);
-    pass.dispatch_workgroups(state.dispatch.x, state.dispatch.y, state.dispatch.z);
+        pass.set_pipeline(compute);
+        pass.set_bind_group(0, group, &[]);
+        pass.dispatch_workgroups(state.dispatch.x, state.dispatch.y, state.dispatch.z);
+    }
+    for (source, slot) in &state.copies {
+        let previous = &state.previous[*slot];
+        encoder.copy_texture_to_texture(
+            source.as_image_copy(),
+            previous.texture.as_image_copy(),
+            previous.size,
+        );
+    }
 }

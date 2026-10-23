@@ -199,20 +199,16 @@ fn setup(
 #[allow(clippy::type_complexity)]
 fn spawn_surface_when_ready(
     mut commands: Commands,
-    mut materials: ResMut<Assets<OceanSurfaceMaterial>>,
+    mut materials: ResMut<Assets<WaterSurfaceMaterial>>,
     cascades: Query<&OceanSimSettings, (With<FftTextures>, With<OceanFoamMask>)>,
-    existing: Query<(), With<OceanSurfaceTag>>,
+    existing: Query<(), With<WaterSurfaceTag>>,
 ) {
     if !existing.is_empty() || cascades.iter().count() < CASCADE_TILES.len() {
         return;
     }
-    let mut extension = OceanSurfaceExtension::default();
-    if let Some(sim) = cascades.iter().next() {
-        extension.settings.wind_direction = sim.wind_direction;
-    }
     commands.spawn((
         OceanClipmap::default(),
-        MeshMaterial3d(materials.add(OceanSurfaceMaterial {
+        MeshMaterial3d(materials.add(WaterSurfaceMaterial {
             base: StandardMaterial {
                 base_color: Color::srgb(0.04, 0.12, 0.22),
                 perceptual_roughness: 0.08,
@@ -220,9 +216,9 @@ fn spawn_surface_when_ready(
                 opaque_render_method: OpaqueRendererMethod::Auto,
                 ..default()
             },
-            extension,
+            extension: WaterSurfaceExtension::default(),
         })),
-        OceanSurfaceTag,
+        WaterSurfaceTag,
     ));
 }
 

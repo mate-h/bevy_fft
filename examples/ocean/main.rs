@@ -248,7 +248,7 @@ struct OceanFftPreviewEgui {
 #[allow(clippy::type_complexity)]
 fn spawn_ocean_when_ready(
     mut commands: Commands,
-    mut materials: ResMut<Assets<OceanSurfaceMaterial>>,
+    mut materials: ResMut<Assets<WaterSurfaceMaterial>>,
     q: Query<
         (
             &FftTextures,
@@ -264,18 +264,13 @@ fn spawn_ocean_when_ready(
             With<OceanFoamPhase>,
         ),
     >,
-    existing: Query<Entity, With<OceanSurfaceTag>>,
+    existing: Query<Entity, With<WaterSurfaceTag>>,
 ) {
     if !existing.is_empty() || q.iter().count() < CASCADE_TILES.len() {
         return;
     }
 
-    let mut extension = OceanSurfaceExtension::default();
-    if let Some(sim) = q.iter().next().map(|(_, _, sim, _)| sim) {
-        extension.settings.wind_direction = sim.wind_direction;
-    }
-
-    let material = OceanSurfaceMaterial {
+    let material = WaterSurfaceMaterial {
         base: StandardMaterial {
             base_color: Color::srgb(0.04, 0.12, 0.22),
             perceptual_roughness: 0.08,
@@ -283,13 +278,13 @@ fn spawn_ocean_when_ready(
             opaque_render_method: OpaqueRendererMethod::Auto,
             ..default()
         },
-        extension,
+        extension: WaterSurfaceExtension::default(),
     };
 
     commands.spawn((
         OceanClipmap::default(),
         MeshMaterial3d(materials.add(material)),
-        OceanSurfaceTag,
+        WaterSurfaceTag,
     ));
 }
 
@@ -311,9 +306,10 @@ fn ocean_egui_panel(
             With<OceanFoamPhase>,
         ),
     >,
-    mut materials: ResMut<Assets<OceanSurfaceMaterial>>,
-    surface: Query<Entity, With<OceanSurfaceTag>>,
-    surface_mat: Query<&MeshMaterial3d<OceanSurfaceMaterial>, With<OceanSurfaceTag>>,
+    mut materials: ResMut<Assets<WaterSurfaceMaterial>>,
+    mut ocean_surface: ResMut<OceanSurfaceSettings>,
+    surface: Query<Entity, With<WaterSurfaceTag>>,
+    surface_mat: Query<&MeshMaterial3d<WaterSurfaceMaterial>, With<WaterSurfaceTag>>,
     mut sun_settings: ResMut<SunLightSettings>,
     mut sun_transform: Query<&mut Transform, With<SunLight>>,
     queries: Res<OceanQueries>,
@@ -342,24 +338,10 @@ fn ocean_egui_panel(
         }
     }
     let surface_ready = surface_mat.single().ok().and_then(|m| materials.get(&m.0));
-    let mut mesh_amplitude = surface_ready
-        .map(|m| m.extension.settings.amplitude)
-        .unwrap_or(1.0);
-    let mut choppiness = surface_ready
-        .map(|m| m.extension.settings.choppiness)
-        .unwrap_or(0.35);
+    let mut shaping = *ocean_surface;
     let mut foam_intensity = surface_ready
         .map(|m| m.extension.settings.foam_intensity)
         .unwrap_or(0.65);
-    let mut foam_cutoff = surface_ready
-        .map(|m| m.extension.settings.foam_cutoff)
-        .unwrap_or(0.88);
-    let mut foam_falloff = surface_ready
-        .map(|m| m.extension.settings.foam_falloff)
-        .unwrap_or(0.22);
-    let mut foam_trail_decay = surface_ready
-        .map(|m| m.extension.settings.foam_trail_decay)
-        .unwrap_or(0.94);
 
     let sp_tex = cache.spectrum;
     let dp_tex = cache.displacement;
@@ -463,12 +445,14 @@ fn ocean_egui_panel(
         ui.add(egui::Slider::new(&mut s.small_wave_cutoff, 0.000..=0.1).text("Small wave cutoff"));
         ui.add(egui::Slider::new(&mut s.amplitude_scale, 0.0..=4.0).text("H0 amplitude scale"));
         ui.add(egui::Slider::new(&mut s.time_scale, 0.0..=3.0).text("Time scale"));
-        ui.add(egui::Slider::new(&mut mesh_amplitude, 0.0..=4.0).text("Mesh amplitude"));
-        ui.add(egui::Slider::new(&mut choppiness, 0.0..=2.0).text("Choppiness"));
+        ui.add(egui::Slider::new(&mut shaping.amplitude, 0.0..=4.0).text("Mesh amplitude"));
+        ui.add(egui::Slider::new(&mut shaping.choppiness, 0.0..=2.0).text("Choppiness"));
         ui.add(egui::Slider::new(&mut foam_intensity, 0.0..=1.5).text("Foam intensity"));
-        ui.add(egui::Slider::new(&mut foam_cutoff, 0.2..=1.2).text("Foam cutoff"));
-        ui.add(egui::Slider::new(&mut foam_falloff, 0.02..=0.8).text("Foam falloff"));
-        ui.add(egui::Slider::new(&mut foam_trail_decay, 0.85..=0.999).text("Foam trail decay"));
+        ui.add(egui::Slider::new(&mut shaping.foam_cutoff, 0.2..=1.2).text("Foam cutoff"));
+        ui.add(egui::Slider::new(&mut shaping.foam_falloff, 0.02..=0.8).text("Foam falloff"));
+        ui.add(
+            egui::Slider::new(&mut shaping.foam_trail_decay, 0.85..=0.999).text("Foam trail decay"),
+        );
         ui.add(egui::Slider::new(&mut sun_settings.elevation, 0.0..=1.0).text("Sun light height"));
         if ui.button("Regenerate spectrum").clicked() {
             s.h0_serial = s.h0_serial.wrapping_add(1);
@@ -506,19 +490,15 @@ fn ocean_egui_panel(
         other.h0_serial = s.h0_serial;
     }
 
+    ocean_surface.set_if_neq(shaping);
     let Ok(handle) = surface_mat.single() else {
         return;
     };
-    let Some(mut mat) = materials.get_mut(handle) else {
-        return;
-    };
-    mat.extension.settings.amplitude = mesh_amplitude;
-    mat.extension.settings.choppiness = choppiness;
-    mat.extension.settings.wind_direction = s.wind_direction;
-    mat.extension.settings.foam_intensity = foam_intensity;
-    mat.extension.settings.foam_cutoff = foam_cutoff;
-    mat.extension.settings.foam_falloff = foam_falloff;
-    mat.extension.settings.foam_trail_decay = foam_trail_decay;
+    if surface_ready.is_some_and(|m| m.extension.settings.foam_intensity != foam_intensity)
+        && let Some(mut mat) = materials.get_mut(handle)
+    {
+        mat.extension.settings.foam_intensity = foam_intensity;
+    }
 
     let Ok(mut tf) = sun_transform.single_mut() else {
         return;

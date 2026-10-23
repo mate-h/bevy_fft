@@ -59,7 +59,9 @@ pub struct WaterLodSlices {
     pub slices: [Vec4; WATER_LOD_MAX_SLICES],
     pub count: u32,
     pub resolution: u32,
-    pub _pad0: u32,
+    /// Direction of the chop lane in radians on XZ. The horizontal displacement is
+    /// `chop * (cos θ, sin θ)`. The base writer sets it, which for the FFT ocean is the wind.
+    pub chop_direction: f32,
     pub _pad1: u32,
 }
 
@@ -69,12 +71,14 @@ pub struct WaterLodSlices {
 /// meters above the surface mesh plane, and the wind-aligned horizontal chop in meters. These are
 /// the same lanes as the FFT spatial output, already scaled, so contributions from several solvers
 /// add up linearly. `foam` stores foam coverage in its red channel and the depth of the water
-/// column in meters in its green channel.
+/// column in meters in its green channel. `flow` stores the water velocity at the surface in meters
+/// per second: X in red, Z in green, and vertical in blue.
 #[derive(Resource, Clone, ExtractResource)]
 #[extract_app(RenderApp)]
 pub struct WaterLodData {
     pub displacement: Handle<Image>,
     pub foam: Handle<Image>,
+    pub flow: Handle<Image>,
     pub slices: WaterLodSlices,
 }
 
@@ -130,6 +134,7 @@ pub(super) fn create_water_lod_data(
     commands.insert_resource(WaterLodData {
         displacement: images.add(lod_array_image(&settings)),
         foam: images.add(lod_array_image(&settings)),
+        flow: images.add(lod_array_image(&settings)),
         slices,
     });
 }
@@ -213,6 +218,7 @@ mod tests {
         let data = WaterLodData {
             displacement: Handle::default(),
             foam: Handle::default(),
+            flow: Handle::default(),
             slices,
         };
         assert_eq!(data.finest_slice_containing(Vec2::new(3.0, 0.0)), Some(0));

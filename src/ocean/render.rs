@@ -9,7 +9,6 @@ use bevy::{
         world::{FromWorld, World},
     },
     image::Image,
-    pbr::MeshMaterial3d,
     prelude::*,
     reflect::Reflect,
     render::{
@@ -465,25 +464,17 @@ pub(super) fn prepare_ocean_foam_mask_image(
 
 pub(super) fn sync_ocean_foam_uniform(
     mut q: Query<(&crate::ocean::OceanSimSettings, &mut OceanFoamUniform)>,
-    surface: Query<
-        &MeshMaterial3d<crate::ocean::OceanSurfaceMaterial>,
-        With<crate::ocean::OceanSurfaceTag>,
-    >,
-    materials: Res<Assets<crate::ocean::OceanSurfaceMaterial>>,
+    settings: Res<crate::ocean::OceanSurfaceSettings>,
 ) {
-    // Foam shaping lives on the shared surface material, so every cascade reads the same values.
-    let mat = surface.iter().next().and_then(|m| materials.get(&m.0));
     for (s, mut u) in &mut q {
         u.texture_size = s.texture_size;
         u.tile_size = s.tile_size;
         u.wind_direction = s.wind_direction;
-        if let Some(m) = mat {
-            u.amplitude = m.extension.settings.amplitude;
-            u.choppiness = m.extension.settings.choppiness;
-            u.foam_cutoff = m.extension.settings.foam_cutoff;
-            u.foam_falloff = m.extension.settings.foam_falloff;
-            u.foam_trail_decay = m.extension.settings.foam_trail_decay;
-        }
+        u.amplitude = settings.amplitude;
+        u.choppiness = settings.choppiness;
+        u.foam_cutoff = settings.foam_cutoff;
+        u.foam_falloff = settings.foam_falloff;
+        u.foam_trail_decay = settings.foam_trail_decay;
     }
 }
 

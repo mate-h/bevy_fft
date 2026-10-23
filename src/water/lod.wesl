@@ -12,8 +12,14 @@ struct WaterLodSlices {
     slices: array<vec4<f32>, 12>,
     count: u32,
     resolution: u32,
-    _pad0: u32,
+    /// Direction of the chop lane in radians on XZ.
+    chop_direction: f32,
     _pad1: u32,
+}
+
+/// Unit horizontal direction of the chop lane.
+fn lod_chop_dir(lod: WaterLodSlices) -> vec2<f32> {
+    return vec2<f32>(cos(lod.chop_direction), sin(lod.chop_direction));
 }
 
 /// UV of world `xz` inside slice `i`, where 0 to 1 spans the slice.

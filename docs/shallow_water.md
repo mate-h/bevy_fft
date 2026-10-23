@@ -22,7 +22,7 @@ Default `dt` is **0.08**. Optional PML: set `ShallowWaterController::pml_width` 
 
 Set `ShallowWaterController::placement` to a `ShallowWaterPlacement` to put the grid in the world. The placement gives the grid centre, the cell width in meters, the datum that lifts or lowers the solver's heights to the surface mesh plane, and the width of the fade band along the edges. The cell width also becomes the solver's `dx`, so gravity, velocities, and heights are in SI units.
 
-When `WaterPlugin` is in the app, which `OceanPlugin` adds on its own, a compute pass blends the grid into the shared water LOD data every frame. It runs after base writers such as the FFT ocean and before height queries. Inside the grid the solver replaces the ocean, and over the fade band it hands back to it. The foam texture's green channel receives the water depth, which the ocean surface uses to shade dry and very shallow cells as sand.
+When `WaterPlugin` is in the app, which `OceanPlugin` adds on its own, a compute pass blends the grid into the shared water LOD data every frame. It runs after base writers such as the FFT ocean and before height queries. Inside the grid the solver replaces the ocean, and over the fade band it hands back to it. The foam texture's green channel receives the water depth, which the water surface uses to shade dry and very shallow cells as sand. The flow texture receives the cell velocity, plus the rate the surface rises from the divergence of depth times velocity, so `OceanQueries` report water velocity inside the grid.
 
 `fill_level` fills each preset to a still water level on reset. Cells whose bed rises above it start dry.
 

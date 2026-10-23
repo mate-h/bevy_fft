@@ -4,7 +4,7 @@ import bevy_pbr::render::mesh_functions::{
     mesh_position_local_to_world,
 };
 import bevy_pbr::render::view_transformations::position_world_to_clip;
-import bevy_fft::water::lod::{WaterLodSlices, sample_lod};
+import bevy_fft::water::lod::{WaterLodSlices, lod_chop_dir, sample_lod};
 
 @if(PREPASS_PIPELINE)
 import bevy_pbr::prepass::io::{
@@ -56,39 +56,35 @@ import bevy_pbr::deferred::functions::deferred_output;
 @if(PREPASS_PIPELINE && PREPASS_FRAGMENT && NORMAL_PREPASS_OR_DEFERRED_PREPASS)
 import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT;
 
-struct OceanExtensionUniform {
-    amplitude: f32,
-    choppiness: f32,
-    wind_direction: f32,
+struct WaterSurfaceUniform {
     foam_intensity: f32,
-    foam_cutoff: f32,
-    foam_falloff: f32,
-    foam_trail_decay: f32,
     vertex_lod_bias: f32,
+    _pad0: f32,
+    _pad1: f32,
 }
 
-@group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> ocean_ext: OceanExtensionUniform;
-@group(constants::MATERIAL_BIND_GROUP) @binding(101) var<uniform> ocean_lod: WaterLodSlices;
+@group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> surface: WaterSurfaceUniform;
+@group(constants::MATERIAL_BIND_GROUP) @binding(101) var<uniform> water_lod: WaterLodSlices;
 @group(constants::MATERIAL_BIND_GROUP) @binding(102) var lod_displacement: texture_2d_array<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(103) var lod_foam: texture_2d_array<f32>;
 
 /// Water LOD data at world `xz`: R/G = height slopes along X and Z, B = elevation in meters,
-/// A = wind-aligned horizontal chop in meters. `bias` moves to coarser slices.
-fn ocean_sample(xz: vec2<f32>, bias: f32) -> vec4<f32> {
-    return sample_lod(lod_displacement, ocean_lod, xz, bias);
+/// A = horizontal chop in meters along the chop direction. `bias` moves to coarser slices.
+fn water_sample(xz: vec2<f32>, bias: f32) -> vec4<f32> {
+    return sample_lod(lod_displacement, water_lod, xz, bias);
 }
 
-fn wind_dir() -> vec2<f32> {
-    return vec2<f32>(cos(ocean_ext.wind_direction), sin(ocean_ext.wind_direction));
+fn chop_dir() -> vec2<f32> {
+    return lod_chop_dir(water_lod);
 }
 
 /// Undisplaced position whose chop lands on `xz`, found with one fixed-point step.
-fn ocean_undisplace(xz: vec2<f32>) -> vec2<f32> {
-    let chop = ocean_sample(xz, 0.0).a;
-    return xz - chop * wind_dir();
+fn water_undisplace(xz: vec2<f32>) -> vec2<f32> {
+    let chop = water_sample(xz, 0.0).a;
+    return xz - chop * chop_dir();
 }
 
-fn ocean_normal_from_slopes(s: vec4<f32>) -> vec3<f32> {
+fn water_normal_from_slopes(s: vec4<f32>) -> vec3<f32> {
     return normalize(vec3<f32>(-s.r, 1.0, -s.g));
 }
 
@@ -98,46 +94,46 @@ struct DisplacedSurface {
     world_normal: vec3<f32>,
 }
 
-/// Displaces the mesh in world space so any mesh layout (plane, clipmap) samples the same ocean.
+/// Displaces the mesh in world space so any mesh layout, such as a plane or a clipmap, samples the same water.
 /// Vertices read slightly coarser data than pixels so the mesh never undersamples it.
-fn ocean_displace_surface(instance_index: u32, position_local: vec3<f32>) -> DisplacedSurface {
+fn water_displace_surface(instance_index: u32, position_local: vec3<f32>) -> DisplacedSurface {
     let world_from_local = get_world_from_local(instance_index);
     var world = mesh_position_local_to_world(world_from_local, vec4<f32>(position_local, 1.0));
-    let s = ocean_sample(world.xz, ocean_ext.vertex_lod_bias);
-    let w = wind_dir();
+    let s = water_sample(world.xz, surface.vertex_lod_bias);
+    let w = chop_dir();
     world = vec4<f32>(world.x + s.a * w.x, world.y + s.b, world.z + s.a * w.y, 1.0);
 
     var out: DisplacedSurface;
     out.clip_position = position_world_to_clip(world.xyz);
     out.world_position = world;
-    out.world_normal = ocean_normal_from_slopes(s);
+    out.world_normal = water_normal_from_slopes(s);
     return out;
 }
 
 /// Per-pixel normal from the LOD data at the undisplaced position under this pixel.
-fn ocean_pixel_normal(world_position: vec3<f32>) -> vec3<f32> {
-    return ocean_normal_from_slopes(ocean_sample(ocean_undisplace(world_position.xz), 0.0));
+fn water_pixel_normal(world_position: vec3<f32>) -> vec3<f32> {
+    return water_normal_from_slopes(water_sample(water_undisplace(world_position.xz), 0.0));
 }
 
-fn ocean_foam_coverage(world_position: vec3<f32>) -> f32 {
-    return sample_lod(lod_foam, ocean_lod, ocean_undisplace(world_position.xz), 0.0).r;
+fn water_foam_coverage(world_position: vec3<f32>) -> f32 {
+    return sample_lod(lod_foam, water_lod, water_undisplace(world_position.xz), 0.0).r;
 }
 
-fn ocean_mix_foam_into_base_color(world_position: vec3<f32>, base_color: vec4<f32>) -> vec4<f32> {
-    let foam_mix = saturate(ocean_foam_coverage(world_position) * ocean_ext.foam_intensity);
+fn water_mix_foam_into_base_color(world_position: vec3<f32>, base_color: vec4<f32>) -> vec4<f32> {
+    let foam_mix = saturate(water_foam_coverage(world_position) * surface.foam_intensity);
     return vec4<f32>(mix(base_color.rgb, vec3<f32>(1.0), foam_mix), base_color.a);
 }
 
 /// Share of the bed showing through at this pixel, from the water depth lane. One on dry ground,
 /// fading out over the first few decimeters of water.
-fn ocean_bed_visibility(world_position: vec3<f32>) -> f32 {
-    let depth = sample_lod(lod_foam, ocean_lod, world_position.xz, 0.0).g;
+fn water_bed_visibility(world_position: vec3<f32>) -> f32 {
+    let depth = sample_lod(lod_foam, water_lod, world_position.xz, 0.0).g;
     return exp(-max(depth, 0.0) * 6.0);
 }
 
 /// Sand tint for shallow and dry areas with bed visibility `bed`. Regions without a shallow water
-/// solver carry the ocean's depth, so `bed` is zero there and the color is unchanged.
-fn ocean_mix_bed_into_base_color(bed: f32, base_color: vec4<f32>) -> vec4<f32> {
+/// solver carry the open water depth, so `bed` is zero there and the color is unchanged.
+fn water_mix_bed_into_base_color(bed: f32, base_color: vec4<f32>) -> vec4<f32> {
     let sand = vec3<f32>(0.52, 0.46, 0.32);
     return vec4<f32>(mix(base_color.rgb, sand, bed), base_color.a);
 }
@@ -149,7 +145,7 @@ fn ocean_mix_bed_into_base_color(bed: f32, base_color: vec4<f32>) -> vec4<f32> {
 
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
-    let surf = ocean_displace_surface(vertex.instance_index, vertex.position);
+    let surf = water_displace_surface(vertex.instance_index, vertex.position);
 
 @if(PREPASS_PIPELINE && NORMAL_PREPASS_OR_DEFERRED_PREPASS) {
     var out: VertexOutput;
@@ -229,12 +225,12 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     );
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
-    let n_world = ocean_pixel_normal(in.world_position.xyz);
+    let n_world = water_pixel_normal(in.world_position.xyz);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
-    pbr_input.material.base_color = ocean_mix_foam_into_base_color(in.world_position.xyz, pbr_input.material.base_color);
-    let bed = ocean_bed_visibility(in.world_position.xyz);
-    pbr_input.material.base_color = ocean_mix_bed_into_base_color(bed, pbr_input.material.base_color);
+    pbr_input.material.base_color = water_mix_foam_into_base_color(in.world_position.xyz, pbr_input.material.base_color);
+    let bed = water_bed_visibility(in.world_position.xyz);
+    pbr_input.material.base_color = water_mix_bed_into_base_color(bed, pbr_input.material.base_color);
     pbr_input.material.perceptual_roughness = mix(pbr_input.material.perceptual_roughness, 0.9, bed);
     var out: FragmentOutput;
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
@@ -263,12 +259,12 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     );
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
-    let n_world = ocean_pixel_normal(in.world_position.xyz);
+    let n_world = water_pixel_normal(in.world_position.xyz);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
-    pbr_input.material.base_color = ocean_mix_foam_into_base_color(in.world_position.xyz, pbr_input.material.base_color);
-    let bed = ocean_bed_visibility(in.world_position.xyz);
-    pbr_input.material.base_color = ocean_mix_bed_into_base_color(bed, pbr_input.material.base_color);
+    pbr_input.material.base_color = water_mix_foam_into_base_color(in.world_position.xyz, pbr_input.material.base_color);
+    let bed = water_bed_visibility(in.world_position.xyz);
+    pbr_input.material.base_color = water_mix_bed_into_base_color(bed, pbr_input.material.base_color);
     pbr_input.material.perceptual_roughness = mix(pbr_input.material.perceptual_roughness, 0.9, bed);
     return deferred_output(in, pbr_input);
 }

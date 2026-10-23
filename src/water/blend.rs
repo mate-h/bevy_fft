@@ -25,22 +25,25 @@ struct ScratchArray {
     view: TextureView,
 }
 
-/// Render-world copies of [`WaterLodData::displacement`] and [`WaterLodData::foam`], sized to
-/// match them. Bind [`Self::displacement`] and [`Self::foam`] as sampled `texture_2d_array`s.
+/// Render-world copies of [`WaterLodData::displacement`], [`WaterLodData::foam`], and
+/// [`WaterLodData::flow`], sized to match them. Bind the views as sampled `texture_2d_array`s.
 #[derive(Resource, Default)]
 pub struct WaterLodScratch {
-    displacement: Option<ScratchArray>,
-    foam: Option<ScratchArray>,
+    arrays: Option<[ScratchArray; 3]>,
     size: Extent3d,
 }
 
 impl WaterLodScratch {
     pub fn displacement(&self) -> Option<&TextureView> {
-        self.displacement.as_ref().map(|a| &a.view)
+        self.arrays.as_ref().map(|a| &a[0].view)
     }
 
     pub fn foam(&self) -> Option<&TextureView> {
-        self.foam.as_ref().map(|a| &a.view)
+        self.arrays.as_ref().map(|a| &a[1].view)
+    }
+
+    pub fn flow(&self) -> Option<&TextureView> {
+        self.arrays.as_ref().map(|a| &a[2].view)
     }
 
     /// Copies the current LOD data into the scratch arrays. Returns false when either side is not
@@ -51,26 +54,23 @@ impl WaterLodScratch {
         images: &RenderAssets<GpuImage>,
         lod: &WaterLodData,
     ) -> bool {
-        let (Some(disp), Some(foam)) = (images.get(&lod.displacement), images.get(&lod.foam))
-        else {
+        let Some(arrays) = &self.arrays else {
             return false;
         };
-        let (Some(disp_copy), Some(foam_copy)) = (&self.displacement, &self.foam) else {
-            return false;
-        };
-        if disp.texture_descriptor.size != self.size || foam.texture_descriptor.size != self.size {
+        let sources = [&lod.displacement, &lod.foam, &lod.flow].map(|h| images.get(h));
+        if sources
+            .iter()
+            .any(|s| s.is_none_or(|s| s.texture_descriptor.size != self.size))
+        {
             return false;
         }
-        encoder.copy_texture_to_texture(
-            disp.texture.as_image_copy(),
-            disp_copy.texture.as_image_copy(),
-            self.size,
-        );
-        encoder.copy_texture_to_texture(
-            foam.texture.as_image_copy(),
-            foam_copy.texture.as_image_copy(),
-            self.size,
-        );
+        for (source, copy) in sources.into_iter().flatten().zip(arrays) {
+            encoder.copy_texture_to_texture(
+                source.texture.as_image_copy(),
+                copy.texture.as_image_copy(),
+                self.size,
+            );
+        }
         true
     }
 }
@@ -103,18 +103,21 @@ pub(super) fn prepare_water_lod_scratch(
     let Some(data) = data else {
         return;
     };
-    let (Some(disp), Some(foam)) = (images.get(&data.displacement), images.get(&data.foam)) else {
+    let (Some(disp), Some(foam), Some(flow)) = (
+        images.get(&data.displacement),
+        images.get(&data.foam),
+        images.get(&data.flow),
+    ) else {
         return;
     };
     let size = disp.texture_descriptor.size;
-    if scratch.displacement.is_some() && scratch.size == size {
+    if scratch.arrays.is_some() && scratch.size == size {
         return;
     }
-    scratch.displacement = Some(scratch_array(
-        &device,
-        disp,
-        "water_lod_scratch_displacement",
-    ));
-    scratch.foam = Some(scratch_array(&device, foam, "water_lod_scratch_foam"));
+    scratch.arrays = Some([
+        scratch_array(&device, disp, "water_lod_scratch_displacement"),
+        scratch_array(&device, foam, "water_lod_scratch_foam"),
+        scratch_array(&device, flow, "water_lod_scratch_flow"),
+    ]);
     scratch.size = size;
 }

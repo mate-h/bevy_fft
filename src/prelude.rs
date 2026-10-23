@@ -24,9 +24,8 @@ pub use crate::fft::{
 };
 pub use crate::ocean::{
     OCEAN_MAX_CASCADES, OCEAN_QUERY_MAX_POINTS, OceanCascade, OceanClipmap, OceanDynamicUniform,
-    OceanFoamMask, OceanFoamPhase, OceanFoamUniform, OceanH0Image, OceanH0Uniform,
-    OceanMaterialUniform, OceanPlugin, OceanQueries, OceanQueryResults, OceanSample,
-    OceanSimSettings, OceanSurfaceExtension, OceanSurfaceMaterial, OceanSurfaceTag,
+    OceanFoamMask, OceanFoamPhase, OceanFoamUniform, OceanH0Image, OceanH0Uniform, OceanPlugin,
+    OceanQueries, OceanQueryResults, OceanSample, OceanSimSettings, OceanSurfaceSettings,
 };
 pub use crate::shallow_water::{
     ShallowWaterBorder, ShallowWaterController, ShallowWaterMaterialUniform, ShallowWaterPlacement,
@@ -35,5 +34,6 @@ pub use crate::shallow_water::{
 };
 pub use crate::water::{
     WATER_LOD_MAX_SLICES, WaterLodData, WaterLodGraphSystems, WaterLodScratch, WaterLodSettings,
-    WaterLodSlices, WaterLodSystems, WaterPlugin, WaterViewer,
+    WaterLodSlices, WaterLodSystems, WaterPlugin, WaterSurfaceExtension, WaterSurfaceMaterial,
+    WaterSurfaceTag, WaterSurfaceUniform, WaterViewer,
 };

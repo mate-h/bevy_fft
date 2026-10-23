@@ -48,8 +48,14 @@ impl FromWorld for ShallowWaterLodPipeline {
                     TextureFormat::Rgba32Float,
                     StorageTextureAccess::WriteOnly,
                 ),
+                texture_storage_2d_array(
+                    TextureFormat::Rgba32Float,
+                    StorageTextureAccess::WriteOnly,
+                ),
                 texture_2d_array(unfiltered),
                 texture_2d_array(unfiltered),
+                texture_2d_array(unfiltered),
+                texture_2d(unfiltered),
                 texture_2d(unfiltered),
             ),
         );
@@ -95,16 +101,19 @@ pub(super) fn prepare_shallow_water_lod_write(
     let Some(placement) = controller.placement else {
         return;
     };
-    let (Some(disp_out), Some(foam_out), Some(bed_water)) = (
+    let (Some(disp_out), Some(foam_out), Some(flow_out), Some(bed_water), Some(velocity)) = (
         images.get(&lod.displacement),
         images.get(&lod.foam),
+        images.get(&lod.flow),
         images.get(&controller.bed_water),
+        images.get(&controller.velocity),
     ) else {
         return;
     };
-    let (Some(disp_in), Some(foam_in), Some(slices)) = (
+    let (Some(disp_in), Some(foam_in), Some(flow_in), Some(slices)) = (
         scratch.displacement(),
         scratch.foam(),
+        scratch.flow(),
         lod_gpu.slices.binding(),
     ) else {
         return;
@@ -130,9 +139,12 @@ pub(super) fn prepare_shallow_water_lod_write(
             slices,
             &disp_out.texture_view,
             &foam_out.texture_view,
+            &flow_out.texture_view,
             disp_in,
             foam_in,
+            flow_in,
             &bed_water.texture_view,
+            &velocity.texture_view,
         )),
     ));
     let res = lod.slices.resolution;

@@ -7,6 +7,8 @@
 //! later caustics read only the slices. Mark the camera that should own the detail with
 //! [`WaterViewer`]; without it the first [`Camera3d`] is used.
 //!
+//! [`WaterSurfaceMaterial`] draws the data on any mesh tagged with [`WaterSurfaceTag`].
+//!
 //! Writers run in the render graph in the order of [`WaterLodGraphSystems`]. A base writer such
 //! as the ocean covers every texel. Regional solvers such as shallow water then blend over it
 //! through [`WaterLodScratch`], and readers such as height queries run last.
@@ -15,13 +17,19 @@
 
 mod blend;
 mod lod_data;
+mod surface;
 
 pub use blend::WaterLodScratch;
 pub use lod_data::{
     WATER_LOD_MAX_SLICES, WaterLodData, WaterLodGpu, WaterLodSettings, WaterLodSlices, WaterViewer,
 };
+pub use surface::{
+    WATER_SURFACE_SHADER, WaterSurfaceExtension, WaterSurfaceMaterial, WaterSurfaceTag,
+    WaterSurfaceUniform,
+};
 
 use bevy::{
+    asset::embedded_asset,
     prelude::*,
     render::{
         Render, RenderApp, RenderSystems,
@@ -53,16 +61,22 @@ pub struct WaterPlugin;
 impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
         bevy::shader::load_shader_library!(app, "lod.wesl");
+        embedded_asset!(app, "surface.wesl");
         app.register_type::<WaterLodSettings>()
             .register_type::<WaterViewer>()
+            .register_type::<WaterSurfaceUniform>()
             .init_resource::<WaterLodSettings>()
             .add_plugins(ExtractResourcePlugin::<WaterLodData>::default())
+            .add_plugins(MaterialPlugin::<WaterSurfaceMaterial>::default())
             .add_systems(PreStartup, lod_data::create_water_lod_data)
             .add_systems(
                 PostUpdate,
-                lod_data::update_water_lod_slices
-                    .in_set(WaterLodSystems)
-                    .after(bevy::transform::TransformSystems::Propagate),
+                (
+                    lod_data::update_water_lod_slices
+                        .in_set(WaterLodSystems)
+                        .after(bevy::transform::TransformSystems::Propagate),
+                    surface::sync_water_surface_lod.after(WaterLodSystems),
+                ),
             );
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app

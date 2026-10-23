@@ -1,9 +1,9 @@
-//! GPU height queries against the summed ocean cascades.
+//! GPU height and velocity queries against the water LOD data.
 //!
 //! Gameplay and physics code often needs the water surface at a few points: a boat's hull probes,
 //! a swimmer's head, a camera that must stay above the waves. [`OceanQueries`] holds those points.
 //! Each frame they are uploaded, a compute pass samples the shared
-//! [`WaterLodData`](crate::water::WaterLodData) that the [`crate::ocean::OceanSurfaceMaterial`]
+//! [`WaterLodData`](crate::water::WaterLodData) that the [`crate::water::WaterSurfaceMaterial`]
 //! draws, and Bevy's [`Readback`] returns the results asynchronously.
 //!
 //! Results arrive one to three frames after the points were submitted. [`OceanQueryResults`]
@@ -27,10 +27,7 @@ use bevy::{
     },
 };
 
-use crate::{
-    ocean::{OceanSurfaceMaterial, OceanSurfaceTag},
-    water::{WaterLodData, WaterLodGpu, WaterLodSlices},
-};
+use crate::water::{WaterLodData, WaterLodGpu, WaterLodSlices};
 
 /// Most points one frame can query.
 pub const OCEAN_QUERY_MAX_POINTS: usize = 1024;
@@ -39,28 +36,30 @@ pub const OCEAN_QUERY_MAX_POINTS: usize = 1024;
 const INPUT_HEADER_BYTES: usize = 16;
 /// Byte size of the output header in `query.wesl` (`vec4<u32>`).
 const OUTPUT_HEADER_BYTES: usize = 16;
+/// Byte size of one output sample in `query.wesl` (`QuerySample`).
+const OUTPUT_SAMPLE_BYTES: usize = 32;
 /// Submitted frames kept for pairing results with their positions. Covers the readback latency.
 const PENDING_FRAMES: usize = 8;
 
-/// The ocean surface at one query point.
+/// The water surface at one query point.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct OceanSample {
     /// Water surface height in meters above the ocean's rest level.
     pub height: f32,
     /// Surface slope `(∂h/∂x, ∂h/∂z)`.
     pub slope: Vec2,
-    /// Horizontal chop offset in meters along the wind direction at the sampled point.
+    /// Horizontal chop offset in meters along the chop direction at the sampled point.
     pub chop: f32,
-    /// Rate of change of [`Self::height`] in m/s, from this result and the previous one for the
-    /// same point. Zero until two results for the point have arrived.
-    pub vertical_velocity: f32,
+    /// Water velocity at the surface in m/s. `x` and `z` are horizontal flow and `y` is the rate
+    /// the surface rises.
+    pub velocity: Vec3,
 }
 
 impl OceanSample {
     /// Height extrapolated `seconds` past the time the sample was taken. Use it with
     /// the time since [`OceanQueryResults::time`] to hide the readback latency.
     pub fn height_after(&self, seconds: f32) -> f32 {
-        self.height + self.vertical_velocity * seconds
+        self.height + self.velocity.y * seconds
     }
 
     /// Unit surface normal from the slope.
@@ -142,26 +141,19 @@ impl OceanQueries {
         self.pending.retain(|(f, _, _)| *f > frame);
 
         let samples = &data[OUTPUT_HEADER_BYTES..];
-        let count = count.min(points.len()).min(samples.len() / 16);
-        let dt = time - self.results_time;
-        let previous = std::mem::take(&mut self.results);
-        let previous_points = std::mem::take(&mut self.results_points);
+        let count = count
+            .min(points.len())
+            .min(samples.len() / OUTPUT_SAMPLE_BYTES);
         let mut points = points;
         points.truncate(count);
+        self.results.clear();
         self.results.extend((0..count).map(|i| {
-            let o = i * 16;
-            let height = read_f32(samples, o);
-            let vertical_velocity = match previous.get(i) {
-                Some(prev) if dt > 0.0 && previous_points.get(i) == points.get(i) => {
-                    (height - prev.height) / dt
-                }
-                _ => 0.0,
-            };
+            let f = |lane: usize| read_f32(samples, i * OUTPUT_SAMPLE_BYTES + lane * 4);
             OceanSample {
-                height,
-                slope: Vec2::new(read_f32(samples, o + 4), read_f32(samples, o + 8)),
-                chop: read_f32(samples, o + 12),
-                vertical_velocity,
+                height: f(0),
+                slope: Vec2::new(f(1), f(2)),
+                chop: f(3),
+                velocity: Vec3::new(f(4), f(6), f(5)),
             }
         }));
         self.results_points = points;
@@ -187,7 +179,7 @@ pub(super) fn setup_ocean_queries(
     mut buffers: ResMut<Assets<ShaderBuffer>>,
 ) {
     let input_bytes = INPUT_HEADER_BYTES + OCEAN_QUERY_MAX_POINTS * 8;
-    let output_bytes = OUTPUT_HEADER_BYTES + OCEAN_QUERY_MAX_POINTS * 16;
+    let output_bytes = OUTPUT_HEADER_BYTES + OCEAN_QUERY_MAX_POINTS * OUTPUT_SAMPLE_BYTES;
     let input = buffers.add(ShaderBuffer::new(
         vec![0u8; input_bytes],
         RenderAssetUsages::default(),
@@ -224,6 +216,7 @@ pub struct OceanQueryFrame {
     pub(super) input: Handle<ShaderBuffer>,
     pub(super) output: Handle<ShaderBuffer>,
     pub(super) lod_displacement: Handle<Image>,
+    pub(super) lod_flow: Handle<Image>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -233,8 +226,6 @@ pub(super) fn submit_ocean_queries(
     mut frame_out: ResMut<OceanQueryFrame>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
     lod: Option<Res<WaterLodData>>,
-    surface: Query<&MeshMaterial3d<OceanSurfaceMaterial>, With<OceanSurfaceTag>>,
-    materials: Res<Assets<OceanSurfaceMaterial>>,
     readback: Query<(Entity, Has<Readback>), With<OceanQueryReadback>>,
     time: Res<Time>,
 ) {
@@ -242,8 +233,7 @@ pub(super) fn submit_ocean_queries(
     let Ok((readback_entity, has_readback)) = readback.single() else {
         return;
     };
-    let material = surface.iter().next().and_then(|m| materials.get(&m.0));
-    let (Some(material), Some(lod), false) = (material, lod, queries.points.is_empty()) else {
+    let (Some(lod), false) = (lod, queries.points.is_empty()) else {
         if has_readback {
             commands.entity(readback_entity).remove::<Readback>();
         }
@@ -257,8 +247,7 @@ pub(super) fn submit_ocean_queries(
     let mut bytes = Vec::with_capacity(INPUT_HEADER_BYTES + queries.points.len() * 8);
     bytes.extend_from_slice(&frame.to_le_bytes());
     bytes.extend_from_slice(&count.to_le_bytes());
-    bytes.extend_from_slice(&material.extension.settings.wind_direction.to_le_bytes());
-    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&[0u8; 8]);
     for p in &queries.points {
         bytes.extend_from_slice(&p.x.to_le_bytes());
         bytes.extend_from_slice(&p.y.to_le_bytes());
@@ -283,6 +272,7 @@ pub(super) fn submit_ocean_queries(
     frame_out.input = queries.input.clone();
     frame_out.output = queries.output.clone();
     frame_out.lod_displacement = lod.displacement.clone();
+    frame_out.lod_flow = lod.flow.clone();
 
     if !has_readback {
         commands
@@ -308,6 +298,7 @@ impl FromWorld for OceanQueryPipeline {
                 storage_buffer_sized(false, None),
                 texture_2d_array(TextureSampleType::Float { filterable: false }),
                 uniform_buffer::<WaterLodSlices>(false),
+                texture_2d_array(TextureSampleType::Float { filterable: false }),
             ),
         );
         let layout = BindGroupLayoutDescriptor::new("ocean_query_layout", &entries);
@@ -348,8 +339,9 @@ pub(super) fn prepare_ocean_query_bind_group(
     else {
         return;
     };
-    let (Some(lod_view), Some(slices)) = (
+    let (Some(lod_view), Some(flow_view), Some(slices)) = (
         images.get(&frame.lod_displacement).map(|g| &g.texture_view),
+        images.get(&frame.lod_flow).map(|g| &g.texture_view),
         lod_gpu.slices.binding(),
     ) else {
         return;
@@ -363,6 +355,7 @@ pub(super) fn prepare_ocean_query_bind_group(
             output.buffer.as_entire_binding(),
             lod_view,
             slices,
+            flow_view,
         )),
     ));
 }
@@ -409,7 +402,7 @@ mod tests {
         }
     }
 
-    fn readback_bytes(frame: u32, samples: &[[f32; 4]]) -> Vec<u8> {
+    fn readback_bytes(frame: u32, samples: &[[f32; 8]]) -> Vec<u8> {
         let mut bytes = Vec::new();
         for v in [frame, samples.len() as u32, 0, 0] {
             bytes.extend_from_slice(&v.to_le_bytes());
@@ -428,37 +421,48 @@ mod tests {
         let mut q = queries_with_pending(7, points.clone());
         q.accept_readback(&readback_bytes(
             7,
-            &[[0.5, 0.1, -0.2, 0.3], [-1.0, 0.0, 0.0, 0.0]],
+            &[
+                [0.5, 0.1, -0.2, 0.3, 1.5, -0.5, 0.25, 0.0],
+                [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ],
         ));
         let r = q.results().expect("results");
         assert_eq!(r.frame, 7);
         assert_eq!(r.points, points.as_slice());
         assert_eq!(r.samples[0].height, 0.5);
         assert_eq!(r.samples[0].slope, Vec2::new(0.1, -0.2));
+        assert_eq!(r.samples[0].velocity, Vec3::new(1.5, 0.25, -0.5));
         assert_eq!(r.samples[1].height, -1.0);
     }
 
     #[test]
     fn readback_ignores_unknown_and_stale_frames() {
         let mut q = queries_with_pending(3, vec![Vec2::ZERO]);
-        q.accept_readback(&readback_bytes(99, &[[1.0, 0.0, 0.0, 0.0]]));
+        q.accept_readback(&readback_bytes(
+            99,
+            &[[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+        ));
         assert!(q.results().is_none());
-        q.accept_readback(&readback_bytes(3, &[[2.0, 0.0, 0.0, 0.0]]));
+        q.accept_readback(&readback_bytes(
+            3,
+            &[[2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+        ));
         q.pending.push_back((2, 2.0, vec![Vec2::ONE]));
-        q.accept_readback(&readback_bytes(2, &[[5.0, 0.0, 0.0, 0.0]]));
+        q.accept_readback(&readback_bytes(
+            2,
+            &[[5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+        ));
         assert_eq!(q.results().unwrap().samples[0].height, 2.0);
     }
 
     #[test]
-    fn consecutive_results_give_vertical_velocity() {
-        let p = vec![Vec2::ZERO];
-        let mut q = queries_with_pending(4, p.clone());
-        q.accept_readback(&readback_bytes(4, &[[1.0, 0.0, 0.0, 0.0]]));
-        q.pending.push_back((6, 6.0, p));
-        q.accept_readback(&readback_bytes(6, &[[2.0, 0.0, 0.0, 0.0]]));
-        let s = q.results().unwrap().samples[0];
-        assert_eq!(s.vertical_velocity, 0.5);
-        assert_eq!(s.height_after(2.0), 3.0);
+    fn height_after_extrapolates_with_vertical_velocity() {
+        let s = OceanSample {
+            height: 1.0,
+            velocity: Vec3::new(3.0, 0.5, -2.0),
+            ..default()
+        };
+        assert_eq!(s.height_after(2.0), 2.0);
     }
 
     #[test]
