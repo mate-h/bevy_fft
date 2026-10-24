@@ -37,14 +37,25 @@ pub use render::{
     run_shallow_water_sim,
 };
 
-/// Border condition encoded like the reference: wall, source, drain, waves.
+/// What happens at one edge of the grid.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Reflect, Debug)]
 pub enum ShallowWaterBorder {
+    /// Closed. Water reflects.
     #[default]
     Wall,
+    /// Fixed inflow.
     Source,
+    /// Fixed outflow.
     Drain,
+    /// Sine inflow and outflow, a simple wave maker for standalone tests.
     Waves,
+    /// Open edge that follows the surrounding water. Over
+    /// [`ShallowWaterController::ocean_band_cells`] cells inside the PML, the water height is
+    /// blended toward the target surface (Chentanez, Müller and Kim 2015, eq. 18) and velocities
+    /// are left to the solver. The target is the FFT ocean when
+    /// [`ShallowWaterController::ocean_forcing`] is on, otherwise the flat
+    /// [`ShallowWaterController::pml_eta_rest`].
+    Ocean,
 }
 
 impl ShallowWaterBorder {
@@ -135,6 +146,16 @@ pub struct ShallowWaterController {
     pub pml_width: u32,
     /// Target free-surface height **η** in the PML strip (same units as bed + water in the sim).
     pub pml_eta_rest: f32,
+    /// Target water height per cell (`R32Float`, `cells_x × cells_y`) for [`ShallowWaterBorder::Ocean`]
+    /// edges and the PML, written each frame by [`OceanPlugin`](crate::ocean::OceanPlugin) when
+    /// [`Self::ocean_forcing`] is on.
+    pub ocean_eta: Handle<Image>,
+    /// Takes the target surface for ocean edges and the PML from the FFT ocean's long waves.
+    /// Needs [`Self::placement`] and [`OceanPlugin`](crate::ocean::OceanPlugin).
+    pub ocean_forcing: bool,
+    /// Width in cells of the band inside the PML where [`ShallowWaterBorder::Ocean`] edges blend the
+    /// water height toward the target.
+    pub ocean_band_cells: f32,
     /// PML absorption ramp: **2** = quadratic ([Joh08] / CMF10 default), **3** = cubic.
     pub pml_sigma_exponent: f32,
     /// **0** = uniform damping in each strip; **1** = full [Joh08] style scaling by **|u|/|v|** (x strip) and **|w|/|v|** (y strip) from cell-centered velocity.
@@ -149,9 +170,9 @@ pub struct ShallowWaterController {
 impl ShallowWaterController {
     pub fn packed_border_mask(&self) -> u32 {
         self.left_border.bits()
-            | (self.right_border.bits() << 2)
-            | (self.bottom_border.bits() << 4)
-            | (self.top_border.bits() << 6)
+            | (self.right_border.bits() << 3)
+            | (self.bottom_border.bits() << 6)
+            | (self.top_border.bits() << 9)
     }
 
     /// Builds textures and returns a controller. `cells_*` should be multiples of 32.
@@ -166,6 +187,9 @@ impl ShallowWaterController {
             mac_u_temps: images.add(shallow_rg32_image(cells_x + 1, cells_y)),
             mac_w_temps: images.add(shallow_rg32_image(cells_x, cells_y + 1)),
             pml_state: images.add(shallow_rg32_image(cells_x, cells_y)),
+            ocean_eta: images.add(ocean_eta_image(cells_x, cells_y)),
+            ocean_forcing: false,
+            ocean_band_cells: 5.0,
             pml_width: 0,
             pml_eta_rest: 2.0,
             pml_sigma_exponent: 2.0,
@@ -208,6 +232,7 @@ impl ShallowWaterController {
         self.mac_u_temps = images.add(shallow_rg32_image(cells_x + 1, cells_y));
         self.mac_w_temps = images.add(shallow_rg32_image(cells_x, cells_y + 1));
         self.pml_state = images.add(shallow_rg32_image(cells_x, cells_y));
+        self.ocean_eta = images.add(ocean_eta_image(cells_x, cells_y));
         self.sim_apply_serial = self.sim_apply_serial.wrapping_add(1);
     }
 }
@@ -247,6 +272,20 @@ pub fn shallow_r32_image(width: u32, height: u32) -> Image {
     image
 }
 
+/// Value the ocean target texture starts with. The solver treats cells below `-1e29` as not yet
+/// written and falls back to [`ShallowWaterController::pml_eta_rest`].
+const OCEAN_ETA_UNSET: f32 = -1.0e30;
+
+fn ocean_eta_image(width: u32, height: u32) -> Image {
+    let mut image = shallow_r32_image(width, height);
+    image.data = Some(
+        OCEAN_ETA_UNSET
+            .to_le_bytes()
+            .repeat((width * height) as usize),
+    );
+    image
+}
+
 #[derive(Clone, Copy, Default, ShaderType)]
 pub struct GpuInteractionUniform {
     pub mode: u32,
@@ -269,7 +308,8 @@ pub struct GpuSimulationUniform {
     pub timestamp: u32,
     pub border_mask: u32,
     pub pml_width: u32,
-    /// Bit 0: enable overshoot reduction in WGSL (other bits reserved).
+    /// Bit 0 enables overshoot reduction. Bit 1 reads the target surface from the ocean target
+    /// texture instead of `pml_eta_rest`.
     pub flags: u32,
     pub pml_eta_rest: f32,
     pub vel_clamp_alpha: f32,
@@ -282,6 +322,7 @@ pub struct GpuSimulationUniform {
     pub overshoot_lambda_edge: f32,
     pub pml_sigma_exponent: f32,
     pub pml_cosine_blend: f32,
+    pub ocean_band_cells: f32,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]

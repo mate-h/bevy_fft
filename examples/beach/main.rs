@@ -5,9 +5,11 @@
 //! and the grid fades into the ocean waves along its edges. The buoys read the same data through
 //! `OceanQueries`, one offshore, one in the fade band, and one in the surf.
 //!
-//! The deep edge is a wall for now, so the surf stays calm until the edge is forced from the ocean
-//! spectrum. The solver's built-in sine border is selectable in the panel, but it pumps in more
-//! water than it removes and slowly raises the level. Drag with the left mouse button to add water.
+//! The deep edge is an ocean border. The ocean's long waves are written over the grid each frame,
+//! and a band of cells along the deep edge blends the water height toward them, so swell enters
+//! the grid, shoals up the slope, and runs up the beach. A PML behind the band absorbs the backwash.
+//! The panel switches the deep edge to a wall or a drain for comparison. Drag with the left mouse
+//! button to add water.
 
 use bevy::{
     anti_alias::fxaa::Fxaa,
@@ -152,6 +154,9 @@ fn setup(
     controller.preset_index = SHORE_PRESET;
     controller.fill_level = SEA_LEVEL;
     controller.pml_eta_rest = SEA_LEVEL;
+    controller.pml_width = 8;
+    controller.bottom_border = ShallowWaterBorder::Ocean;
+    controller.ocean_forcing = true;
     controller.gravity = 9.81;
     controller.dt = 1.0 / 60.0;
     controller.brush_radius = 6.0;
@@ -313,6 +318,7 @@ fn beach_panel(mut contexts: EguiContexts, mut controller: ResMut<ShallowWaterCo
             controller.placement = Some(placement);
         }
         ui.add(egui::Slider::new(&mut controller.pml_width, 0u32..=32u32).text("PML width"));
+        ui.add(egui::Slider::new(&mut controller.ocean_band_cells, 0.0..=16.0).text("Ocean band"));
         ui.add(egui::Slider::new(&mut controller.friction, 0.0..=0.5).text("Friction"));
         ui.horizontal(|ui| {
             ui.label("Deep edge");
@@ -320,8 +326,8 @@ fn beach_panel(mut contexts: EguiContexts, mut controller: ResMut<ShallowWaterCo
             egui::ComboBox::from_id_salt("deep_edge")
                 .selected_text(format!("{border:?}"))
                 .show_ui(ui, |ui| {
+                    ui.selectable_value(border, ShallowWaterBorder::Ocean, "Ocean");
                     ui.selectable_value(border, ShallowWaterBorder::Wall, "Wall");
-                    ui.selectable_value(border, ShallowWaterBorder::Waves, "Waves");
                     ui.selectable_value(border, ShallowWaterBorder::Drain, "Drain");
                 });
         });

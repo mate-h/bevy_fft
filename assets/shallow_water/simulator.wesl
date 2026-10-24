@@ -32,6 +32,7 @@ struct SimulationSettings {
     overshoot_lambda_edge : f32,
     pml_sigma_exponent : f32,
     pml_cosine_blend : f32,
+    ocean_band_cells : f32,
 }
 
 struct Particle {
@@ -103,6 +104,7 @@ fn perlinNoise(point : vec2f, gridSize : f32, seed : u32) -> f32 {
 @group(0) @binding(5) var velocityTexture : texture_storage_2d<rgba32float, read_write>;
 @group(0) @binding(6) var pmlStateTexture : texture_storage_2d<rgba32float, read_write>;
 @group(0) @binding(7) var<storage, read_write> particles : array<Particle>;
+@group(0) @binding(8) var oceanEtaTexture : texture_storage_2d<r32float, read_write>;
 
 @group(1) @binding(0) var<uniform> interactionSettings : InteractionSettings;
 @group(1) @binding(1) var<uniform> simulationSettings : SimulationSettings;
@@ -266,6 +268,61 @@ fn semi_lag_w_reverse_hat(pos : vec2f) -> f32 {
     let v = sample_mac_velocity_w_advect(pos.x, pos.y);
     let pback = trace_semi_lag(pos, v, -simulationSettings.dt);
     return sample_w_bilinear(pback.x, pback.y);
+}
+
+const BORDER_SOURCE = 1u;
+const BORDER_DRAIN = 2u;
+const BORDER_WAVES = 3u;
+const BORDER_OCEAN = 4u;
+
+/// Edge 0 to 3 is left, right, bottom, top. Each edge takes three bits of `border_mask`.
+fn border_type(edge : u32) -> u32 {
+    return (simulationSettings.border_mask >> (3u * edge)) & 7u;
+}
+
+/// Target values below this mark a cell the ocean has not written yet.
+const OCEAN_ETA_UNSET = -1.0e29;
+
+/// Target free-surface height for the ocean band and the PML. Reads the ocean target texture when
+/// flag bit 1 is set and the cell holds a value, otherwise the flat `pml_eta_rest`.
+fn target_eta(cell : vec2u) -> f32 {
+    if ((simulationSettings.flags & 2u) != 0u) {
+        let eta = textureLoad(oceanEtaTexture, cell).r;
+        if (eta > OCEAN_ETA_UNSET) { return eta; }
+    }
+    return simulationSettings.pml_eta_rest;
+}
+
+/// Blend weight b of Chentanez, Müller and Kim 2015, eq. 17, measured from the PML's inner edge.
+/// It is 1 in the first band cell and falls linearly to 0 after `ocean_band_cells` cells. Cells
+/// inside the PML get 0, so the PML absorbs what passes the band. Corners take the larger weight.
+fn ocean_band_weight(i : i32, j : i32) -> f32 {
+    let nb = simulationSettings.ocean_band_cells;
+    if (nb <= 0.0) { return 0.0; }
+    let pml = i32(simulationSettings.pml_width);
+    let dist = vec4i(i, nx() - 1 - i, j, ny() - 1 - j) - vec4i(pml);
+    var b = 0.0;
+    for (var edge = 0u; edge < 4u; edge++) {
+        let d = dist[edge];
+        if (border_type(edge) == BORDER_OCEAN && d >= 0) {
+            b = max(b, clamp((nb - f32(d)) / nb, 0.0, 1.0));
+        }
+    }
+    return b;
+}
+
+/// Ocean boundary band, Chentanez, Müller and Kim 2015, eq. 18. Blends the water depth toward the
+/// target surface and leaves the face velocities to the solver, which makes them consistent with
+/// the forced height before the waves leave the band.
+@compute @workgroup_size(16, 16)
+fn oceanBand(@builtin(global_invocation_id) id: vec3u) {
+    if (id.x >= simulationSettings.size.x || id.y >= simulationSettings.size.y) { return; }
+    let b = ocean_band_weight(i32(id.x), i32(id.y));
+    if (b <= 0.0) { return; }
+    var bw = textureLoad(bedWaterTexture, id.xy);
+    let h_target = max(0.0, target_eta(id.xy) - bw.x);
+    bw.y = max(0.0, (1.0 - b) * bw.y + b * h_target);
+    textureStore(bedWaterTexture, id.xy, bw);
 }
 
 fn vel_max_clamp() -> f32 {
@@ -563,21 +620,22 @@ fn integrateVelocityW(@builtin(global_invocation_id) id: vec3u) {
 
 /// `sign` is +1 on the left or bottom domain edge, -1 on the right or top.
 /// Positive face velocity is along +x for u and +y for w. Source is inflow from outside; drain is outflow to outside.
+/// Ocean edges are closed at the face. The band and the PML behind it exchange water with the target.
 fn border_velocity(borderType : u32, bed : f32, sign : f32) -> f32 {
     if (bed > 1.0) { return 0.0; }
-    if (borderType == 0u) { return 0.0; }
     let mag = 3.0;
-    if (borderType == 1u) { return sign * mag; }
-    if (borderType == 2u) { return -sign * mag; }
-    return sign * mag * sin(f32(simulationSettings.timestamp) / 30.0);
+    if (borderType == BORDER_SOURCE) { return sign * mag; }
+    if (borderType == BORDER_DRAIN) { return -sign * mag; }
+    if (borderType == BORDER_WAVES) { return sign * mag * sin(f32(simulationSettings.timestamp) / 30.0); }
+    return 0.0;
 }
 
 @compute @workgroup_size(16, 16)
 fn applyDomainBoundaries(@builtin(global_invocation_id) id: vec3u) {
-    let leftBorder = simulationSettings.border_mask & 3u;
-    let rightBorder = (simulationSettings.border_mask >> 2u) & 3u;
-    let bottomBorder = (simulationSettings.border_mask >> 4u) & 3u;
-    let topBorder = (simulationSettings.border_mask >> 6u) & 3u;
+    let leftBorder = border_type(0u);
+    let rightBorder = border_type(1u);
+    let bottomBorder = border_type(2u);
+    let topBorder = border_type(3u);
     let sy = simulationSettings.size.y;
     let sx = simulationSettings.size.x;
     if (id.x == 0u && id.y < sy) {
@@ -749,7 +807,7 @@ fn sigma_w_face(fj : i32) -> f32 {
 }
 
 /// CMF10 §2.1.4 and appendix 3.1: x-strip uses σ and φ (Eq. 10–13); y-strip uses γ and ψ (Eq. 21–24).
-/// `pml_eta_rest` gives a flat target surface; rest depth per cell is max(0, η_rest − H) so (h − h_rest) matches the paper form on varying terrain.
+/// `target_eta` gives the target surface, flat or from the ocean. Rest depth per cell is max(0, η_target − H) so (h − h_rest) matches the paper form on varying terrain.
 @compute @workgroup_size(16, 16)
 fn pmlStep(@builtin(global_invocation_id) id: vec3u) {
     if (id.x >= simulationSettings.size.x || id.y >= simulationSettings.size.y) { return; }
@@ -767,7 +825,7 @@ fn pmlStep(@builtin(global_invocation_id) id: vec3u) {
     }
     let dt = simulationSettings.dt;
     let dx = simulationSettings.dx;
-    let eta_rest = simulationSettings.pml_eta_rest;
+    let eta_rest = target_eta(id.xy);
     let lam_decay = simulationSettings.pml_lambda_decay;
     let lam_update = simulationSettings.pml_lambda_update;
     var bw = textureLoad(bedWaterTexture, id.xy);

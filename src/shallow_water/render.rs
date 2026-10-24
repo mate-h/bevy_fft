@@ -39,6 +39,7 @@ pub struct ShallowWaterPipelines {
     pub clear: CachedComputePipelineId,
     pub load_preset: CachedComputePipelineId,
     pub interact: CachedComputePipelineId,
+    pub ocean_band: CachedComputePipelineId,
     pub mac_u_copy: CachedComputePipelineId,
     pub mac_u_sl_forward: CachedComputePipelineId,
     pub mac_u_sl_reverse: CachedComputePipelineId,
@@ -81,6 +82,7 @@ impl FromWorld for ShallowWaterPipelines {
                     texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
                     texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
                     storage_buffer::<GpuParticle>(false),
+                    texture_storage_2d(TextureFormat::R32Float, StorageTextureAccess::ReadWrite),
                 ),
             ),
         );
@@ -118,6 +120,7 @@ impl FromWorld for ShallowWaterPipelines {
             clear: q("shallow_water_clear", "clearBuffers"),
             load_preset: q("shallow_water_preset", "loadPreset"),
             interact: q("shallow_water_interact", "interact"),
+            ocean_band: q("shallow_water_ocean_band", "oceanBand"),
             mac_u_copy: q("shallow_water_mac_u_copy", "macU_copy"),
             mac_u_sl_forward: q("shallow_water_mac_u_fwd", "macU_sl_forward"),
             mac_u_sl_reverse: q("shallow_water_mac_u_rev", "macU_sl_reverse"),
@@ -228,7 +231,7 @@ fn build_simulation_uniform(
         timestamp,
         border_mask: controller.packed_border_mask(),
         pml_width: controller.pml_width,
-        flags: 1,
+        flags: 1 | if controller.ocean_forcing { 2 } else { 0 },
         pml_eta_rest: controller.pml_eta_rest,
         vel_clamp_alpha: 0.5,
         h_avgmax_beta: 2.0,
@@ -240,6 +243,7 @@ fn build_simulation_uniform(
         overshoot_lambda_edge: 2.0 * dx,
         pml_sigma_exponent: controller.pml_sigma_exponent.clamp(1.0, 4.0),
         pml_cosine_blend: controller.pml_cosine_blend.clamp(0.0, 1.0),
+        ocean_band_cells: controller.ocean_band_cells.max(0.0),
     }
 }
 
@@ -350,6 +354,11 @@ pub fn prepare_shallow_water_gpu(
         gpu.settings_bind_group = None;
         return;
     };
+    let Some(ocean_eta) = gpu_images.get(&controller.ocean_eta) else {
+        gpu.buffer_bind_group = None;
+        gpu.settings_bind_group = None;
+        return;
+    };
 
     let buffers_layout = pipeline_cache.get_bind_group_layout(&pipelines.layout_buffers);
     let settings_layout = pipeline_cache.get_bind_group_layout(&pipelines.layout_settings);
@@ -366,6 +375,7 @@ pub fn prepare_shallow_water_gpu(
             &vel.texture_view,
             &pml.texture_view,
             particles_buf.as_entire_buffer_binding(),
+            &ocean_eta.texture_view,
         )),
     );
 
@@ -451,8 +461,10 @@ pub fn run_shallow_water_sim(
 
         pass.set_pipeline(p_interact);
         pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
-
         if !controller.paused {
+            pass.set_pipeline(require_pipe!(ocean_band));
+            pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
+
             pass.set_pipeline(require_pipe!(mac_u_copy));
             pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
             pass.set_pipeline(require_pipe!(mac_u_sl_forward));

@@ -290,6 +290,7 @@ fn border_combo(ui: &mut egui::Ui, label: &str, value: &mut ShallowWaterBorder) 
                 ui.selectable_value(value, ShallowWaterBorder::Source, "Source");
                 ui.selectable_value(value, ShallowWaterBorder::Drain, "Drain");
                 ui.selectable_value(value, ShallowWaterBorder::Waves, "Waves");
+                ui.selectable_value(value, ShallowWaterBorder::Ocean, "Ocean");
             });
     });
 }

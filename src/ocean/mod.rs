@@ -14,6 +14,9 @@
 //! for a camera-following mesh, on a [`crate::water::WaterQuadtree`] for a frustum-culled mesh
 //! whose tiles grow with distance, or on any other mesh.
 //!
+//! A placed shallow water grid with [`crate::shallow_water::ShallowWaterController::ocean_forcing`]
+//! on also receives the long waves each frame, as the target surface for its ocean edges.
+//!
 //! Treat Bevy X, Z, and up (Y) as meters. [`OceanSimSettings::tile_size`] is the periodic patch size in meters
 //! on the horizontal plane (shaders use Δk = 2π / tile_size).
 //!
@@ -26,6 +29,7 @@ mod clipmap;
 mod lod_write;
 mod query;
 mod render;
+mod shallow_water_forcing;
 
 pub use clipmap::OceanClipmap;
 
@@ -162,6 +166,8 @@ pub struct OceanCascade {
 pub mod shaders {
     pub const OCEAN_QUERY: &str = "embedded://bevy_fft/ocean/query.wesl";
     pub const OCEAN_LOD_WRITE: &str = "embedded://bevy_fft/ocean/lod_write.wesl";
+    pub const OCEAN_SHALLOW_WATER_FORCING: &str =
+        "embedded://bevy_fft/ocean/shallow_water_forcing.wesl";
 }
 
 pub struct OceanPlugin;
@@ -170,6 +176,7 @@ impl Plugin for OceanPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "query.wesl");
         embedded_asset!(app, "lod_write.wesl");
+        embedded_asset!(app, "shallow_water_forcing.wesl");
         if !app.is_plugin_added::<crate::water::WaterPlugin>() {
             app.add_plugins(crate::water::WaterPlugin);
         }
@@ -264,6 +271,13 @@ impl Plugin for OceanPlugin {
                 Render,
                 lod_write::prepare_ocean_lod_write.in_set(RenderSystems::PrepareBindGroups),
             )
+            .init_resource::<shallow_water_forcing::ShallowWaterForcingPipeline>()
+            .init_resource::<shallow_water_forcing::ShallowWaterForcingBindGroup>()
+            .add_systems(
+                Render,
+                shallow_water_forcing::prepare_shallow_water_forcing
+                    .in_set(RenderSystems::PrepareBindGroups),
+            )
             .init_resource::<query::OceanQueryPipeline>()
             .init_resource::<query::OceanQueryBindGroup>()
             .add_systems(
@@ -304,6 +318,13 @@ impl Plugin for OceanPlugin {
                     .in_set(crate::water::WaterLodGraphSystems::Base),
                 query::run_ocean_query.in_set(crate::water::WaterLodGraphSystems::Read),
             ),
+        );
+        render_app.add_systems(
+            bevy::render::renderer::RenderGraph,
+            shallow_water_forcing::run_shallow_water_forcing
+                .after(run_fft_resolve_outputs)
+                .before(crate::shallow_water::run_shallow_water_sim)
+                .in_set(bevy::render::renderer::RenderGraphSystems::Render),
         );
     }
 }
