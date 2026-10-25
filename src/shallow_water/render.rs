@@ -11,7 +11,7 @@ use bevy::{
         Render, RenderSystems,
         render_asset::RenderAssets,
         render_resource::{
-            binding_types::{storage_buffer, texture_storage_2d, uniform_buffer},
+            binding_types::{storage_buffer, texture_2d, texture_storage_2d, uniform_buffer},
             encase::internal::{WriteInto, Writer},
             *,
         },
@@ -94,6 +94,7 @@ impl FromWorld for ShallowWaterPipelines {
                 (
                     uniform_buffer::<GpuInteractionUniform>(false),
                     uniform_buffer::<GpuSimulationUniform>(false),
+                    texture_2d(TextureSampleType::Float { filterable: false }),
                 ),
             ),
         );
@@ -359,6 +360,11 @@ pub fn prepare_shallow_water_gpu(
         gpu.settings_bind_group = None;
         return;
     };
+    let Some(bed_source) = gpu_images.get(&controller.bed_source) else {
+        gpu.buffer_bind_group = None;
+        gpu.settings_bind_group = None;
+        return;
+    };
 
     let buffers_layout = pipeline_cache.get_bind_group_layout(&pipelines.layout_buffers);
     let settings_layout = pipeline_cache.get_bind_group_layout(&pipelines.layout_settings);
@@ -385,6 +391,7 @@ pub fn prepare_shallow_water_gpu(
         &BindGroupEntries::sequential((
             interaction_buf.as_entire_buffer_binding(),
             simulation_buf.as_entire_buffer_binding(),
+            &bed_source.texture_view,
         )),
     );
 

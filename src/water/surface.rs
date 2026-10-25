@@ -21,7 +21,9 @@ pub struct WaterSurfaceUniform {
     /// Extra slices added when vertices sample the LOD data, so vertex spacing never undersamples
     /// the data. Pixels sample at the natural level.
     pub vertex_lod_bias: f32,
-    pub _pad0: f32,
+    /// Water depth in meters below which pixels are discarded, so a terrain under a shallow water
+    /// grid shows through on dry ground. Zero draws every pixel and tints dry ground as sand.
+    pub dry_depth: f32,
     pub _pad1: f32,
 }
 
@@ -54,7 +56,7 @@ impl Default for WaterSurfaceExtension {
             settings: WaterSurfaceUniform {
                 foam_intensity: 0.65,
                 vertex_lod_bias: 1.0,
-                _pad0: 0.0,
+                dry_depth: 0.0,
                 _pad1: 0.0,
             },
             lod: WaterLodSlices::default(),

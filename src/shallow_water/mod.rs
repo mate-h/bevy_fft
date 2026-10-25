@@ -124,8 +124,13 @@ pub struct ShallowWaterController {
     pub brush_force: f32,
     pub pointer_sim: Vec2,
     pub pointer_prev_sim: Vec2,
-    /// Terrain preset index for `loadPreset` (0–3).
+    /// Terrain preset index for `loadPreset`. 0 to 3 are procedural, and
+    /// [`SHALLOW_WATER_PRESET_BED_SOURCE`] reads [`Self::bed_source`].
     pub preset_index: u32,
+    /// Bed height per cell in solver units (`R32Float`, `cells_x × cells_y`), loaded on reset when
+    /// [`Self::preset_index`] is [`SHALLOW_WATER_PRESET_BED_SOURCE`]. Use it to start the grid from
+    /// a terrain. Starts as a 1×1 placeholder.
+    pub bed_source: Handle<Image>,
     /// Still water level that `loadPreset` fills to, in solver height units. Cells whose bed is
     /// above it start dry. Zero leaves every preset dry.
     pub fill_level: f32,
@@ -188,6 +193,7 @@ impl ShallowWaterController {
             mac_w_temps: images.add(shallow_rg32_image(cells_x, cells_y + 1)),
             pml_state: images.add(shallow_rg32_image(cells_x, cells_y)),
             ocean_eta: images.add(ocean_eta_image(cells_x, cells_y)),
+            bed_source: images.add(bed_source_image(1, 1, &[0.0])),
             ocean_forcing: false,
             ocean_band_cells: 5.0,
             pml_width: 0,
@@ -275,6 +281,20 @@ pub fn shallow_r32_image(width: u32, height: u32) -> Image {
 /// Value the ocean target texture starts with. The solver treats cells below `-1e29` as not yet
 /// written and falls back to [`ShallowWaterController::pml_eta_rest`].
 const OCEAN_ETA_UNSET: f32 = -1.0e30;
+
+/// [`ShallowWaterController::preset_index`] that loads the bed from
+/// [`ShallowWaterController::bed_source`].
+pub const SHALLOW_WATER_PRESET_BED_SOURCE: u32 = 4;
+
+/// `R32Float` bed image for [`ShallowWaterController::bed_source`], from `heights` in row order
+/// with `width` cells per row. Row `j` is grid row `j`, which runs along world +Z when placed.
+pub fn bed_source_image(width: u32, height: u32, heights: &[f32]) -> Image {
+    assert_eq!(heights.len(), (width * height) as usize);
+    let mut image = shallow_r32_image(width, height);
+    image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    image.data = Some(heights.iter().flat_map(|h| h.to_le_bytes()).collect());
+    image
+}
 
 fn ocean_eta_image(width: u32, height: u32) -> Image {
     let mut image = shallow_r32_image(width, height);

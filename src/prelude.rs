@@ -28,9 +28,10 @@ pub use crate::ocean::{
     OceanQueries, OceanQueryResults, OceanSample, OceanSimSettings, OceanSurfaceSettings,
 };
 pub use crate::shallow_water::{
-    ShallowWaterBorder, ShallowWaterController, ShallowWaterMaterialUniform, ShallowWaterPlacement,
-    ShallowWaterPlugin, ShallowWaterSurfaceExtension, ShallowWaterSurfaceMaterial,
-    ShallowWaterSurfaceTag, round_particle_count,
+    SHALLOW_WATER_PRESET_BED_SOURCE, ShallowWaterBorder, ShallowWaterController,
+    ShallowWaterMaterialUniform, ShallowWaterPlacement, ShallowWaterPlugin,
+    ShallowWaterSurfaceExtension, ShallowWaterSurfaceMaterial, ShallowWaterSurfaceTag,
+    bed_source_image, round_particle_count,
 };
 pub use crate::water::{
     WATER_LOD_MAX_SLICES, WaterLodData, WaterLodGraphSystems, WaterLodScratch, WaterLodSettings,

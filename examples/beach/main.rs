@@ -1,15 +1,33 @@
-//! A shallow water beach inside the FFT ocean, drawn by one surface.
+//! Surf on the Lumahaʻi shoreline of Kauai, with the FFT ocean and a shallow water grid over real
+//! topobathy.
 //!
-//! A 256 m shallow water grid with the shore preset sits at the origin. It writes into the shared
-//! water LOD data, so the ocean clipmap shows the beach and the open sea with the same material,
-//! and the grid fades into the ocean waves along its edges. The buoys read the same data through
-//! `OceanQueries`, one offshore, one in the fade band, and one in the surf.
+//! The ground is a 2 km square of 1 m LiDAR elevation and bathymetry, drawn by bevy_terrain. A
+//! 512 m shallow water grid sits over the beach and starts from the same heights, so the sea fills
+//! the measured bed and stops at the measured sand. The grid writes into the shared water LOD
+//! data, so the ocean clipmap shows the surf and the open sea with one material, and the grid fades
+//! into the ocean waves along its edges. Dry cells are left out of the water surface so the ground
+//! shows through. The buoys read the same data through `OceanQueries`, one offshore, one in the
+//! forcing band, and one in the surf.
 //!
-//! The deep edge is an ocean border. The ocean's long waves are written over the grid each frame,
-//! and a band of cells along the deep edge blends the water height toward them, so swell enters
-//! the grid, shoals up the slope, and runs up the beach. A PML behind the band absorbs the backwash.
-//! The panel switches the deep edge to a wall or a drain for comparison. Drag with the left mouse
-//! button to add water.
+//! The deep edge, on the north side, is an ocean border. The ocean's long waves are written over
+//! the grid each frame, and a band of cells along that edge blends the water height toward them,
+//! so swell enters the grid, shoals over the bar, and runs up the beach. A PML behind the band
+//! absorbs the backwash. The panel switches the deep edge to a wall or a drain for comparison. Drag
+//! with the left mouse button to add water.
+//!
+//! The terrain is baked from bevy_terrain's
+//! `source_data/kauai_lumahai_hanalei_shoreline_lidar_1m_2048x2048.tif` into a planar tile set.
+//! The tiles are not in git. From this directory, with bevy_terrain checked out next to it:
+//!
+//! ```sh
+//! cargo run --release --manifest-path ../bevy_terrain/Cargo.toml -p bevy_terrain_preprocess -- \
+//!     ../bevy_terrain/source_data/kauai_lumahai_hanalei_shoreline_lidar_1m_2048x2048.tif \
+//!     --terrain-path assets/terrains/kauai_shoreline --overwrite \
+//!     --data-type float32 --format r32f --planar --side-length 2048
+//! ```
+//!
+//! The planar bake puts the GeoTIFF's columns along +X and its north along +Z, so the map is
+//! mirrored east to west compared with a top-down view with north up.
 
 use bevy::{
     anti_alias::fxaa::Fxaa,
@@ -27,6 +45,8 @@ use bevy::{
     pbr::{AtmosphereSettings, DefaultOpaqueRendererMethod, StandardMaterial},
     post_process::bloom::Bloom,
     prelude::*,
+    render::render_resource::AsBindGroup,
+    shader::ShaderRef,
     shape::InfinitePlane3d,
     transform::TransformSystems,
 };
@@ -35,6 +55,10 @@ use bevy_egui::{
     input::{EguiWantsInput, write_egui_wants_input_system},
 };
 use bevy_fft::prelude::*;
+use bevy_terrain::prelude::{
+    SpawnTerrainCommandsExt, TerrainMaterialPlugin, TerrainPlugin, TerrainSettings,
+    TerrainViewConfig,
+};
 
 #[path = "../common/screenshot.rs"]
 mod screenshot;
@@ -44,35 +68,59 @@ const CASCADE_TILES: [f32; 3] = [256.0, 48.0, 9.0];
 /// A cascade hands waves to the next smaller one at this many wavelengths per smaller tile.
 const CASCADE_HANDOFF_WAVES: f32 = 6.0;
 
+/// bevy_terrain tile set of the Kauai shoreline, relative to the asset folder.
+const TERRAIN_CONFIG: &str = "terrains/kauai_shoreline/config.tc.ron";
+/// Tile folder the shallow water bed is read from. LOD 2 holds 4×4 tiles, about 1 m per texel.
+const TERRAIN_BED_TILES: &str = "assets/terrains/kauai_shoreline/height/2";
+/// Tiles per edge at that LOD.
+const TERRAIN_BED_TILE_COUNT: usize = 4;
+/// Edge length of the terrain square in meters.
+const TERRAIN_SIDE: f32 = 2048.0;
+/// Finest LOD in the tile set.
+const TERRAIN_VIEW_LOD: u32 = 3;
+
 /// Shallow water cells per edge.
-const GRID: u32 = 256;
+const GRID: u32 = 512;
 /// Shallow water cell width in meters.
 const CELL_SIZE: f32 = 1.0;
-/// Still water level in solver meters. The shore preset's bed runs from 0 to 10 m, so this puts
-/// the waterline partway up the slope. The solver is shifted down by this much so the sea sits at
-/// the ocean's rest height.
-const SEA_LEVEL: f32 = 4.0;
-/// Shore preset index in `loadPreset`.
-const SHORE_PRESET: u32 = 3;
+/// World `xz` of the grid centre. The grid covers the beach, with its north edge offshore.
+const GRID_CENTER: Vec2 = Vec2::new(-384.0, 304.0);
+/// Depth in meters of the solver's zero level below sea level. It sits under the deepest bed in
+/// the data, so solver heights stay positive, and the still sea is at this solver height.
+const SEA_LEVEL: f32 = 30.0;
+/// Mean water depth in meters off the beach, for the ocean's finite-depth dispersion.
+const OFFSHORE_DEPTH: f32 = 18.0;
 
-/// World `xz` of the demo buoys: offshore, in the fade band, and in the surf.
+/// World `xz` of the demo buoys: offshore, in the forcing band, and in the surf.
 const BUOY_POSITIONS: [Vec2; 3] = [
-    Vec2::new(0.0, -170.0),
-    Vec2::new(10.0, -124.0),
-    Vec2::new(-10.0, -60.0),
+    Vec2::new(-360.0, 640.0),
+    Vec2::new(-400.0, 545.0),
+    Vec2::new(-420.0, 240.0),
 ];
+
+#[derive(Asset, AsBindGroup, TypePath, Clone, Default)]
+struct KauaiGroundMaterial {}
+
+impl Material for KauaiGroundMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "examples/kauai_ground.wesl".into()
+    }
+}
 
 fn main() {
     App::new()
         .insert_resource(DefaultOpaqueRendererMethod::deferred())
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(GlobalAmbientLight::NONE)
+        .insert_resource(TerrainSettings::default())
         .add_plugins((
             DefaultPlugins,
             FreeCameraPlugin,
             FftPlugin,
             OceanPlugin,
             ShallowWaterPlugin,
+            TerrainPlugin,
+            TerrainMaterialPlugin::<KauaiGroundMaterial>::default(),
             EguiPlugin::default(),
             screenshot::ScreenshotOnEnvPlugin,
         ))
@@ -120,6 +168,7 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut standard_materials: ResMut<Assets<StandardMaterial>>,
     mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
+    asset_server: Res<AssetServer>,
 ) {
     let n = 256u32;
     for (index, &tile) in CASCADE_TILES.iter().enumerate() {
@@ -131,7 +180,11 @@ fn setup(
                 tile_size: tile,
                 band_k_min,
                 band_k_max,
-                wind_speed: 8.0,
+                wind_speed: 9.0,
+                // Waves travel toward -Z, from the open sea in the north onto the beach.
+                wind_direction: -std::f32::consts::FRAC_PI_2,
+                swell: 0.6,
+                depth: OFFSHORE_DEPTH,
                 ..default()
             },
             OceanCascade {
@@ -145,17 +198,29 @@ fn setup(
     }
 
     let mut controller = ShallowWaterController::new(&mut images, GRID, GRID);
-    controller.placement = Some(ShallowWaterPlacement {
-        center: Vec2::ZERO,
+    let placement = ShallowWaterPlacement {
+        center: GRID_CENTER,
         cell_size: CELL_SIZE,
         datum: -SEA_LEVEL,
         blend_cells: 16.0,
-    });
-    controller.preset_index = SHORE_PRESET;
+    };
+    let bed = TerrainBed::load().expect(
+        "Kauai terrain tiles are missing. Bake them with the command in this example's docs.",
+    );
+    let heights: Vec<f32> = (0..GRID * GRID)
+        .map(|i| {
+            let cell = Vec2::new((i % GRID) as f32, (i / GRID) as f32) + 0.5;
+            let xz = placement.center + (cell - 0.5 * GRID as f32) * CELL_SIZE;
+            bed.height(xz) + SEA_LEVEL
+        })
+        .collect();
+    controller.bed_source = images.add(bed_source_image(GRID, GRID, &heights));
+    controller.placement = Some(placement);
+    controller.preset_index = SHALLOW_WATER_PRESET_BED_SOURCE;
     controller.fill_level = SEA_LEVEL;
     controller.pml_eta_rest = SEA_LEVEL;
     controller.pml_width = 8;
-    controller.bottom_border = ShallowWaterBorder::Ocean;
+    controller.top_border = ShallowWaterBorder::Ocean;
     controller.ocean_forcing = true;
     controller.gravity = 9.81;
     controller.dt = 1.0 / 60.0;
@@ -179,20 +244,32 @@ fn setup(
 
     let earth_medium = scattering_mediums.add(ScatteringMedium::earth(256, 256));
     commands.spawn(Atmosphere::earth(earth_medium));
-    commands.spawn((
-        Camera3d::default(),
-        Transform::from_xyz(-90.0, 45.0, -230.0).looking_at(Vec3::new(0.0, 0.0, -40.0), Vec3::Y),
-        FreeCamera::default(),
-        AtmosphereSettings::default(),
-        Exposure { ev100: 12.0 },
-        Tonemapping::AcesFitted,
-        Bloom::NATURAL,
-        AtmosphereEnvironmentMapLight::default(),
-        Msaa::Off,
-        Fxaa::default(),
-        DepthPrepass,
-        DeferredPrepass,
-    ));
+    let camera = commands
+        .spawn((
+            Camera3d::default(),
+            Transform::from_xyz(-300.0, 28.0, 400.0)
+                .looking_at(Vec3::new(-430.0, 0.0, 210.0), Vec3::Y),
+            FreeCamera::default(),
+            AtmosphereSettings::default(),
+            Exposure { ev100: 12.0 },
+            Tonemapping::AcesFitted,
+            Bloom::NATURAL,
+            AtmosphereEnvironmentMapLight::default(),
+            Msaa::Off,
+            Fxaa::default(),
+            DepthPrepass,
+            DeferredPrepass,
+        ))
+        .id();
+    commands.spawn_terrain(
+        asset_server.load(TERRAIN_CONFIG),
+        TerrainViewConfig {
+            view_lod: TERRAIN_VIEW_LOD,
+            ..default()
+        },
+        KauaiGroundMaterial::default(),
+        camera,
+    );
 
     commands.spawn((
         DirectionalLight {
@@ -200,10 +277,10 @@ fn setup(
             illuminance: lux::RAW_SUNLIGHT,
             ..default()
         },
-        Transform::from_xyz(0.3, 0.25, -1.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(-0.4, 0.35, 1.0).looking_at(Vec3::ZERO, Vec3::Y),
         CascadeShadowConfigBuilder {
-            first_cascade_far_bound: 20.0,
-            maximum_distance: 400.0,
+            first_cascade_far_bound: 40.0,
+            maximum_distance: 1500.0,
             ..default()
         }
         .build(),
@@ -230,7 +307,13 @@ fn spawn_surface_when_ready(
                 opaque_render_method: OpaqueRendererMethod::Auto,
                 ..default()
             },
-            extension: WaterSurfaceExtension::default(),
+            extension: WaterSurfaceExtension {
+                settings: WaterSurfaceUniform {
+                    dry_depth: 0.03,
+                    ..WaterSurfaceExtension::default().settings
+                },
+                ..default()
+            },
         })),
         WaterSurfaceTag,
     ));
@@ -322,7 +405,7 @@ fn beach_panel(mut contexts: EguiContexts, mut controller: ResMut<ShallowWaterCo
         ui.add(egui::Slider::new(&mut controller.friction, 0.0..=0.5).text("Friction"));
         ui.horizontal(|ui| {
             ui.label("Deep edge");
-            let border = &mut controller.bottom_border;
+            let border = &mut controller.top_border;
             egui::ComboBox::from_id_salt("deep_edge")
                 .selected_text(format!("{border:?}"))
                 .show_ui(ui, |ui| {
@@ -333,4 +416,57 @@ fn beach_panel(mut contexts: EguiContexts, mut controller: ResMut<ShallowWaterCo
         });
         ui.add(egui::Slider::new(&mut controller.brush_radius, 2.0..=24.0).text("Brush radius"));
     });
+}
+
+/// Terrain heights in meters from the baked bevy_terrain tiles, for the shallow water bed.
+///
+/// Each tile holds a 1 texel border around its centre texels. Tile `(x, y)` covers the terrain's
+/// UV square `[x, x + 1] / n × [y, y + 1] / n`, with texel rows running along +Z.
+struct TerrainBed {
+    tiles: Vec<Vec<f32>>,
+    size: usize,
+}
+
+impl TerrainBed {
+    const BORDER: usize = 1;
+
+    fn load() -> Option<Self> {
+        let n = TERRAIN_BED_TILE_COUNT;
+        let mut tiles = Vec::with_capacity(n * n);
+        let mut size = 0;
+        for y in 0..n {
+            for x in 0..n {
+                let path = format!("{TERRAIN_BED_TILES}/0_0/0_2_{x}_{y}.tif");
+                let file = std::fs::File::open(path).ok()?;
+                let mut decoder =
+                    tiff::decoder::Decoder::new(std::io::BufReader::new(file)).ok()?;
+                size = decoder.dimensions().ok()?.0 as usize;
+                let tiff::decoder::DecodingResult::F32(data) = decoder.read_image().ok()? else {
+                    return None;
+                };
+                tiles.push(data);
+            }
+        }
+        Some(Self { tiles, size })
+    }
+
+    /// Bilinear height at world `xz`, clamped to the terrain square.
+    fn height(&self, xz: Vec2) -> f32 {
+        let n = TERRAIN_BED_TILE_COUNT as f32;
+        let center = (self.size - 2 * Self::BORDER) as f32;
+        let uv = (xz / TERRAIN_SIDE + 0.5).clamp(Vec2::ZERO, Vec2::splat(1.0 - 1e-6)) * n;
+        let tile = uv.floor();
+        let texel = (uv - tile) * center - 0.5 + Self::BORDER as f32;
+        let data = &self.tiles[tile.y as usize * TERRAIN_BED_TILE_COUNT + tile.x as usize];
+        let i0 = texel.floor();
+        let f = texel - i0;
+        let at = |dx: usize, dy: usize| {
+            let x = (i0.x as usize + dx).min(self.size - 1);
+            let y = (i0.y as usize + dy).min(self.size - 1);
+            data[y * self.size + x]
+        };
+        let top = at(0, 0) + (at(1, 0) - at(0, 0)) * f.x;
+        let bottom = at(0, 1) + (at(1, 1) - at(0, 1)) * f.x;
+        top + (bottom - top) * f.y
+    }
 }

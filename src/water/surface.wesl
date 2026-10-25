@@ -59,7 +59,7 @@ import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT;
 struct WaterSurfaceUniform {
     foam_intensity: f32,
     vertex_lod_bias: f32,
-    _pad0: f32,
+    dry_depth: f32,
     _pad1: f32,
 }
 
@@ -177,11 +177,20 @@ fn water_mix_foam_into_base_color(world_position: vec3<f32>, base_color: vec4<f3
     return vec4<f32>(mix(base_color.rgb, vec3<f32>(1.0), foam_mix), base_color.a);
 }
 
+/// Water depth in meters from the depth lane.
+fn water_depth(world_position: vec3<f32>) -> f32 {
+    return sample_lod(lod_foam, water_lod, world_position.xz, 0.0).g;
+}
+
+/// True where `dry_depth` is set and the water is shallower, so the terrain below is drawn instead.
+fn water_is_dry(world_position: vec3<f32>) -> bool {
+    return surface.dry_depth > 0.0 && water_depth(world_position) < surface.dry_depth;
+}
+
 /// Share of the bed showing through at this pixel, from the water depth lane. One on dry ground,
 /// fading out over the first few decimeters of water.
 fn water_bed_visibility(world_position: vec3<f32>) -> f32 {
-    let depth = sample_lod(lod_foam, water_lod, world_position.xz, 0.0).g;
-    return exp(-max(depth, 0.0) * 6.0);
+    return exp(-max(water_depth(world_position), 0.0) * 6.0);
 }
 
 /// Sand tint for shallow and dry areas with bed visibility `bed`. Regions without a shallow water
@@ -270,6 +279,9 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 @if(!PREPASS_PIPELINE)
 @fragment
 fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+    if water_is_dry(in.world_position.xyz) {
+        discard;
+    }
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     pbr_input.material.base_color = alpha_discard(
         pbr_input.material.flags,
@@ -298,6 +310,9 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
 @if(PREPASS_PIPELINE && PREPASS_FRAGMENT)
 @fragment
 fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+    if water_is_dry(in.world_position.xyz) {
+        discard;
+    }
 @if(!NORMAL_PREPASS_OR_DEFERRED_PREPASS) {
     var out: FragmentOutput;
 @if(UNCLIPPED_DEPTH_ORTHO_EMULATION)

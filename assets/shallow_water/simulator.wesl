@@ -108,6 +108,8 @@ fn perlinNoise(point : vec2f, gridSize : f32, seed : u32) -> f32 {
 
 @group(1) @binding(0) var<uniform> interactionSettings : InteractionSettings;
 @group(1) @binding(1) var<uniform> simulationSettings : SimulationSettings;
+/// Bed height per cell for the bed source preset.
+@group(1) @binding(2) var bedSource : texture_2d<f32>;
 
 fn nx() -> i32 { return i32(simulationSettings.size.x); }
 fn ny() -> i32 { return i32(simulationSettings.size.y); }
@@ -378,6 +380,9 @@ fn loadPreset(@builtin(global_invocation_id) id: vec3u) {
     } else if (interactionSettings.preset == 3u) {
         let noise = perlinNoise(vec2f(position.x, 0.0), baseNoiseGridSize * 2.0, simulationSettings.timestamp);
         bed = clamp(40.0 * (position.y / f32(simulationSettings.size.y) - mix(0.4, 0.6, noise)), 0.0, 10.0);
+    } else if (interactionSettings.preset == 4u) {
+        let last = vec2u(textureDimensions(bedSource)) - 1u;
+        bed = textureLoad(bedSource, min(id.xy, last), 0).r;
     }
     let water = max(interactionSettings.fill_level - bed, 0.0);
     textureStore(bedWaterTexture, id.xy, vec4f(bed, water, 0.0, 0.0));
@@ -403,10 +408,9 @@ fn interact(@builtin(global_invocation_id) id: vec3u) {
             * smoothstep(interactionSettings.radius, interactionSettings.radius * interactionSettings.force - 1.0, distance);
         var value = textureLoad(bedWaterTexture, id.xy);
         if (interactionSettings.mode == 1u) { value.x += 10.0 * delta; }
-        else if (interactionSettings.mode == 2u) { value.x -= 10.0 * delta; }
+        else if (interactionSettings.mode == 2u) { value.x = max(0.0, value.x - 10.0 * delta); }
         else if (interactionSettings.mode == 3u) { value.y += delta; }
         else if (interactionSettings.mode == 4u) { value.y -= delta; }
-        value.x = max(0.0, min(10.0, value.x));
         value.y = max(0.0, value.y);
         textureStore(bedWaterTexture, id.xy, value);
     } else if (interactionSettings.mode == 5u) {

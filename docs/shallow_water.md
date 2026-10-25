@@ -8,6 +8,8 @@ Domain edges: `applyDomainBoundaries` runs after pressure and integration, then 
 
 An ocean edge is closed at the face. Instead, `oceanBand` runs before advection and blends the water depth toward a target surface over `ocean_band_cells` cells just inside the PML, following Chentanez, Müller and Kim 2015, eq. 18. The weight is 1 next to the PML and falls linearly to 0 further in. Velocities are left to the solver. The PML relaxes toward the same target, so what passes the band is absorbed. The target is `pml_eta_rest`, or with `ocean_forcing` on, the FFT ocean's long waves, which `OceanPlugin` writes into `ocean_eta` each frame for a placed grid.
 
+`loadPreset` builds the bed from a procedural preset, or from `bed_source` when `preset_index` is `SHALLOW_WATER_PRESET_BED_SOURCE`. That texture holds one bed height per cell in solver units, so a grid can start from a terrain. `bed_source_image` builds it from a slice of heights.
+
 The example (`examples/shallow_water/main.rs`) adds lighting and egui controls and does not use the FFT graph; `ShallowWaterPlugin` is standalone.
 
 ## Bevy integration
