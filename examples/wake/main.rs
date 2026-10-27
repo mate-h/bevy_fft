@@ -58,7 +58,7 @@ fn main() {
         .insert_resource(GlobalAmbientLight::NONE)
         .init_resource::<ScriptedBoat>()
         .add_plugins((
-            DefaultPlugins,
+            screenshot::default_plugins(),
             FreeCameraPlugin,
             FftPlugin,
             OceanPlugin,

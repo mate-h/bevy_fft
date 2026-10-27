@@ -120,7 +120,7 @@ fn main() {
             ..default()
         })
         .add_plugins((
-            DefaultPlugins,
+            screenshot::default_plugins(),
             FreeCameraPlugin,
             FftPlugin,
             OceanPlugin,

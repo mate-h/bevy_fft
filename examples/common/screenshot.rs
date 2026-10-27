@@ -1,21 +1,22 @@
 //! Opt-in screenshot for example runs.
 //!
 //! Set `BEVY_FFT_SCREENSHOT=path/to/frame.png` to save one frame after a warm-up and then exit.
-//! `BEVY_FFT_SCREENSHOT_FRAMES` sets the warm-up length in frames (default 600). Without the
-//! variable the plugin does nothing.
+//! `BEVY_FFT_SCREENSHOT_FRAMES` sets the warm-up length in frames (default 600), and
+//! `BEVY_FFT_SCREENSHOT_SIZE` sets the image size as `WIDTHxHEIGHT` (default 2560x1440). Without
+//! the first variable the plugin does nothing.
 //!
-//! Cameras that draw to the primary window draw to an offscreen image of the same size instead,
-//! and the capture reads that image. A covered or unfocused window can present all-black frames,
-//! so this keeps captures independent of what is on screen. The app keeps updating at full rate
-//! while unfocused. The window must stay visible, since macOS stops driving the frame loop of a
-//! hidden window. Black captures are still discarded and retried a few times before the app gives
+//! Screenshot runs open no window, so they work in the background without anything popping up.
+//! Use [`default_plugins`] in place of `DefaultPlugins` for that. Cameras that would draw to the
+//! primary window draw to an offscreen image instead, the capture reads that image, and the app
+//! updates continuously. Black captures are discarded and retried a few times before the app gives
 //! up and exits.
 
+use bevy::app::PluginGroupBuilder;
 use bevy::camera::{ImageRenderTarget, RenderTarget};
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured, save_to_disk};
-use bevy::window::{PrimaryWindow, WindowRef};
+use bevy::window::{ExitCondition, WindowRef};
 use bevy::winit::{UpdateMode, WinitSettings};
 
 pub struct ScreenshotOnEnvPlugin;
@@ -27,6 +28,34 @@ const MAX_ATTEMPTS: u32 = 10;
 /// Frames to keep running after a save so the file reaches the disk.
 const EXIT_DELAY_FRAMES: u32 = 30;
 
+fn screenshot_requested() -> bool {
+    std::env::var_os("BEVY_FFT_SCREENSHOT").is_some()
+}
+
+/// `DefaultPlugins`, without a primary window during screenshot runs.
+pub fn default_plugins() -> PluginGroupBuilder {
+    let plugins = DefaultPlugins.build();
+    if !screenshot_requested() {
+        return plugins;
+    }
+    plugins.set(WindowPlugin {
+        primary_window: None,
+        exit_condition: ExitCondition::DontExit,
+        ..default()
+    })
+}
+
+fn screenshot_size() -> UVec2 {
+    std::env::var("BEVY_FFT_SCREENSHOT_SIZE")
+        .ok()
+        .and_then(|v| {
+            let (w, h) = v.split_once('x')?;
+            Some(UVec2::new(w.parse().ok()?, h.parse().ok()?))
+        })
+        .unwrap_or(UVec2::new(2560, 1440))
+        .max(UVec2::ONE)
+}
+
 #[derive(Resource)]
 struct ScreenshotRequest {
     path: String,
@@ -35,7 +64,7 @@ struct ScreenshotRequest {
     in_flight: bool,
     saved: bool,
     exit_after: u32,
-    target: Option<Handle<Image>>,
+    target: Handle<Image>,
 }
 
 impl Plugin for ScreenshotOnEnvPlugin {
@@ -47,6 +76,16 @@ impl Plugin for ScreenshotOnEnvPlugin {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(600);
+        let size = screenshot_size();
+        let target =
+            app.world_mut()
+                .resource_mut::<Assets<Image>>()
+                .add(Image::new_target_texture(
+                    size.x,
+                    size.y,
+                    TextureFormat::Rgba8UnormSrgb,
+                    None,
+                ));
         app.insert_resource(ScreenshotRequest {
             path,
             frames_left,
@@ -54,7 +93,7 @@ impl Plugin for ScreenshotOnEnvPlugin {
             in_flight: false,
             saved: false,
             exit_after: EXIT_DELAY_FRAMES,
-            target: None,
+            target,
         })
         .insert_resource(WinitSettings {
             focused_mode: UpdateMode::Continuous,
@@ -67,39 +106,15 @@ impl Plugin for ScreenshotOnEnvPlugin {
     }
 }
 
-/// Points every camera that targets the primary window at one offscreen image of the window's size.
+/// Points every camera that targets the primary window at the offscreen image.
 fn render_window_cameras_offscreen(
-    mut request: ResMut<ScreenshotRequest>,
-    mut images: ResMut<Assets<Image>>,
-    windows: Query<(Entity, &Window), With<PrimaryWindow>>,
+    request: Res<ScreenshotRequest>,
     mut targets: Query<&mut RenderTarget, With<Camera>>,
 ) {
-    let Ok((primary, window)) = windows.single() else {
-        return;
-    };
     for mut target in &mut targets {
-        let RenderTarget::Window(window_ref) = &*target else {
-            continue;
-        };
-        let on_primary = match window_ref {
-            WindowRef::Primary => true,
-            WindowRef::Entity(e) => *e == primary,
-        };
-        if !on_primary {
-            continue;
+        if matches!(&*target, RenderTarget::Window(WindowRef::Primary)) {
+            *target = RenderTarget::Image(ImageRenderTarget::from(request.target.clone()));
         }
-        let handle = request
-            .target
-            .get_or_insert_with(|| {
-                images.add(Image::new_target_texture(
-                    window.physical_width().max(1),
-                    window.physical_height().max(1),
-                    TextureFormat::Rgba8UnormSrgb,
-                    None,
-                ))
-            })
-            .clone();
-        *target = RenderTarget::Image(ImageRenderTarget::from(handle));
     }
 }
 
@@ -132,25 +147,23 @@ fn take_screenshot_then_exit(
     }
     request.in_flight = true;
     request.attempts += 1;
-    let screenshot = match &request.target {
-        Some(image) => Screenshot::image(image.clone()),
-        None => Screenshot::primary_window(),
-    };
-    commands.spawn(screenshot).observe(
-        |captured: On<ScreenshotCaptured>, mut request: ResMut<ScreenshotRequest>| {
-            request.in_flight = false;
-            let black = captured
-                .image
-                .data
-                .as_ref()
-                .is_none_or(|d| d.chunks(4).all(|px| px.iter().take(3).all(|&c| c == 0)));
-            if black {
-                request.frames_left = RETRY_FRAMES;
-                return;
-            }
-            let mut save = save_to_disk(request.path.clone());
-            save(captured);
-            request.saved = true;
-        },
-    );
+    commands
+        .spawn(Screenshot::image(request.target.clone()))
+        .observe(
+            |captured: On<ScreenshotCaptured>, mut request: ResMut<ScreenshotRequest>| {
+                request.in_flight = false;
+                let black = captured
+                    .image
+                    .data
+                    .as_ref()
+                    .is_none_or(|d| d.chunks(4).all(|px| px.iter().take(3).all(|&c| c == 0)));
+                if black {
+                    request.frames_left = RETRY_FRAMES;
+                    return;
+                }
+                let mut save = save_to_disk(request.path.clone());
+                save(captured);
+                request.saved = true;
+            },
+        );
 }
