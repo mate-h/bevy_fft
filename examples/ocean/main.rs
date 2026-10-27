@@ -8,7 +8,7 @@
 
 use bevy::{
     anti_alias::fxaa::Fxaa,
-    camera::Exposure,
+    camera::{Exposure, primitives::Aabb, visibility::NoFrustumCulling},
     camera_controller::free_camera::{FreeCamera, FreeCameraPlugin, FreeCameraState},
     core_pipeline::tonemapping::Tonemapping,
     light::{
@@ -50,7 +50,7 @@ fn main() {
         .insert_resource(GlobalAmbientLight::NONE)
         .init_resource::<SunLightSettings>()
         .add_plugins((
-            DefaultPlugins,
+            screenshot::default_plugins(),
             FreeCameraPlugin,
             FftPlugin,
             OceanPlugin,
@@ -342,8 +342,16 @@ fn water_mesh_panel(
             }
             if pick_quadtree != quadtree {
                 let mut e = commands.entity(entity);
-                e.remove::<(Mesh3d, WaterQuadtree, WaterQuadtreeBuffer, OceanClipmap)>()
-                    .insert(Transform::IDENTITY);
+                e.remove::<(
+                    Mesh3d,
+                    WaterQuadtree,
+                    WaterQuadtreeBuffer,
+                    WaterQuadtreeStats,
+                    OceanClipmap,
+                    NoFrustumCulling,
+                    Aabb,
+                )>()
+                .insert(Transform::IDENTITY);
                 if pick_quadtree {
                     e.insert(WaterQuadtree::default());
                 } else {

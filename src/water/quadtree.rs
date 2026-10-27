@@ -24,7 +24,7 @@ use bevy::{
     render::storage::ShaderBuffer,
 };
 
-use super::{WaterSurfaceTag, WaterViewer};
+use super::{WaterSurfaceMaterial, WaterSurfaceTag, WaterViewer};
 
 /// Quadtree water mesh settings. Add it with a
 /// [`WaterSurfaceMaterial`](super::WaterSurfaceMaterial). The plugin builds the tile pool
@@ -286,13 +286,23 @@ pub(super) fn build_water_quadtrees(
     mut meshes: ResMut<Assets<Mesh>>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
     quadtrees: Query<
-        (Entity, &WaterQuadtree, Option<&WaterQuadtreeBuffer>),
+        (
+            Entity,
+            &WaterQuadtree,
+            Option<&WaterQuadtreeBuffer>,
+            Option<&MeshMaterial3d<WaterSurfaceMaterial>>,
+        ),
         Changed<WaterQuadtree>,
     >,
 ) {
-    for (entity, quadtree, buffer) in &quadtrees {
+    for (entity, quadtree, buffer, material) in &quadtrees {
         let mut entity = commands.entity(entity);
         entity.insert((Mesh3d(meshes.add(quadtree.build_mesh())), WaterSurfaceTag));
+        // Re-inserting the material marks it changed, so the renderer picks it up again for an
+        // entity whose mesh was swapped out.
+        if let Some(material) = material {
+            entity.insert(material.clone());
+        }
         if buffer.is_none() {
             let words = quadtree.gpu_words(Vec3::ZERO, &[]);
             entity.insert(WaterQuadtreeBuffer(

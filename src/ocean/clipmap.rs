@@ -20,7 +20,7 @@ use bevy::{
     prelude::*,
 };
 
-use crate::water::{WaterSurfaceTag, WaterViewer};
+use crate::water::{WaterSurfaceMaterial, WaterSurfaceTag, WaterViewer};
 
 /// Camera-following LOD mesh settings. Add it with a
 /// [`WaterSurfaceMaterial`](crate::water::WaterSurfaceMaterial). The plugin builds the [`Mesh3d`],
@@ -190,12 +190,23 @@ impl MeshBuilder {
 pub(super) fn build_ocean_clipmaps(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
-    clipmaps: Query<(Entity, &OceanClipmap), Changed<OceanClipmap>>,
+    clipmaps: Query<
+        (
+            Entity,
+            &OceanClipmap,
+            Option<&MeshMaterial3d<WaterSurfaceMaterial>>,
+        ),
+        Changed<OceanClipmap>,
+    >,
 ) {
-    for (entity, clipmap) in &clipmaps {
-        commands
-            .entity(entity)
-            .insert((Mesh3d(meshes.add(clipmap.build_mesh())), WaterSurfaceTag));
+    for (entity, clipmap, material) in &clipmaps {
+        let mut entity = commands.entity(entity);
+        entity.insert((Mesh3d(meshes.add(clipmap.build_mesh())), WaterSurfaceTag));
+        // Re-inserting the material marks it changed, so the renderer picks it up again for an
+        // entity whose mesh was swapped out.
+        if let Some(material) = material {
+            entity.insert(material.clone());
+        }
     }
 }
 
