@@ -4,11 +4,19 @@
 //! `BEVY_FFT_SCREENSHOT_FRAMES` sets the warm-up length in frames (default 600). Without the
 //! variable the plugin does nothing.
 //!
-//! A window that is hidden or in the background can present all-black frames on some platforms.
-//! Black captures are discarded and retried a few times before the app gives up and exits.
+//! Cameras that draw to the primary window draw to an offscreen image of the same size instead,
+//! and the capture reads that image. A covered or unfocused window can present all-black frames,
+//! so this keeps captures independent of what is on screen. The app keeps updating at full rate
+//! while unfocused. The window must stay visible, since macOS stops driving the frame loop of a
+//! hidden window. Black captures are still discarded and retried a few times before the app gives
+//! up and exits.
 
+use bevy::camera::{ImageRenderTarget, RenderTarget};
 use bevy::prelude::*;
+use bevy::render::render_resource::TextureFormat;
 use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured, save_to_disk};
+use bevy::window::{PrimaryWindow, WindowRef};
+use bevy::winit::{UpdateMode, WinitSettings};
 
 pub struct ScreenshotOnEnvPlugin;
 
@@ -27,6 +35,7 @@ struct ScreenshotRequest {
     in_flight: bool,
     saved: bool,
     exit_after: u32,
+    target: Option<Handle<Image>>,
 }
 
 impl Plugin for ScreenshotOnEnvPlugin {
@@ -45,8 +54,52 @@ impl Plugin for ScreenshotOnEnvPlugin {
             in_flight: false,
             saved: false,
             exit_after: EXIT_DELAY_FRAMES,
+            target: None,
         })
-        .add_systems(Update, take_screenshot_then_exit);
+        .insert_resource(WinitSettings {
+            focused_mode: UpdateMode::Continuous,
+            unfocused_mode: UpdateMode::Continuous,
+        })
+        .add_systems(
+            Update,
+            (render_window_cameras_offscreen, take_screenshot_then_exit).chain(),
+        );
+    }
+}
+
+/// Points every camera that targets the primary window at one offscreen image of the window's size.
+fn render_window_cameras_offscreen(
+    mut request: ResMut<ScreenshotRequest>,
+    mut images: ResMut<Assets<Image>>,
+    windows: Query<(Entity, &Window), With<PrimaryWindow>>,
+    mut targets: Query<&mut RenderTarget, With<Camera>>,
+) {
+    let Ok((primary, window)) = windows.single() else {
+        return;
+    };
+    for mut target in &mut targets {
+        let RenderTarget::Window(window_ref) = &*target else {
+            continue;
+        };
+        let on_primary = match window_ref {
+            WindowRef::Primary => true,
+            WindowRef::Entity(e) => *e == primary,
+        };
+        if !on_primary {
+            continue;
+        }
+        let handle = request
+            .target
+            .get_or_insert_with(|| {
+                images.add(Image::new_target_texture(
+                    window.physical_width().max(1),
+                    window.physical_height().max(1),
+                    TextureFormat::Rgba8UnormSrgb,
+                    None,
+                ))
+            })
+            .clone();
+        *target = RenderTarget::Image(ImageRenderTarget::from(handle));
     }
 }
 
@@ -79,7 +132,11 @@ fn take_screenshot_then_exit(
     }
     request.in_flight = true;
     request.attempts += 1;
-    commands.spawn(Screenshot::primary_window()).observe(
+    let screenshot = match &request.target {
+        Some(image) => Screenshot::image(image.clone()),
+        None => Screenshot::primary_window(),
+    };
+    commands.spawn(screenshot).observe(
         |captured: On<ScreenshotCaptured>, mut request: ResMut<ScreenshotRequest>| {
             request.in_flight = false;
             let black = captured
