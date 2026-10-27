@@ -41,9 +41,10 @@ pub struct WaterSurfaceExtension {
     pub settings: WaterSurfaceUniform,
     #[uniform(101)]
     pub lod: WaterLodSlices,
-    #[texture(102, dimension = "2d_array", filterable = false)]
+    #[texture(102, dimension = "2d_array")]
+    #[sampler(105)]
     pub lod_displacement: Handle<Image>,
-    #[texture(103, dimension = "2d_array", filterable = false)]
+    #[texture(103, dimension = "2d_array")]
     pub lod_foam: Handle<Image>,
     /// Tile list that places a [`super::WaterQuadtree`] pool mesh.
     #[storage(104, read_only)]

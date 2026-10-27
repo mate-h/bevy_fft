@@ -1,5 +1,6 @@
 use bevy::{
     asset::RenderAssetUsages,
+    image::ImageSampler,
     prelude::*,
     render::{
         RenderApp,
@@ -72,7 +73,8 @@ pub struct WaterLodSlices {
 /// the same lanes as the FFT spatial output, already scaled, so contributions from several solvers
 /// add up linearly. `foam` stores foam coverage in its red channel and the depth of the water
 /// column in meters in its green channel. `flow` stores the water velocity at the surface in meters
-/// per second: X in red, Z in green, and vertical in blue.
+/// per second: X in red, Z in green, and vertical in blue. `displacement` and `foam` use
+/// [`WATER_LOD_SURFACE_FORMAT`] with a linear clamped sampler.
 #[derive(Resource, Clone, ExtractResource)]
 #[extract_app(RenderApp)]
 pub struct WaterLodData {
@@ -98,7 +100,11 @@ impl WaterLodData {
 #[derive(Component, Clone, Copy, Debug, Default, Reflect)]
 pub struct WaterViewer;
 
-fn lod_array_image(settings: &WaterLodSettings) -> Image {
+/// Format of the `displacement` and `foam` arrays of [`WaterLodData`]. Half floats keep the
+/// surface reads cheap and filterable on every backend. `flow` stays at full precision.
+pub const WATER_LOD_SURFACE_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+
+fn lod_array_image(settings: &WaterLodSettings, format: TextureFormat) -> Image {
     let mut image = Image::new_fill(
         Extent3d {
             width: settings.resolution,
@@ -106,10 +112,11 @@ fn lod_array_image(settings: &WaterLodSettings) -> Image {
             depth_or_array_layers: settings.clamped_count(),
         },
         TextureDimension::D2,
-        &[0; 16],
-        TextureFormat::Rgba32Float,
+        &vec![0; format.block_copy_size(None).unwrap_or(16) as usize],
+        format,
         RenderAssetUsages::default(),
     );
+    image.sampler = ImageSampler::linear();
     image.texture_descriptor.usage = TextureUsages::STORAGE_BINDING
         | TextureUsages::TEXTURE_BINDING
         | TextureUsages::COPY_DST
@@ -132,9 +139,9 @@ pub(super) fn create_water_lod_data(
         ..default()
     };
     commands.insert_resource(WaterLodData {
-        displacement: images.add(lod_array_image(&settings)),
-        foam: images.add(lod_array_image(&settings)),
-        flow: images.add(lod_array_image(&settings)),
+        displacement: images.add(lod_array_image(&settings, WATER_LOD_SURFACE_FORMAT)),
+        foam: images.add(lod_array_image(&settings, WATER_LOD_SURFACE_FORMAT)),
+        flow: images.add(lod_array_image(&settings, TextureFormat::Rgba32Float)),
         slices,
     });
 }

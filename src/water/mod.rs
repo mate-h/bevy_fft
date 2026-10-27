@@ -24,7 +24,8 @@ mod surface;
 
 pub use blend::WaterLodScratch;
 pub use lod_data::{
-    WATER_LOD_MAX_SLICES, WaterLodData, WaterLodGpu, WaterLodSettings, WaterLodSlices, WaterViewer,
+    WATER_LOD_MAX_SLICES, WATER_LOD_SURFACE_FORMAT, WaterLodData, WaterLodGpu, WaterLodSettings,
+    WaterLodSlices, WaterViewer,
 };
 pub use quadtree::{
     WaterQuadtree, WaterQuadtreeBuffer, WaterQuadtreeFallback, WaterQuadtreeStats,

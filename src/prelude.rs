@@ -34,8 +34,8 @@ pub use crate::shallow_water::{
     bed_source_image, round_particle_count,
 };
 pub use crate::water::{
-    WATER_LOD_MAX_SLICES, WaterLodData, WaterLodGraphSystems, WaterLodScratch, WaterLodSettings,
-    WaterLodSlices, WaterLodSystems, WaterPlugin, WaterQuadtree, WaterQuadtreeBuffer,
-    WaterQuadtreeStats, WaterQuadtreeTile, WaterSurfaceExtension, WaterSurfaceMaterial,
-    WaterSurfaceTag, WaterSurfaceUniform, WaterViewer,
+    WATER_LOD_MAX_SLICES, WATER_LOD_SURFACE_FORMAT, WaterLodData, WaterLodGraphSystems,
+    WaterLodScratch, WaterLodSettings, WaterLodSlices, WaterLodSystems, WaterPlugin, WaterQuadtree,
+    WaterQuadtreeBuffer, WaterQuadtreeStats, WaterQuadtreeTile, WaterSurfaceExtension,
+    WaterSurfaceMaterial, WaterSurfaceTag, WaterSurfaceUniform, WaterViewer,
 };

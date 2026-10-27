@@ -24,7 +24,7 @@ use crate::{
         OCEAN_MAX_CASCADES, OceanCascade, OceanFoamMask, OceanFoamPhase, OceanSimSettings,
         OceanSurfaceSettings,
     },
-    water::{WaterLodData, WaterLodGpu, WaterLodSlices},
+    water::{WATER_LOD_SURFACE_FORMAT, WaterLodData, WaterLodGpu, WaterLodSlices},
 };
 
 /// Uniform for `lod_write.wesl`.
@@ -131,17 +131,15 @@ impl FromWorld for OceanLodWritePipeline {
         let pipeline_cache = world.resource::<PipelineCache>();
         let asset_server = world.resource::<AssetServer>();
         let tex = || texture_2d(TextureSampleType::Float { filterable: false });
-        let out = || {
-            texture_storage_2d_array(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly)
-        };
+        let out = |format| texture_storage_2d_array(format, StorageTextureAccess::WriteOnly);
         let entries = BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
                 uniform_buffer::<OceanLodWriteParams>(false),
                 uniform_buffer::<WaterLodSlices>(false),
-                out(),
-                out(),
-                out(),
+                out(WATER_LOD_SURFACE_FORMAT),
+                out(WATER_LOD_SURFACE_FORMAT),
+                out(TextureFormat::Rgba32Float),
                 tex(),
                 tex(),
                 tex(),

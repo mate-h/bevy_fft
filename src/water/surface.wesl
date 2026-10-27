@@ -4,7 +4,7 @@ import bevy_pbr::render::mesh_functions::{
     mesh_position_local_to_world,
 };
 import bevy_pbr::render::view_transformations::position_world_to_clip;
-import bevy_fft::water::lod::{WaterLodSlices, lod_chop_dir, lod_coverage, sample_lod};
+import bevy_fft::water::lod::{WaterLodSlices, lod_chop_dir, lod_coverage, sample_lod_filtered};
 
 @if(PREPASS_PIPELINE)
 import bevy_pbr::prepass::io::{
@@ -67,6 +67,8 @@ struct WaterSurfaceUniform {
 @group(constants::MATERIAL_BIND_GROUP) @binding(101) var<uniform> water_lod: WaterLodSlices;
 @group(constants::MATERIAL_BIND_GROUP) @binding(102) var lod_displacement: texture_2d_array<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(103) var lod_foam: texture_2d_array<f32>;
+/// Linear, clamped to edge. Shared by both LOD arrays.
+@group(constants::MATERIAL_BIND_GROUP) @binding(105) var lod_sampler: sampler;
 
 struct WaterQuadtreeTile {
     /// Corner X and Z in meters, edge length in meters, level.
@@ -112,7 +114,7 @@ fn water_quadtree_xz(position_local: vec3<f32>) -> vec3<f32> {
 /// A = horizontal chop in meters along the chop direction. `bias` moves to coarser slices.
 /// Past the coarsest slice the water is flat.
 fn water_sample(xz: vec2<f32>, bias: f32) -> vec4<f32> {
-    return sample_lod(lod_displacement, water_lod, xz, bias) * lod_coverage(water_lod, xz);
+    return sample_lod_filtered(lod_displacement, lod_sampler, water_lod, xz, bias) * lod_coverage(water_lod, xz);
 }
 
 fn chop_dir() -> vec2<f32> {
@@ -133,6 +135,8 @@ struct DisplacedSurface {
     clip_position: vec4<f32>,
     world_position: vec4<f32>,
     world_normal: vec3<f32>,
+    /// World XZ before the chop moves the vertex. The LOD data is indexed by this position.
+    flat_xz: vec2<f32>,
 }
 
 /// Displaces the mesh in world space so any mesh layout, such as a plane or a clipmap, samples the same water.
@@ -147,6 +151,7 @@ fn water_displace_surface(instance_index: u32, position_local: vec3<f32>) -> Dis
             out.clip_position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
             out.world_position = vec4<f32>(0.0, 0.0, 0.0, 1.0);
             out.world_normal = vec3<f32>(0.0, 1.0, 0.0);
+            out.flat_xz = vec2<f32>(0.0);
             return out;
         }
         world = vec4<f32>(q.x, 0.0, q.y, 1.0);
@@ -154,6 +159,7 @@ fn water_displace_surface(instance_index: u32, position_local: vec3<f32>) -> Dis
         let world_from_local = get_world_from_local(instance_index);
         world = mesh_position_local_to_world(world_from_local, vec4<f32>(position_local, 1.0));
     }
+    out.flat_xz = world.xz;
     let s = water_sample(world.xz, surface.vertex_lod_bias);
     let w = chop_dir();
     world = vec4<f32>(world.x + s.a * w.x, world.y + s.b, world.z + s.a * w.y, 1.0);
@@ -175,7 +181,7 @@ const OPEN_WATER_DEPTH: f32 = 1000.0;
 /// Foam coverage in `.x` and water depth in meters in `.y` at undisplaced position `xz`, from one
 /// fetch of the foam texture.
 fn water_foam_and_depth(xz: vec2<f32>) -> vec2<f32> {
-    let f = sample_lod(lod_foam, water_lod, xz, 0.0);
+    let f = sample_lod_filtered(lod_foam, lod_sampler, water_lod, xz, 0.0);
     let c = lod_coverage(water_lod, xz);
     return vec2<f32>(f.r * c, mix(OPEN_WATER_DEPTH, f.g, c));
 }
@@ -217,7 +223,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     out.position = surf.clip_position;
     out.world_position = surf.world_position;
 @if(VERTEX_UVS_A)
-    out.uv = vertex.uv;
+    out.uv = surf.flat_xz;
 @if(VERTEX_UVS_B)
     out.uv_b = vertex.uv_b;
     out.world_normal = surf.world_normal;
@@ -238,7 +244,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     out.position = surf.clip_position;
     out.world_position = surf.world_position;
 @if(VERTEX_UVS_A)
-    out.uv = vertex.uv;
+    out.uv = surf.flat_xz;
 @if(VERTEX_UVS_B)
     out.uv_b = vertex.uv_b;
 @if(VERTEX_OUTPUT_INSTANCE_INDEX)
@@ -263,7 +269,7 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     out.world_position = surf.world_position;
     out.world_normal = surf.world_normal;
 @if(VERTEX_UVS_A)
-    out.uv = vertex.uv;
+    out.uv = surf.flat_xz;
 @if(VERTEX_UVS_B)
     out.uv_b = vertex.uv_b;
 @if(VERTEX_OUTPUT_INSTANCE_INDEX)
@@ -279,10 +285,22 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 }
 }
 
+/// Undisplaced XZ under this pixel. The vertex stage passes it through `uv` when the mesh has
+/// UVs. Otherwise one fixed-point step recovers it from the displaced position.
+@if(!PREPASS_PIPELINE || PREPASS_FRAGMENT)
+fn water_flat_xz(in: FragVertexOutput) -> vec2<f32> {
+    @if(VERTEX_UVS_A) {
+        return in.uv;
+    }
+    @if(!VERTEX_UVS_A) {
+        return water_undisplace(in.world_position.xz);
+    }
+}
+
 @if(!PREPASS_PIPELINE)
 @fragment
 fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
-    let xz = water_undisplace(in.world_position.xz);
+    let xz = water_flat_xz(in);
     let foam_depth = water_foam_and_depth(xz);
     if water_is_dry(foam_depth.y) {
         discard;
@@ -315,7 +333,7 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
 @if(PREPASS_PIPELINE && PREPASS_FRAGMENT)
 @fragment
 fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
-    let xz = water_undisplace(in.world_position.xz);
+    let xz = water_flat_xz(in);
     let foam_depth = water_foam_and_depth(xz);
     if water_is_dry(foam_depth.y) {
         discard;

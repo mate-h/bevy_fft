@@ -28,8 +28,8 @@ struct OceanLodWriteParams {
 
 @group(0) @binding(0) var<uniform> params: OceanLodWriteParams;
 @group(0) @binding(1) var<uniform> lod: WaterLodSlices;
-@group(0) @binding(2) var displacement_out: texture_storage_2d_array<rgba32float, write>;
-@group(0) @binding(3) var foam_out: texture_storage_2d_array<rgba32float, write>;
+@group(0) @binding(2) var displacement_out: texture_storage_2d_array<rgba16float, write>;
+@group(0) @binding(3) var foam_out: texture_storage_2d_array<rgba16float, write>;
 @group(0) @binding(4) var flow_out: texture_storage_2d_array<rgba32float, write>;
 @group(0) @binding(5) var displacement_0: texture_2d<f32>;
 @group(0) @binding(6) var displacement_1: texture_2d<f32>;

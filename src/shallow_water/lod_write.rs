@@ -12,7 +12,9 @@ use bevy::{
 };
 
 use super::ShallowWaterController;
-use crate::water::{WaterLodData, WaterLodGpu, WaterLodScratch, WaterLodSlices};
+use crate::water::{
+    WATER_LOD_SURFACE_FORMAT, WaterLodData, WaterLodGpu, WaterLodScratch, WaterLodSlices,
+};
 
 /// Uniform for `lod_write.wesl`.
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -41,14 +43,8 @@ impl FromWorld for ShallowWaterLodPipeline {
             (
                 uniform_buffer::<ShallowWaterLodParams>(false),
                 uniform_buffer::<WaterLodSlices>(false),
-                texture_storage_2d_array(
-                    TextureFormat::Rgba32Float,
-                    StorageTextureAccess::WriteOnly,
-                ),
-                texture_storage_2d_array(
-                    TextureFormat::Rgba32Float,
-                    StorageTextureAccess::WriteOnly,
-                ),
+                texture_storage_2d_array(WATER_LOD_SURFACE_FORMAT, StorageTextureAccess::WriteOnly),
+                texture_storage_2d_array(WATER_LOD_SURFACE_FORMAT, StorageTextureAccess::WriteOnly),
                 texture_storage_2d_array(
                     TextureFormat::Rgba32Float,
                     StorageTextureAccess::WriteOnly,
