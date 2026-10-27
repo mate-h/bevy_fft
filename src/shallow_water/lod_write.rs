@@ -3,6 +3,7 @@
 use bevy::{
     prelude::*,
     render::{
+        diagnostic::RecordDiagnostics,
         render_asset::RenderAssets,
         render_resource::{binding_types::*, *},
         renderer::{RenderContext, RenderDevice, RenderQueue},
@@ -166,15 +167,18 @@ pub(super) fn run_shallow_water_lod_write(
     let Some(compute) = cache.get_compute_pipeline(pipeline.pipeline) else {
         return;
     };
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let encoder = ctx.command_encoder();
-    if !scratch.copy_from_lod(encoder, &images, &lod) {
-        return;
+    let time_span = diagnostics.time_span(encoder, "shallow_water_lod_write");
+    if scratch.copy_from_lod(encoder, &images, &lod) {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("shallow_water_lod_write_pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(compute);
+        pass.set_bind_group(0, group, &[]);
+        pass.dispatch_workgroups(state.dispatch.x, state.dispatch.y, state.dispatch.z);
     }
-    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-        label: Some("shallow_water_lod_write_pass"),
-        timestamp_writes: None,
-    });
-    pass.set_pipeline(compute);
-    pass.set_bind_group(0, group, &[]);
-    pass.dispatch_workgroups(state.dispatch.x, state.dispatch.y, state.dispatch.z);
+    time_span.end(encoder);
 }

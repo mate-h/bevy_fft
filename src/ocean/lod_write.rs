@@ -9,6 +9,7 @@ use bevy::{
     prelude::*,
     render::{
         RenderApp,
+        diagnostic::RecordDiagnostics,
         extract_resource::ExtractResource,
         render_asset::RenderAssets,
         render_resource::{binding_types::*, *},
@@ -317,7 +318,10 @@ pub fn run_ocean_lod_write(
     let Some(group) = &state.group else {
         return;
     };
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let encoder = ctx.command_encoder();
+    let time_span = diagnostics.time_span(encoder, "ocean_lod_write");
     if let Some(compute) = cache.get_compute_pipeline(pipeline.pipeline) {
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("ocean_lod_write_pass"),
@@ -335,4 +339,5 @@ pub fn run_ocean_lod_write(
             previous.size,
         );
     }
+    time_span.end(encoder);
 }

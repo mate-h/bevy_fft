@@ -9,6 +9,7 @@
 use bevy::{
     prelude::*,
     render::{
+        diagnostic::RecordDiagnostics,
         render_asset::RenderAssets,
         render_resource::{binding_types::*, *},
         renderer::{RenderContext, RenderDevice, RenderQueue},
@@ -31,7 +32,7 @@ pub struct ShallowWaterForcingParams {
     pub amplitude: f32,
     pub choppiness: f32,
     pub cascade_count: u32,
-    pub _pad0: u32,
+    pub edge_cells: u32,
 }
 
 #[derive(Resource)]
@@ -126,7 +127,8 @@ pub(super) fn prepare_shallow_water_forcing(
         amplitude: frame.params.amplitude,
         choppiness: frame.params.choppiness,
         cascade_count: frame.params.cascade_count,
-        _pad0: 0,
+        // The solver reads the target only in the PML and the ocean band.
+        edge_cells: controller.pml_width + controller.ocean_band_cells.max(0.0).ceil() as u32 + 1,
     });
     state.params.write_buffer(&device, &queue);
     let Some(params) = state.params.binding() else {
@@ -164,13 +166,18 @@ pub fn run_shallow_water_forcing(
     let Some(compute) = cache.get_compute_pipeline(pipeline.pipeline) else {
         return;
     };
-    let mut pass = ctx
-        .command_encoder()
-        .begin_compute_pass(&ComputePassDescriptor {
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
+    let encoder = ctx.command_encoder();
+    let time_span = diagnostics.time_span(encoder, "shallow_water_forcing");
+    {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("shallow_water_forcing_pass"),
             timestamp_writes: None,
         });
-    pass.set_pipeline(compute);
-    pass.set_bind_group(0, group, &[]);
-    pass.dispatch_workgroups(state.dispatch.x, state.dispatch.y, 1);
+        pass.set_pipeline(compute);
+        pass.set_bind_group(0, group, &[]);
+        pass.dispatch_workgroups(state.dispatch.x, state.dispatch.y, 1);
+    }
+    time_span.end(encoder);
 }

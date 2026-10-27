@@ -13,6 +13,7 @@ use bevy::{
     reflect::Reflect,
     render::{
         RenderApp,
+        diagnostic::RecordDiagnostics,
         extract_component::{ComponentUniforms, ExtractComponent},
         render_asset::RenderAssets,
         render_resource::{
@@ -634,7 +635,10 @@ pub fn run_ocean_spectrum(
     };
 
     let wg = 8u32;
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let enc = ctx.command_encoder();
+    let time_span = diagnostics.time_span(enc, "ocean_spectrum");
 
     for (main_entity, fft_bg, ocean_bg, settings, h0_uni) in &query {
         let nx = settings.size.x.div_ceil(wg);
@@ -674,6 +678,7 @@ pub fn run_ocean_spectrum(
             pass.dispatch_workgroups(nx, ny, 1);
         }
     }
+    time_span.end(enc);
 }
 
 pub fn run_ocean_foam(
@@ -687,7 +692,10 @@ pub fn run_ocean_foam(
     };
 
     let wg = 8u32;
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let enc = ctx.command_encoder();
+    let time_span = diagnostics.time_span(enc, "ocean_foam");
 
     for (foam_bg, settings) in &query {
         let nx = settings.size.x.div_ceil(wg);
@@ -701,4 +709,5 @@ pub fn run_ocean_foam(
         pass.set_bind_group(0, &foam_bg.group, &[]);
         pass.dispatch_workgroups(nx, ny, 1);
     }
+    time_span.end(enc);
 }

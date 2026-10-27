@@ -153,7 +153,8 @@ pub struct ShallowWaterController {
     pub pml_eta_rest: f32,
     /// Target water height per cell (`R32Float`, `cells_x × cells_y`) for [`ShallowWaterBorder::Ocean`]
     /// edges and the PML, written each frame by [`OceanPlugin`](crate::ocean::OceanPlugin) when
-    /// [`Self::ocean_forcing`] is on.
+    /// [`Self::ocean_forcing`] is on. Only the edge strip covering the PML and the ocean band is
+    /// written.
     pub ocean_eta: Handle<Image>,
     /// Takes the target surface for ocean edges and the PML from the FFT ocean's long waves.
     /// Needs [`Self::placement`] and [`OceanPlugin`](crate::ocean::OceanPlugin).

@@ -9,6 +9,7 @@ use bevy::{
     prelude::*,
     render::{
         Render, RenderSystems,
+        diagnostic::RecordDiagnostics,
         render_asset::RenderAssets,
         render_resource::{
             binding_types::{storage_buffer, texture_2d, texture_storage_2d, uniform_buffer},
@@ -433,24 +434,18 @@ pub fn run_shallow_water_sim(
         return;
     };
 
-    macro_rules! require_pipe {
-        ($name:ident) => {
-            match pipe!($name) {
-                Some(p) => p,
-                None => return,
-            }
-        };
-    }
-
     let wg = SimWorkgroups::new(controller.cells_x, controller.cells_y);
     let pc = gpu_res.particle_count / 64;
 
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let enc = ctx.command_encoder();
+    let time_span = diagnostics.time_span(enc, "shallow_water");
 
     let apply_init =
         controller.sim_apply_serial != gpu_res.last_applied_serial.load(Ordering::Relaxed);
 
-    {
+    let encoded = (|| -> Option<()> {
         let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
             label: Some("shallow_water_pass"),
             timestamp_writes: None,
@@ -469,58 +464,63 @@ pub fn run_shallow_water_sim(
         pass.set_pipeline(p_interact);
         pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
         if !controller.paused {
-            pass.set_pipeline(require_pipe!(ocean_band));
+            pass.set_pipeline(pipe!(ocean_band)?);
             pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
 
-            pass.set_pipeline(require_pipe!(mac_u_copy));
+            pass.set_pipeline(pipe!(mac_u_copy)?);
             pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-            pass.set_pipeline(require_pipe!(mac_u_sl_forward));
+            pass.set_pipeline(pipe!(mac_u_sl_forward)?);
             pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-            pass.set_pipeline(require_pipe!(mac_u_sl_reverse));
+            pass.set_pipeline(pipe!(mac_u_sl_reverse)?);
             pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-            pass.set_pipeline(require_pipe!(mac_u_combine));
+            pass.set_pipeline(pipe!(mac_u_combine)?);
             pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
 
-            pass.set_pipeline(require_pipe!(mac_w_copy));
+            pass.set_pipeline(pipe!(mac_w_copy)?);
             pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-            pass.set_pipeline(require_pipe!(mac_w_sl_forward));
+            pass.set_pipeline(pipe!(mac_w_sl_forward)?);
             pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-            pass.set_pipeline(require_pipe!(mac_w_sl_reverse));
+            pass.set_pipeline(pipe!(mac_w_sl_reverse)?);
             pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-            pass.set_pipeline(require_pipe!(mac_w_combine));
+            pass.set_pipeline(pipe!(mac_w_combine)?);
             pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
 
-            pass.set_pipeline(require_pipe!(integrate_height));
+            pass.set_pipeline(pipe!(integrate_height)?);
             pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
-            pass.set_pipeline(require_pipe!(integrate_velocity_u));
+            pass.set_pipeline(pipe!(integrate_velocity_u)?);
             pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-            pass.set_pipeline(require_pipe!(integrate_velocity_w));
+            pass.set_pipeline(pipe!(integrate_velocity_w)?);
             pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-            pass.set_pipeline(require_pipe!(apply_domain_boundaries));
+            pass.set_pipeline(pipe!(apply_domain_boundaries)?);
             pass.dispatch_workgroups(wg.border.0, wg.border.1, 1);
-            pass.set_pipeline(require_pipe!(wet_dry_u));
+            pass.set_pipeline(pipe!(wet_dry_u)?);
             pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-            pass.set_pipeline(require_pipe!(wet_dry_w));
+            pass.set_pipeline(pipe!(wet_dry_w)?);
             pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-            pass.set_pipeline(require_pipe!(friction_u));
+            pass.set_pipeline(pipe!(friction_u)?);
             pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-            pass.set_pipeline(require_pipe!(friction_w));
+            pass.set_pipeline(pipe!(friction_w)?);
             pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-            pass.set_pipeline(require_pipe!(pml_step));
+            pass.set_pipeline(pipe!(pml_step)?);
             pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
-            pass.set_pipeline(require_pipe!(pml_damp_u));
+            pass.set_pipeline(pipe!(pml_damp_u)?);
             pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-            pass.set_pipeline(require_pipe!(pml_damp_w));
+            pass.set_pipeline(pipe!(pml_damp_w)?);
             pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-            pass.set_pipeline(require_pipe!(apply_domain_boundaries));
+            pass.set_pipeline(pipe!(apply_domain_boundaries)?);
             pass.dispatch_workgroups(wg.border.0, wg.border.1, 1);
-            pass.set_pipeline(require_pipe!(overshoot_reduce));
+            pass.set_pipeline(pipe!(overshoot_reduce)?);
             pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
-            pass.set_pipeline(require_pipe!(reconstruct_cell_velocity));
+            pass.set_pipeline(pipe!(reconstruct_cell_velocity)?);
             pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
-            pass.set_pipeline(require_pipe!(update_particles));
+            pass.set_pipeline(pipe!(update_particles)?);
             pass.dispatch_workgroups(pc, 1, 1);
         }
+        Some(())
+    })();
+    time_span.end(enc);
+    if encoded.is_none() {
+        return;
     }
 
     if apply_init {
