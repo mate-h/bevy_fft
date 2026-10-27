@@ -45,6 +45,15 @@ fn lod_level(lod: WaterLodSlices, xz: vec2<f32>, bias: f32) -> f32 {
     return clamp(level, 0.0, f32(max(lod.count, 1u) - 1u));
 }
 
+/// One where `xz` lies well inside the coarsest slice, falling to zero at its edge. Past that edge
+/// the slices hold no data and a clamped fetch would repeat the border texels outward, so readers
+/// fade toward a neutral value with this weight.
+fn lod_coverage(lod: WaterLodSlices, xz: vec2<f32>) -> f32 {
+    let s = lod.slices[max(lod.count, 1u) - 1u];
+    let d = max(abs(xz.x - s.x), abs(xz.y - s.y)) / (0.5 * s.w);
+    return 1.0 - smoothstep(0.75, 1.0, d);
+}
+
 /// Bilinear fetch from one array layer with clamp to edge. Uses `textureLoad`, so float32 arrays
 /// need no filterable sampler.
 fn bilinear_clamp_layer(tex: texture_2d_array<f32>, uv: vec2<f32>, layer: u32) -> vec4<f32> {

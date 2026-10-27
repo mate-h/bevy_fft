@@ -2,18 +2,20 @@
 //! topobathy.
 //!
 //! The ground is a 2 km square of 1 m LiDAR elevation and bathymetry, drawn by bevy_terrain. A
-//! 512 m shallow water grid sits over the beach and starts from the same heights, so the sea fills
-//! the measured bed and stops at the measured sand. The grid writes into the shared water LOD
-//! data, so the ocean clipmap shows the surf and the open sea with one material, and the grid fades
-//! into the ocean waves along its edges. Dry cells are left out of the water surface so the ground
-//! shows through. The buoys read the same data through `OceanQueries`, one offshore, one in the
-//! forcing band, and one in the surf.
+//! shallow water grid with 1 m cells covers the same square and starts from the same heights, so
+//! the sea fills the measured bed and the waterline follows the island's coast, bay, and river
+//! mouth. The grid writes into the shared water LOD data, so the ocean clipmap shows the surf and
+//! the open sea past the map with one material, and the grid fades into the ocean waves along its
+//! edges. Dry cells are left out of the water surface so the ground shows through. The buoys read
+//! the same data through `OceanQueries`, one offshore past the map, one in the forcing band, and
+//! one in the surf.
 //!
-//! The deep edge, on the north side, is an ocean border. The ocean's long waves are written over
-//! the grid each frame, and a band of cells along that edge blends the water height toward them,
-//! so swell enters the grid, shoals over the bar, and runs up the beach. A PML behind the band
-//! absorbs the backwash. The panel switches the deep edge to a wall or a drain for comparison. Drag
-//! with the left mouse button to add water.
+//! Every map edge is an ocean border. The ocean's long waves are written over the grid each frame,
+//! and a band of cells along each edge blends the water height toward them wherever the edge is
+//! under water, so swell enters from the open sea, shoals over the reef and bar, and runs up the
+//! beach. On land the band has nothing to do. A PML behind the band absorbs the backwash. The
+//! panel switches the edges to walls or drains for comparison. Drag with the left mouse button to
+//! add water.
 //!
 //! The terrain is baked from bevy_terrain's
 //! `source_data/kauai_lumahai_hanalei_shoreline_lidar_1m_2048x2048.tif` into a planar tile set.
@@ -79,22 +81,20 @@ const TERRAIN_SIDE: f32 = 2048.0;
 /// Finest LOD in the tile set.
 const TERRAIN_VIEW_LOD: u32 = 3;
 
-/// Shallow water cells per edge.
-const GRID: u32 = 512;
 /// Shallow water cell width in meters.
 const CELL_SIZE: f32 = 1.0;
-/// World `xz` of the grid centre. The grid covers the beach, with its north edge offshore.
-const GRID_CENTER: Vec2 = Vec2::new(-384.0, 304.0);
+/// Shallow water cells per edge. The grid covers the terrain square, centred on the origin.
+const GRID: u32 = (TERRAIN_SIDE / CELL_SIZE) as u32;
 /// Depth in meters of the solver's zero level below sea level. It sits under the deepest bed in
 /// the data, so solver heights stay positive, and the still sea is at this solver height.
 const SEA_LEVEL: f32 = 30.0;
 /// Mean water depth in meters off the beach, for the ocean's finite-depth dispersion.
 const OFFSHORE_DEPTH: f32 = 18.0;
 
-/// World `xz` of the demo buoys: offshore, in the forcing band, and in the surf.
+/// World `xz` of the demo buoys: offshore past the map, in the forcing band, and in the surf.
 const BUOY_POSITIONS: [Vec2; 3] = [
-    Vec2::new(-360.0, 640.0),
-    Vec2::new(-400.0, 545.0),
+    Vec2::new(-300.0, 1150.0),
+    Vec2::new(-300.0, 1010.0),
     Vec2::new(-420.0, 240.0),
 ];
 
@@ -113,6 +113,12 @@ fn main() {
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(GlobalAmbientLight::NONE)
         .insert_resource(TerrainSettings::default())
+        // Twelve slices reach 8 km from the camera, past the far corner of the map from the
+        // starting view.
+        .insert_resource(WaterLodSettings {
+            slice_count: 12,
+            ..default()
+        })
         .add_plugins((
             DefaultPlugins,
             FreeCameraPlugin,
@@ -199,7 +205,7 @@ fn setup(
 
     let mut controller = ShallowWaterController::new(&mut images, GRID, GRID);
     let placement = ShallowWaterPlacement {
-        center: GRID_CENTER,
+        center: Vec2::ZERO,
         cell_size: CELL_SIZE,
         datum: -SEA_LEVEL,
         blend_cells: 16.0,
@@ -220,6 +226,9 @@ fn setup(
     controller.fill_level = SEA_LEVEL;
     controller.pml_eta_rest = SEA_LEVEL;
     controller.pml_width = 8;
+    controller.left_border = ShallowWaterBorder::Ocean;
+    controller.right_border = ShallowWaterBorder::Ocean;
+    controller.bottom_border = ShallowWaterBorder::Ocean;
     controller.top_border = ShallowWaterBorder::Ocean;
     controller.ocean_forcing = true;
     controller.gravity = 9.81;
@@ -247,9 +256,13 @@ fn setup(
     let camera = commands
         .spawn((
             Camera3d::default(),
-            Transform::from_xyz(-300.0, 28.0, 400.0)
-                .looking_at(Vec3::new(-430.0, 0.0, 210.0), Vec3::Y),
-            FreeCamera::default(),
+            Transform::from_xyz(0.0, 1500.0, 2300.0)
+                .looking_at(Vec3::new(0.0, 0.0, -150.0), Vec3::Y),
+            FreeCamera {
+                walk_speed: 60.0,
+                run_speed: 400.0,
+                ..default()
+            },
             AtmosphereSettings::default(),
             Exposure { ev100: 12.0 },
             Tonemapping::AcesFitted,
@@ -279,8 +292,8 @@ fn setup(
         },
         Transform::from_xyz(-0.4, 0.35, 1.0).looking_at(Vec3::ZERO, Vec3::Y),
         CascadeShadowConfigBuilder {
-            first_cascade_far_bound: 40.0,
-            maximum_distance: 1500.0,
+            first_cascade_far_bound: 300.0,
+            maximum_distance: 6000.0,
             ..default()
         }
         .build(),
@@ -298,7 +311,11 @@ fn spawn_surface_when_ready(
         return;
     }
     commands.spawn((
-        OceanClipmap::default(),
+        // Thirteen levels reach 65 km, so the water meets the horizon from above the map.
+        OceanClipmap {
+            levels: 13,
+            ..default()
+        },
         MeshMaterial3d(materials.add(WaterSurfaceMaterial {
             base: StandardMaterial {
                 base_color: Color::srgb(0.04, 0.12, 0.22),
@@ -404,15 +421,21 @@ fn beach_panel(mut contexts: EguiContexts, mut controller: ResMut<ShallowWaterCo
         ui.add(egui::Slider::new(&mut controller.ocean_band_cells, 0.0..=16.0).text("Ocean band"));
         ui.add(egui::Slider::new(&mut controller.friction, 0.0..=0.5).text("Friction"));
         ui.horizontal(|ui| {
-            ui.label("Deep edge");
-            let border = &mut controller.top_border;
-            egui::ComboBox::from_id_salt("deep_edge")
+            ui.label("Map edges");
+            let mut border = controller.top_border;
+            egui::ComboBox::from_id_salt("map_edges")
                 .selected_text(format!("{border:?}"))
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(border, ShallowWaterBorder::Ocean, "Ocean");
-                    ui.selectable_value(border, ShallowWaterBorder::Wall, "Wall");
-                    ui.selectable_value(border, ShallowWaterBorder::Drain, "Drain");
+                    ui.selectable_value(&mut border, ShallowWaterBorder::Ocean, "Ocean");
+                    ui.selectable_value(&mut border, ShallowWaterBorder::Wall, "Wall");
+                    ui.selectable_value(&mut border, ShallowWaterBorder::Drain, "Drain");
                 });
+            if border != controller.top_border {
+                controller.left_border = border;
+                controller.right_border = border;
+                controller.bottom_border = border;
+                controller.top_border = border;
+            }
         });
         ui.add(egui::Slider::new(&mut controller.brush_radius, 2.0..=24.0).text("Brush radius"));
     });

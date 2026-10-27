@@ -4,7 +4,7 @@ import bevy_pbr::render::mesh_functions::{
     mesh_position_local_to_world,
 };
 import bevy_pbr::render::view_transformations::position_world_to_clip;
-import bevy_fft::water::lod::{WaterLodSlices, lod_chop_dir, sample_lod};
+import bevy_fft::water::lod::{WaterLodSlices, lod_chop_dir, lod_coverage, sample_lod};
 
 @if(PREPASS_PIPELINE)
 import bevy_pbr::prepass::io::{
@@ -110,8 +110,9 @@ fn water_quadtree_xz(position_local: vec3<f32>) -> vec3<f32> {
 
 /// Water LOD data at world `xz`: R/G = height slopes along X and Z, B = elevation in meters,
 /// A = horizontal chop in meters along the chop direction. `bias` moves to coarser slices.
+/// Past the coarsest slice the water is flat.
 fn water_sample(xz: vec2<f32>, bias: f32) -> vec4<f32> {
-    return sample_lod(lod_displacement, water_lod, xz, bias);
+    return sample_lod(lod_displacement, water_lod, xz, bias) * lod_coverage(water_lod, xz);
 }
 
 fn chop_dir() -> vec2<f32> {
@@ -163,34 +164,36 @@ fn water_displace_surface(instance_index: u32, position_local: vec3<f32>) -> Dis
     return out;
 }
 
-/// Per-pixel normal from the LOD data at the undisplaced position under this pixel.
-fn water_pixel_normal(world_position: vec3<f32>) -> vec3<f32> {
-    return water_normal_from_slopes(water_sample(water_undisplace(world_position.xz), 0.0));
+/// Per-pixel normal from the LOD data at undisplaced position `xz`.
+fn water_pixel_normal(xz: vec2<f32>) -> vec3<f32> {
+    return water_normal_from_slopes(water_sample(xz, 0.0));
 }
 
-fn water_foam_coverage(world_position: vec3<f32>) -> f32 {
-    return sample_lod(lod_foam, water_lod, water_undisplace(world_position.xz), 0.0).r;
+/// Depth reported past the coarsest slice, deep enough that no bed shows through.
+const OPEN_WATER_DEPTH: f32 = 1000.0;
+
+/// Foam coverage in `.x` and water depth in meters in `.y` at undisplaced position `xz`, from one
+/// fetch of the foam texture.
+fn water_foam_and_depth(xz: vec2<f32>) -> vec2<f32> {
+    let f = sample_lod(lod_foam, water_lod, xz, 0.0);
+    let c = lod_coverage(water_lod, xz);
+    return vec2<f32>(f.r * c, mix(OPEN_WATER_DEPTH, f.g, c));
 }
 
-fn water_mix_foam_into_base_color(world_position: vec3<f32>, base_color: vec4<f32>) -> vec4<f32> {
-    let foam_mix = saturate(water_foam_coverage(world_position) * surface.foam_intensity);
+fn water_mix_foam_into_base_color(foam: f32, base_color: vec4<f32>) -> vec4<f32> {
+    let foam_mix = saturate(foam * surface.foam_intensity);
     return vec4<f32>(mix(base_color.rgb, vec3<f32>(1.0), foam_mix), base_color.a);
 }
 
-/// Water depth in meters from the depth lane.
-fn water_depth(world_position: vec3<f32>) -> f32 {
-    return sample_lod(lod_foam, water_lod, world_position.xz, 0.0).g;
-}
-
 /// True where `dry_depth` is set and the water is shallower, so the terrain below is drawn instead.
-fn water_is_dry(world_position: vec3<f32>) -> bool {
-    return surface.dry_depth > 0.0 && water_depth(world_position) < surface.dry_depth;
+fn water_is_dry(depth: f32) -> bool {
+    return surface.dry_depth > 0.0 && depth < surface.dry_depth;
 }
 
-/// Share of the bed showing through at this pixel, from the water depth lane. One on dry ground,
-/// fading out over the first few decimeters of water.
-fn water_bed_visibility(world_position: vec3<f32>) -> f32 {
-    return exp(-max(water_depth(world_position), 0.0) * 6.0);
+/// Share of the bed showing through at water depth `depth`. One on dry ground, fading out over the
+/// first few decimeters of water.
+fn water_bed_visibility(depth: f32) -> f32 {
+    return exp(-max(depth, 0.0) * 6.0);
 }
 
 /// Sand tint for shallow and dry areas with bed visibility `bed`. Regions without a shallow water
@@ -279,7 +282,9 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 @if(!PREPASS_PIPELINE)
 @fragment
 fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
-    if water_is_dry(in.world_position.xyz) {
+    let xz = water_undisplace(in.world_position.xz);
+    let foam_depth = water_foam_and_depth(xz);
+    if water_is_dry(foam_depth.y) {
         discard;
     }
     var pbr_input = pbr_input_from_standard_material(in, is_front);
@@ -290,11 +295,11 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     );
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
-    let n_world = water_pixel_normal(in.world_position.xyz);
+    let n_world = water_pixel_normal(xz);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
-    pbr_input.material.base_color = water_mix_foam_into_base_color(in.world_position.xyz, pbr_input.material.base_color);
-    let bed = water_bed_visibility(in.world_position.xyz);
+    pbr_input.material.base_color = water_mix_foam_into_base_color(foam_depth.x, pbr_input.material.base_color);
+    let bed = water_bed_visibility(foam_depth.y);
     pbr_input.material.base_color = water_mix_bed_into_base_color(bed, pbr_input.material.base_color);
     pbr_input.material.perceptual_roughness = mix(pbr_input.material.perceptual_roughness, 0.9, bed);
     var out: FragmentOutput;
@@ -310,7 +315,9 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
 @if(PREPASS_PIPELINE && PREPASS_FRAGMENT)
 @fragment
 fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
-    if water_is_dry(in.world_position.xyz) {
+    let xz = water_undisplace(in.world_position.xz);
+    let foam_depth = water_foam_and_depth(xz);
+    if water_is_dry(foam_depth.y) {
         discard;
     }
 @if(!NORMAL_PREPASS_OR_DEFERRED_PREPASS) {
@@ -327,11 +334,11 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     );
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
-    let n_world = water_pixel_normal(in.world_position.xyz);
+    let n_world = water_pixel_normal(xz);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
-    pbr_input.material.base_color = water_mix_foam_into_base_color(in.world_position.xyz, pbr_input.material.base_color);
-    let bed = water_bed_visibility(in.world_position.xyz);
+    pbr_input.material.base_color = water_mix_foam_into_base_color(foam_depth.x, pbr_input.material.base_color);
+    let bed = water_bed_visibility(foam_depth.y);
     pbr_input.material.base_color = water_mix_bed_into_base_color(bed, pbr_input.material.base_color);
     pbr_input.material.perceptual_roughness = mix(pbr_input.material.perceptual_roughness, 0.9, bed);
     return deferred_output(in, pbr_input);
