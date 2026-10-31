@@ -2,7 +2,7 @@
 import bevy_terrain::shaders::bindings::{terrain_data};
 @if(TERRAIN_SHADOW) import bevy_terrain::shaders::bindings::{shadow_map, shadow_map_sampler, terrain_shadow};
 @if(TERRAIN_SHADOW) import bevy_terrain::shaders::terrain_shadow::terrain_shadow_factor_at;
-import bevy_terrain::shaders::attachments::{sample_height_mask, sample_surface_gradient};
+import bevy_terrain::shaders::attachments::sample_surface_gradient;
 import bevy_terrain::shaders::render::fragment::{FragmentInput, FragmentOutput, fragment_info};
 import bevy_terrain::shaders::functions::{lookup_tile, apply_height};
 import bevy_pbr::render::pbr_types::{pbr_input_new, STANDARD_MATERIAL_FLAGS_UNLIT_BIT};
@@ -150,7 +150,8 @@ fn class_color(id: u32) -> vec3<f32> {
 fn fragment(input: FragmentInput) -> FragmentOutput {
     let info = fragment_info(input);
     let tile = lookup_tile(info.coordinate, info.blend);
-    if sample_height_mask(tile) { discard; }
+    // The Kauai tiles carry no height mask. Without a discard, Apple GPUs keep hidden surface
+    // removal and shade each covered pixel once.
     let world = apply_height(info.world_coordinate, info.height);
     let gradient = sample_surface_gradient(tile, info.tangent_space);
     let normal = normalize(info.world_coordinate.normal - gradient);
