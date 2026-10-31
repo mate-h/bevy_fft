@@ -21,6 +21,7 @@ mod blend;
 mod lod_data;
 mod quadtree;
 mod quadtree_gpu;
+mod scene_depth;
 mod surface;
 
 pub use blend::WaterLodScratch;
@@ -32,9 +33,10 @@ pub use quadtree::{
     WaterQuadtree, WaterQuadtreeBuffer, WaterQuadtreeFallback, WaterQuadtreeStats,
     WaterQuadtreeTile,
 };
+pub use scene_depth::WaterTransmission;
 pub use surface::{
-    WATER_SURFACE_SHADER, WaterSurfaceExtension, WaterSurfaceMaterial, WaterSurfaceTag,
-    WaterSurfaceUniform,
+    WATER_SURFACE_SHADER, WaterOpticsUniform, WaterSurfaceExtension, WaterSurfaceMaterial,
+    WaterSurfaceTag, WaterSurfaceUniform,
 };
 
 use bevy::{
@@ -69,12 +71,15 @@ pub struct WaterPlugin;
 
 impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
+        scene_depth::configure(app);
         bevy::shader::load_shader_library!(app, "lod.wesl");
+        bevy::shader::load_shader_library!(app, "optics.wesl");
         embedded_asset!(app, "surface.wesl");
         embedded_asset!(app, "quadtree.wesl");
         app.register_type::<WaterLodSettings>()
             .register_type::<WaterViewer>()
             .register_type::<WaterSurfaceUniform>()
+            .register_type::<WaterOpticsUniform>()
             .register_type::<WaterQuadtree>()
             .register_type::<WaterQuadtreeStats>()
             .init_resource::<WaterLodSettings>()

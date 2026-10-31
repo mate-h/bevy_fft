@@ -339,6 +339,7 @@ fn setup(
             DepthPrepass,
             DeferredPrepass,
             ScreenSpaceReflections::default(),
+            WaterTransmission,
         ))
         .id();
     let ground_material = ground::load_ground(&mut commands, &asset_server, &mut buffers);
@@ -387,21 +388,36 @@ fn spawn_surface_when_ready(
         },
         MeshMaterial3d(materials.add(WaterSurfaceMaterial {
             base: StandardMaterial {
-                base_color: Color::srgb(0.04, 0.12, 0.22),
+                base_color: Color::WHITE,
+                specular_transmission: 1.0,
+                ior: 1.333,
+                reflectance: 0.356,
                 perceptual_roughness: 0.08,
                 metallic: 0.0,
-                opaque_render_method: OpaqueRendererMethod::Auto,
+                opaque_render_method: OpaqueRendererMethod::Forward,
                 ..default()
             },
             extension: WaterSurfaceExtension {
+                optics: WaterOpticsUniform {
+                    enabled: 1,
+                    debug_view: match std::env::var("BEVY_FFT_WATER_VIEW").as_deref() {
+                        Ok("depth") => 1,
+                        Ok("transmission") => 2,
+                        Ok("coverage") => 3,
+                        Ok("refraction") => 4,
+                        _ => 0,
+                    },
+                    ..default()
+                },
                 settings: WaterSurfaceUniform {
-                    dry_depth: 0.03,
+                    dry_depth: 0.0,
                     ..WaterSurfaceExtension::default().settings
                 },
                 ..default()
             },
         })),
         WaterSurfaceTag,
+        bevy::light::NotShadowCaster,
     ));
 }
 
@@ -477,6 +493,7 @@ fn beach_panel(
     mut contexts: EguiContexts,
     mut controller: ResMut<ShallowWaterController>,
     mut ground_materials: ResMut<Assets<KauaiGroundMaterial>>,
+    mut water_materials: ResMut<Assets<WaterSurfaceMaterial>>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -503,6 +520,44 @@ fn beach_panel(
             }
         }
 
+        let water_view = water_materials
+            .iter()
+            .next()
+            .map(|(id, mat)| (id, mat.extension.optics));
+        if let Some((id, mut optics)) = water_view {
+            let old_view = optics.debug_view;
+            let old_refraction = optics.refraction_strength;
+            egui::ComboBox::from_label("Water view")
+                .selected_text(
+                    [
+                        "Shaded",
+                        "Optical distance",
+                        "Transmission",
+                        "Coverage",
+                        "Refraction hits",
+                    ][optics.debug_view.min(4) as usize],
+                )
+                .show_ui(ui, |ui| {
+                    for (i, label) in [
+                        "Shaded",
+                        "Optical distance",
+                        "Transmission",
+                        "Coverage",
+                        "Refraction hits",
+                    ]
+                    .iter()
+                    .enumerate()
+                    {
+                        ui.selectable_value(&mut optics.debug_view, i as u32, *label);
+                    }
+                });
+            ui.add(
+                egui::Slider::new(&mut optics.refraction_strength, 0.0..=1.0).text("Refraction"),
+            );
+            if old_view != optics.debug_view || old_refraction != optics.refraction_strength {
+                water_materials.get_mut(id).unwrap().extension.optics = optics;
+            }
+        }
         if ui.button("Reset").clicked() {
             controller.sim_apply_serial = controller.sim_apply_serial.wrapping_add(1);
         }

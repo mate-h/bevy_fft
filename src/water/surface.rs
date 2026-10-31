@@ -22,9 +22,47 @@ pub struct WaterSurfaceUniform {
     /// the data. Pixels sample at the natural level.
     pub vertex_lod_bias: f32,
     /// Water depth in meters below which pixels are discarded, so a terrain under a shallow water
-    /// grid shows through on dry ground. Zero draws every pixel and tints dry ground as sand.
+    /// grid shows through on dry ground. Zero disables this solver-depth cutoff.
     pub dry_depth: f32,
     pub _pad1: f32,
+}
+
+/// Optical settings for a transmissive water material. Distances are in meters.
+/// Add [`super::WaterTransmission`] to the viewer and use a forward `StandardMaterial`
+/// with positive `specular_transmission` and a water IOR near 1.333.
+#[derive(Clone, Copy, ShaderType, Reflect)]
+pub struct WaterOpticsUniform {
+    /// RGB extinction coefficients in inverse meters.
+    pub extinction: Vec3,
+    /// Weight of validated screen-space refraction, from 0 to 1.
+    pub refraction_strength: f32,
+    /// Linear diffuse tint approximating light scattered inside the water.
+    pub scattering: Vec3,
+    /// Minimum contact transition along the viewing ray, in meters.
+    pub contact_fade: f32,
+    /// Maximum distance traced through the opaque scene, in meters.
+    pub max_distance: f32,
+    /// Screen-space reflection weight. Environment lighting covers missing hits.
+    pub ssr_strength: f32,
+    /// Zero shades water. One shows distance, two transmittance, three coverage, four refraction hits.
+    pub debug_view: u32,
+    /// Nonzero composites water over the captured opaque scene.
+    pub enabled: u32,
+}
+
+impl Default for WaterOpticsUniform {
+    fn default() -> Self {
+        Self {
+            extinction: Vec3::new(0.35, 0.10, 0.045),
+            refraction_strength: 0.8,
+            scattering: Vec3::new(0.008, 0.035, 0.065),
+            contact_fade: 0.02,
+            max_distance: 128.0,
+            ssr_strength: 1.0,
+            debug_view: 0,
+            enabled: 0,
+        }
+    }
 }
 
 /// Water surface that reads the shared [`WaterLodData`]. Bindings start at 100 so they stack with
@@ -49,6 +87,11 @@ pub struct WaterSurfaceExtension {
     /// Tile list that places a [`super::WaterQuadtree`] pool mesh.
     #[storage(104, read_only)]
     pub quadtree: Handle<ShaderBuffer>,
+    /// Opaque-only depth belonging to the water viewer. The plugin keeps it current.
+    #[texture(106, sample_type = "depth")]
+    pub opaque_depth: Option<Handle<Image>>,
+    #[uniform(107)]
+    pub optics: WaterOpticsUniform,
 }
 
 impl Default for WaterSurfaceExtension {
@@ -64,6 +107,8 @@ impl Default for WaterSurfaceExtension {
             lod_displacement: Handle::default(),
             lod_foam: Handle::default(),
             quadtree: Handle::default(),
+            opaque_depth: None,
+            optics: default(),
         }
     }
 }
@@ -106,6 +151,7 @@ pub struct WaterSurfaceTag;
 pub(super) fn sync_water_surface_lod(
     lod: Option<Res<WaterLodData>>,
     fallback: Option<Res<WaterQuadtreeFallback>>,
+    scene_depth: Option<Res<super::scene_depth::WaterSceneDepth>>,
     surface: Query<
         (
             &MeshMaterial3d<WaterSurfaceMaterial>,
@@ -125,6 +171,11 @@ pub(super) fn sync_water_surface_lod(
                 mat.extension.quadtree = tiles.clone();
             }
             mat.extension.lod = lod.slices;
+            if let Some(scene_depth) = &scene_depth
+                && mat.extension.opaque_depth.as_ref() != Some(&scene_depth.image)
+            {
+                mat.extension.opaque_depth = Some(scene_depth.image.clone());
+            }
             if mat.extension.lod_displacement != lod.displacement {
                 mat.extension.lod_displacement = lod.displacement.clone();
             }

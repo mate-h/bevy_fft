@@ -24,6 +24,8 @@ The [dispersive](src/dispersive/mod.rs) module combines bulk shallow water with 
 
 For a surface that follows the camera, `WaterQuadtree` selects and morphs tiles on the GPU and submits only selected tiles through indirect draws. It shares the material, depth, deferred, and shadow passes with other meshes. The `ocean` example switches between it and `OceanClipmap`, shows selected vertex counts and frame time, and includes a CPU selection toggle. Set `BEVY_FFT_OCEAN_MESH=quadtree` or `cpu_quadtree` to choose a quadtree at startup. Backends or cameras without indirect drawing retain the fixed tile pool and collapse unused vertices outside the clip volume. See [the quadtree implementation](src/water/quadtree.rs).
 
+The beach uses [terrain-aware water transmission](docs/water_rendering.md). It preserves the actual ground color through shallow water, measures optical thickness from opaque scene depth, and combines attenuation, refraction, and reflection. The Beach panel includes optical-distance, transmission, and coverage views.
+
 ### FFT and k-space indexing
 
 The stock FFT places DC at index `(0,0)` on each axis, with the usual positive-then-wrapped-negative frequency order. If you add a per-texel multiply in frequency space, map each `(i, j)` to `(k_x, k_y)` with that same layout. A centered `2π (i - N/2) / L` style grid only matches the buffers if the spectrum is explicitly shifted, which the ocean path does when writing to buffer C. The eWave shader entry `ewave_k_step` in [`assets/ewave/ewave.wgsl`](assets/ewave/ewave.wgsl) and dispersive `k_xy` in [`assets/dispersive/dispersive.wgsl`](assets/dispersive/dispersive.wgsl) follow the FFT-aligned convention. Misaligned `k` has caused grid lattices in both paths before.

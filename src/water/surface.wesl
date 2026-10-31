@@ -56,6 +56,9 @@ import bevy_pbr::deferred::functions::deferred_output;
 @if(PREPASS_PIPELINE && PREPASS_FRAGMENT && NORMAL_PREPASS_OR_DEFERRED_PREPASS)
 import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT;
 
+@if(!PREPASS_PIPELINE && VIEW_TRANSMISSION_TEXTURE)
+import bevy_fft::water::optics::{optics, shade_water};
+
 struct WaterSurfaceUniform {
     foam_intensity: f32,
     vertex_lod_bias: f32,
@@ -207,19 +210,6 @@ fn water_is_dry(depth: f32) -> bool {
     return surface.dry_depth > 0.0 && depth < surface.dry_depth;
 }
 
-/// Share of the bed showing through at water depth `depth`. One on dry ground, fading out over the
-/// first few decimeters of water.
-fn water_bed_visibility(depth: f32) -> f32 {
-    return exp(-max(depth, 0.0) * 6.0);
-}
-
-/// Sand tint for shallow and dry areas with bed visibility `bed`. Regions without a shallow water
-/// solver carry the open water depth, so `bed` is zero there and the color is unchanged.
-fn water_mix_bed_into_base_color(bed: f32, base_color: vec4<f32>) -> vec4<f32> {
-    let sand = vec3<f32>(0.52, 0.46, 0.32);
-    return vec4<f32>(mix(base_color.rgb, sand, bed), base_color.a);
-}
-
 // `PREPASS_PIPELINE` is only set for actual prepass draw pipelines. The main mesh pipeline can still
 // define `DEFERRED_PREPASS` (for example when sampling prepass normals) without
 // `NORMAL_PREPASS_OR_DEFERRED_PREPASS`, in which case `prepass_io::VertexOutput` has no `world_normal`.
@@ -332,10 +322,14 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = water_mix_foam_into_base_color(foam_depth.x, pbr_input.material.base_color);
-    let bed = water_bed_visibility(foam_depth.y);
-    pbr_input.material.base_color = water_mix_bed_into_base_color(bed, pbr_input.material.base_color);
-    pbr_input.material.perceptual_roughness = mix(pbr_input.material.perceptual_roughness, 0.9, bed);
     var out: FragmentOutput;
+@if(VIEW_TRANSMISSION_TEXTURE) {
+    if optics.enabled != 0u {
+        out.color = shade_water(pbr_input, foam_depth.y, clamp(foam_depth.x * surface.foam_intensity, 0.0, 1.0));
+        out.color = main_pass_post_lighting_processing(pbr_input, out.color);
+        return out;
+    }
+}
     if (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_UNLIT_BIT) == 0u {
         out.color = apply_pbr_lighting(pbr_input);
     } else {
@@ -371,9 +365,6 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = water_mix_foam_into_base_color(foam_depth.x, pbr_input.material.base_color);
-    let bed = water_bed_visibility(foam_depth.y);
-    pbr_input.material.base_color = water_mix_bed_into_base_color(bed, pbr_input.material.base_color);
-    pbr_input.material.perceptual_roughness = mix(pbr_input.material.perceptual_roughness, 0.9, bed);
     return deferred_output(in, pbr_input);
 }
 }
