@@ -141,7 +141,8 @@ struct DisplacedSurface {
 
 /// Displaces the mesh in world space so any mesh layout, such as a plane or a clipmap, samples the same water.
 /// Vertices read slightly coarser data than pixels so the mesh never undersamples it.
-fn water_displace_surface(instance_index: u32, position_local: vec3<f32>) -> DisplacedSurface {
+/// `spacing` is the vertex's world grid size in meters, or zero when the mesh has no such grid.
+fn water_displace_surface(instance_index: u32, position_local: vec3<f32>, spacing: f32) -> DisplacedSurface {
     var out: DisplacedSurface;
     var world: vec4<f32>;
     if quadtree.enabled != 0u {
@@ -158,6 +159,16 @@ fn water_displace_surface(instance_index: u32, position_local: vec3<f32>) -> Dis
     } else {
         let world_from_local = get_world_from_local(instance_index);
         world = mesh_position_local_to_world(world_from_local, vec4<f32>(position_local, 1.0));
+        // Shift the whole ring onto its own lattice. The mesh origin steps more finely than the
+        // outer rings. Every vertex of a ring carries the same spacing and moves together.
+        // The skirt between rings uses both spacings, so it stretches across the gutter.
+        if spacing > 0.0 {
+            let origin = mesh_position_local_to_world(world_from_local, vec4<f32>(0.0, 0.0, 0.0, 1.0)).xz;
+            let parked = round(origin / spacing) * spacing;
+            let delta = parked - origin;
+            world.x = world.x + delta.x;
+            world.z = world.z + delta.y;
+        }
     }
     out.flat_xz = world.xz;
     let s = water_sample(world.xz, surface.vertex_lod_bias);
@@ -216,7 +227,11 @@ fn water_mix_bed_into_base_color(bed: f32, base_color: vec4<f32>) -> vec4<f32> {
 
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
-    let surf = water_displace_surface(vertex.instance_index, vertex.position);
+    var spacing = 0.0;
+    @if(VERTEX_UVS_B) {
+        spacing = vertex.uv_b.x;
+    }
+    let surf = water_displace_surface(vertex.instance_index, vertex.position, spacing);
 
 @if(PREPASS_PIPELINE && NORMAL_PREPASS_OR_DEFERRED_PREPASS) {
     var out: VertexOutput;

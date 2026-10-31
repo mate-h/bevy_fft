@@ -4,7 +4,10 @@
 //! [`ShallowWaterPlacement`](crate::shallow_water::ShallowWaterPlacement), this pass fills
 //! [`ShallowWaterController::ocean_eta`] each frame before the solver steps. The solver's
 //! [`ShallowWaterBorder::Ocean`](crate::shallow_water::ShallowWaterBorder::Ocean) band and its PML
-//! blend toward that height, so ocean waves enter the grid and leave it without reflecting.
+//! blend toward that height, so ocean waves enter the grid and leave it without reflecting. On a
+//! reset the same pass writes every cell, and the solver seeds the wet interior from it.
+
+use std::sync::atomic::Ordering;
 
 use bevy::{
     prelude::*,
@@ -18,7 +21,10 @@ use bevy::{
 };
 
 use super::{OCEAN_MAX_CASCADES, lod_write::OceanLodWriteFrame};
-use crate::{shallow_water::ShallowWaterController, water::WaterLodData};
+use crate::{
+    shallow_water::{ShallowWaterController, ShallowWaterGpuResources},
+    water::WaterLodData,
+};
 
 /// Uniform for `shallow_water_forcing.wesl`.
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -33,6 +39,10 @@ pub struct ShallowWaterForcingParams {
     pub choppiness: f32,
     pub cascade_count: u32,
     pub edge_cells: u32,
+    pub full_grid: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
 }
 
 #[derive(Resource)]
@@ -77,6 +87,8 @@ pub struct ShallowWaterForcingBindGroup {
     group: Option<BindGroup>,
     params: UniformBuffer<ShallowWaterForcingParams>,
     dispatch: UVec2,
+    /// This frame's dispatch writes a target for every cell, for the shallow-water seed.
+    full_grid: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -88,10 +100,12 @@ pub(super) fn prepare_shallow_water_forcing(
     frame: Res<OceanLodWriteFrame>,
     controller: Option<Res<ShallowWaterController>>,
     lod: Option<Res<WaterLodData>>,
+    gpu: Option<Res<ShallowWaterGpuResources>>,
     images: Res<RenderAssets<GpuImage>>,
     mut state: ResMut<ShallowWaterForcingBindGroup>,
 ) {
     state.group = None;
+    state.full_grid = false;
     let Some(controller) = controller else {
         return;
     };
@@ -117,6 +131,10 @@ pub(super) fn prepare_shallow_water_forcing(
     };
 
     let chop = lod.map_or(0.0, |l| l.slices.chop_direction);
+    let seeding = gpu.is_some_and(|gpu| {
+        controller.sim_apply_serial != gpu.last_applied_serial.load(Ordering::Relaxed)
+    });
+    state.full_grid = seeding;
     state.params.set(ShallowWaterForcingParams {
         cascade_tile_sizes: frame.params.cascade_tile_sizes,
         grid_center: placement.center,
@@ -127,8 +145,13 @@ pub(super) fn prepare_shallow_water_forcing(
         amplitude: frame.params.amplitude,
         choppiness: frame.params.choppiness,
         cascade_count: frame.params.cascade_count,
-        // The solver reads the target only in the PML and the ocean band.
+        // The solver reads the target in the PML and the ocean band. A reset also fills the
+        // interior, which the seed dispatch copies into the wet cells.
         edge_cells: controller.pml_width + controller.ocean_band_cells.max(0.0).ceil() as u32 + 1,
+        full_grid: u32::from(seeding),
+        _pad0: 0,
+        _pad1: 0,
+        _pad2: 0,
     });
     state.params.write_buffer(&device, &queue);
     let Some(params) = state.params.binding() else {
@@ -159,7 +182,11 @@ pub fn run_shallow_water_forcing(
     pipeline: Res<ShallowWaterForcingPipeline>,
     cache: Res<PipelineCache>,
     state: Res<ShallowWaterForcingBindGroup>,
+    gpu: Option<Res<ShallowWaterGpuResources>>,
 ) {
+    if let Some(gpu) = gpu.as_ref() {
+        gpu.ocean_seed_written.store(false, Ordering::Relaxed);
+    }
     let Some(group) = &state.group else {
         return;
     };
@@ -178,6 +205,11 @@ pub fn run_shallow_water_forcing(
         pass.set_pipeline(compute);
         pass.set_bind_group(0, group, &[]);
         pass.dispatch_workgroups(state.dispatch.x, state.dispatch.y, 1);
+    }
+    if state.full_grid
+        && let Some(gpu) = gpu.as_ref()
+    {
+        gpu.ocean_seed_written.store(true, Ordering::Relaxed);
     }
     time_span.end(encoder);
 }

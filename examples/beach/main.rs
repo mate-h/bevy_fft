@@ -4,18 +4,18 @@
 //! The ground is a 2 km square of 1 m LiDAR elevation and bathymetry, drawn by bevy_terrain. A
 //! shallow water grid with 1 m cells covers the same square and starts from the same heights, so
 //! the sea fills the measured bed and the waterline follows the island's coast, bay, and river
-//! mouth. The grid writes into the shared water LOD data, so the ocean clipmap shows the surf and
+//! mouth. The grid writes into the shared water LOD data, so the water quadtree shows the surf and
 //! the open sea past the map with one material, and the grid fades into the ocean waves along its
-//! edges. Dry cells are left out of the water surface so the ground shows through. The buoys read
-//! the same data through `OceanQueries`, one offshore past the map, one in the forcing band, and
-//! one in the surf.
+//! edges. Dry cells are drawn at sea level, and the ground covers that sheet wherever the land
+//! stands above it. The buoys read the same data through `OceanQueries`, one offshore past the
+//! map, one in the forcing band, and one in the surf.
 //!
-//! Every map edge is an ocean border. The ocean's long waves are written over the grid each frame,
-//! and a band of cells along each edge blends the water height toward them wherever the edge is
-//! under water, so swell enters from the open sea, shoals over the reef and bar, and runs up the
-//! beach. On land the band has nothing to do. A PML behind the band absorbs the backwash. The
-//! panel switches the edges to walls or drains for comparison. Drag with the left mouse button to
-//! add water.
+//! Every map edge is an ocean border. On load and on reset the wet cells take the ocean's long-wave
+//! height and a velocity along the wind, so the surf is already moving. A band of cells along each
+//! edge keeps blending the water height toward those waves wherever the edge is under water. Swell
+//! keeps entering from the open sea, shoals over the reef and bar, and runs up the beach. On land
+//! the band has nothing to do. A PML behind the band absorbs the backwash. The panel switches the
+//! edges to walls or drains for comparison. Drag with the left mouse button to add water.
 //!
 //! The terrain is baked from bevy_terrain's
 //! `source_data/kauai_lumahai_hanalei_shoreline_lidar_1m_2048x2048.tif` into a planar tile set.
@@ -113,8 +113,7 @@ fn main() {
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(GlobalAmbientLight::NONE)
         .insert_resource(TerrainSettings::default())
-        // Twelve slices reach 8 km from the camera, past the far corner of the map from the
-        // starting view.
+        // Twelve slices still reach past the map from the surf view.
         .insert_resource(WaterLodSettings {
             slice_count: 12,
             ..default()
@@ -136,9 +135,11 @@ fn main() {
             (
                 spawn_surface_when_ready.after(FftSystemSet::PrepareTextures),
                 float_buoys,
+                pan_camera_for_lag_repro,
             ),
         )
         .add_systems(EguiPrimaryContextPass, beach_panel)
+        .add_systems(Last, log_lag_repro)
         .add_systems(
             PostUpdate,
             (
@@ -166,6 +167,63 @@ fn cascade_band(index: usize) -> (f32, f32) {
         f32::INFINITY
     };
     (k_min, k_max)
+}
+
+/// Moves the camera once so a headless capture can compare two poses of a frozen sea.
+///
+/// `BEVY_FFT_PAN` is a jump in meters along Z. `BEVY_FFT_YAW` and `BEVY_FFT_PITCH` are turns in
+/// degrees, yaw around world up and pitch around the camera's right axis. On frame 130 the
+/// virtual clock and the shallow water solver pause. On frame 131 the camera moves and stays.
+fn pan_camera_for_lag_repro(
+    mut cameras: Query<&mut Transform, With<Camera3d>>,
+    mut time: ResMut<Time<Virtual>>,
+    mut solver: ResMut<ShallowWaterController>,
+    mut frame: Local<u32>,
+) {
+    let pan = std::env::var("BEVY_FFT_PAN").ok();
+    let yaw = std::env::var("BEVY_FFT_YAW").ok();
+    let pitch = std::env::var("BEVY_FFT_PITCH").ok();
+    if pan.is_none() && yaw.is_none() && pitch.is_none() {
+        return;
+    }
+    *frame += 1;
+    if *frame == 130 {
+        time.pause();
+        solver.paused = true;
+    }
+    if *frame != 131 {
+        return;
+    }
+    let Ok(mut transform) = cameras.single_mut() else {
+        return;
+    };
+    if let Some(step) = pan.and_then(|v| v.parse::<f32>().ok()) {
+        transform.translation.z += step;
+    }
+    if let Some(degrees) = yaw.and_then(|v| v.parse::<f32>().ok()) {
+        transform.rotate_y(degrees.to_radians());
+    }
+    if let Some(degrees) = pitch.and_then(|v| v.parse::<f32>().ok()) {
+        transform.rotate_local_x(degrees.to_radians());
+    }
+}
+
+fn log_lag_repro(
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    lod: Option<Res<WaterLodData>>,
+    mut frame: Local<u32>,
+) {
+    if std::env::var("BEVY_FFT_PAN").is_err() {
+        return;
+    }
+    *frame += 1;
+    if *frame < 131 {
+        return;
+    }
+    let cam = cameras.iter().next().map(|t| t.translation());
+    let slice = lod.as_ref().map(|lod| lod.slices.slices[0].xy());
+    let n = *frame;
+    eprintln!("lag frame {n} cam {cam:?} slice0 {slice:?}");
 }
 
 fn setup(
@@ -256,8 +314,10 @@ fn setup(
     let camera = commands
         .spawn((
             Camera3d::default(),
-            Transform::from_xyz(0.0, 1500.0, 2300.0)
-                .looking_at(Vec3::new(0.0, 0.0, -150.0), Vec3::Y),
+            // Just offshore of the surf buoy, looking along the shore, so the fine slices and
+            // the near tiles cover the waterline.
+            Transform::from_xyz(-480.0, 30.0, 275.0)
+                .looking_at(Vec3::new(-250.0, 0.0, 200.0), Vec3::Y),
             FreeCamera {
                 walk_speed: 60.0,
                 run_speed: 400.0,
@@ -311,9 +371,10 @@ fn spawn_surface_when_ready(
         return;
     }
     commands.spawn((
-        // Thirteen levels reach 65 km, so the water meets the horizon from above the map.
-        OceanClipmap {
-            levels: 13,
+        // Fifteen levels put a 32 km root tile under the camera, so the water still meets the
+        // horizon from the surf view.
+        WaterQuadtree {
+            levels: 15,
             ..default()
         },
         MeshMaterial3d(materials.add(WaterSurfaceMaterial {

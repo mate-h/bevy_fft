@@ -153,11 +153,12 @@ pub struct ShallowWaterController {
     pub pml_eta_rest: f32,
     /// Target water height per cell (`R32Float`, `cells_x × cells_y`) for [`ShallowWaterBorder::Ocean`]
     /// edges and the PML, written each frame by [`OceanPlugin`](crate::ocean::OceanPlugin) when
-    /// [`Self::ocean_forcing`] is on. Only the edge strip covering the PML and the ocean band is
-    /// written.
+    /// [`Self::ocean_forcing`] is on. The edge strip covering the PML and the ocean band is written
+    /// every frame. On reset the whole grid is written so the wet interior can be seeded from it.
     pub ocean_eta: Handle<Image>,
-    /// Takes the target surface for ocean edges and the PML from the FFT ocean's long waves.
-    /// Needs [`Self::placement`] and [`OceanPlugin`](crate::ocean::OceanPlugin).
+    /// Takes the target surface for ocean edges and the PML from the FFT ocean's long waves, and
+    /// seeds the wet interior from those waves on each reset. Needs [`Self::placement`] and
+    /// [`OceanPlugin`](crate::ocean::OceanPlugin).
     pub ocean_forcing: bool,
     /// Width in cells of the band inside the PML where [`ShallowWaterBorder::Ocean`] edges blend the
     /// water height toward the target.
@@ -344,6 +345,8 @@ pub struct GpuSimulationUniform {
     pub pml_sigma_exponent: f32,
     pub pml_cosine_blend: f32,
     pub ocean_band_cells: f32,
+    /// Unit wind direction on XZ. The reset seed points column velocity along it.
+    pub wind_dir: Vec2,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]

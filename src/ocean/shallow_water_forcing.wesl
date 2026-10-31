@@ -3,8 +3,8 @@
 // The shallow water ocean band and PML blend toward this height, so waves from the FFT ocean enter
 // the grid. Only cascades the grid's cells can resolve contribute, using the same weight the LOD
 // writer applies per slice. The chop is undone with a few fixed-point steps, so each cell gets the
-// surface height above its centre rather than at its undisplaced point. Only cells within
-// `edge_cells` of the grid edge are written, since the solver reads the target nowhere else.
+// surface height above its centre rather than at its undisplaced point. Each frame writes the edge
+// strip the band reads. On reset `full_grid` writes every cell so the solver can seed the interior.
 
 import bevy_fft::ocean::sampling::bilinear_wrap;
 
@@ -24,8 +24,13 @@ struct ShallowWaterForcingParams {
     amplitude: f32,
     choppiness: f32,
     cascade_count: u32,
-    /// Width in cells of the edge strip that gets a target.
+    /// Width in cells of the edge strip that gets a target. Ignored when `full_grid` is set.
     edge_cells: u32,
+    /// Nonzero writes every cell. Zero writes the edge strip only.
+    full_grid: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: ShallowWaterForcingParams;
@@ -71,9 +76,11 @@ fn shallow_water_forcing(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= params.cells.x || gid.y >= params.cells.y {
         return;
     }
-    let edge = min(min(gid.x, params.cells.x - 1u - gid.x), min(gid.y, params.cells.y - 1u - gid.y));
-    if edge >= params.edge_cells {
-        return;
+    if params.full_grid == 0u {
+        let edge = min(min(gid.x, params.cells.x - 1u - gid.x), min(gid.y, params.cells.y - 1u - gid.y));
+        if edge >= params.edge_cells {
+            return;
+        }
     }
     let cell = vec2<f32>(gid.xy) + 0.5 - 0.5 * vec2<f32>(params.cells);
     let target_xz = params.grid_center + cell * params.cell_size;

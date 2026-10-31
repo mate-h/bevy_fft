@@ -77,6 +77,14 @@ impl MaterialExtension for WaterSurfaceExtension {
         WATER_SURFACE_SHADER.into()
     }
 
+    fn prepass_vertex_shader() -> ShaderRef {
+        WATER_SURFACE_SHADER.into()
+    }
+
+    fn prepass_fragment_shader() -> ShaderRef {
+        WATER_SURFACE_SHADER.into()
+    }
+
     fn deferred_vertex_shader() -> ShaderRef {
         WATER_SURFACE_SHADER.into()
     }

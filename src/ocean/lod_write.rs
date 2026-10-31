@@ -48,8 +48,8 @@ pub struct OceanLodWriteParams {
 #[derive(Resource, Clone, Default, ExtractResource)]
 #[extract_app(RenderApp)]
 pub struct OceanLodWriteFrame {
-    pub(super) params: OceanLodWriteParams,
-    pub(super) displacement: Vec<Handle<Image>>,
+    pub(crate) params: OceanLodWriteParams,
+    pub(crate) displacement: Vec<Handle<Image>>,
     pub(super) foam: Vec<Handle<Image>>,
 }
 

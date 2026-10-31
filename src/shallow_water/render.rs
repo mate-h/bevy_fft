@@ -1,6 +1,6 @@
 //! Compute pipelines, GPU buffers, bind groups, and the root render-graph node for shallow water.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use bevy::{
     app::SubApp,
@@ -63,6 +63,8 @@ pub struct ShallowWaterPipelines {
     pub overshoot_reduce: CachedComputePipelineId,
     pub reconstruct_cell_velocity: CachedComputePipelineId,
     pub update_particles: CachedComputePipelineId,
+    pub seed_height: CachedComputePipelineId,
+    pub seed_faces: CachedComputePipelineId,
 }
 
 impl FromWorld for ShallowWaterPipelines {
@@ -144,6 +146,8 @@ impl FromWorld for ShallowWaterPipelines {
             pml_damp_w: q("shallow_water_pml_w", "pmlDampFaceW"),
             overshoot_reduce: q("shallow_water_overshoot", "overshootReduce"),
             reconstruct_cell_velocity: q("shallow_water_recon_vel", "reconstructCellVelocity"),
+            seed_height: q("shallow_water_seed_height", "seedOceanHeight"),
+            seed_faces: q("shallow_water_seed_faces", "seedOceanFaces"),
             update_particles: pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("shallow_water_particles".into()),
                 layout,
@@ -167,6 +171,9 @@ pub struct ShallowWaterGpuResources {
     pub buffer_bind_group: Option<BindGroup>,
     pub settings_bind_group: Option<BindGroup>,
     pub last_applied_serial: AtomicU32,
+    /// Set for this frame when the ocean forcing pass wrote a target height for every cell.
+    /// The sim consumes it to seed the wet interior after `loadPreset`.
+    pub ocean_seed_written: AtomicBool,
 }
 
 impl Default for ShallowWaterGpuResources {
@@ -179,6 +186,7 @@ impl Default for ShallowWaterGpuResources {
             buffer_bind_group: None,
             settings_bind_group: None,
             last_applied_serial: AtomicU32::new(0),
+            ocean_seed_written: AtomicBool::new(false),
         }
     }
 }
@@ -221,6 +229,7 @@ impl SimWorkgroups {
 fn build_simulation_uniform(
     controller: &ShallowWaterController,
     timestamp: u32,
+    wind_dir: Vec2,
 ) -> GpuSimulationUniform {
     let dx = controller.cell_size();
     let friction_factor = (1.0 - controller.friction.clamp(0.0, 1.0)).powf(controller.dt);
@@ -246,6 +255,7 @@ fn build_simulation_uniform(
         pml_sigma_exponent: controller.pml_sigma_exponent.clamp(1.0, 4.0),
         pml_cosine_blend: controller.pml_cosine_blend.clamp(0.0, 1.0),
         ocean_band_cells: controller.ocean_band_cells.max(0.0),
+        wind_dir,
     }
 }
 
@@ -255,6 +265,7 @@ pub fn prepare_shallow_water_gpu(
     render_queue: Res<RenderQueue>,
     gpu_images: Res<RenderAssets<GpuImage>>,
     controller: Res<ShallowWaterController>,
+    lod: Option<Res<crate::water::WaterLodData>>,
     timestamp: Res<ShallowWaterTimestamp>,
     pipelines: Res<ShallowWaterPipelines>,
     pipeline_cache: Res<PipelineCache>,
@@ -317,8 +328,15 @@ pub fn prepare_shallow_water_gpu(
     };
     write_uniform(&render_queue, interaction_buf, &interaction);
 
-    let simulation =
-        build_simulation_uniform(controller.as_ref(), timestamp.0.load(Ordering::Relaxed));
+    let wind_dir = lod
+        .as_ref()
+        .map(|lod| Vec2::from_angle(lod.slices.chop_direction))
+        .unwrap_or(Vec2::X);
+    let simulation = build_simulation_uniform(
+        controller.as_ref(),
+        timestamp.0.load(Ordering::Relaxed),
+        wind_dir,
+    );
     write_uniform(&render_queue, simulation_buf, &simulation);
 
     let Some(bed) = gpu_images.get(&controller.bed_water) else {
@@ -444,6 +462,12 @@ pub fn run_shallow_water_sim(
 
     let apply_init =
         controller.sim_apply_serial != gpu_res.last_applied_serial.load(Ordering::Relaxed);
+    // Wait for a full-grid ocean target before consuming the reset, so the seed is the FFT
+    // field and not still water. Without a placement the forcing pass never writes one.
+    let defer_init = controller.ocean_forcing
+        && controller.placement.is_some()
+        && apply_init
+        && !gpu_res.ocean_seed_written.load(Ordering::Relaxed);
 
     let encoded = (|| -> Option<()> {
         let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
@@ -459,11 +483,17 @@ pub fn run_shallow_water_sim(
             pass.dispatch_workgroups(wg.border.0, wg.border.1, 1);
             pass.set_pipeline(p_preset);
             pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
+            if controller.ocean_forcing && !defer_init {
+                pass.set_pipeline(pipe!(seed_height)?);
+                pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
+                pass.set_pipeline(pipe!(seed_faces)?);
+                pass.dispatch_workgroups(wg.border.0, wg.border.1, 1);
+            }
         }
 
         pass.set_pipeline(p_interact);
         pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
-        if !controller.paused {
+        if !controller.paused && !defer_init {
             pass.set_pipeline(pipe!(ocean_band)?);
             pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
 
@@ -523,13 +553,13 @@ pub fn run_shallow_water_sim(
         return;
     }
 
-    if apply_init {
+    if apply_init && !defer_init {
         gpu_res
             .last_applied_serial
             .store(controller.sim_apply_serial, Ordering::Relaxed);
     }
 
-    if !controller.paused {
+    if !controller.paused && !defer_init {
         timestamp.0.fetch_add(1, Ordering::Relaxed);
     }
 }

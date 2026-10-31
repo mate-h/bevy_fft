@@ -15,7 +15,8 @@
 //! whose tiles grow with distance, or on any other mesh.
 //!
 //! A placed shallow water grid with [`crate::shallow_water::ShallowWaterController::ocean_forcing`]
-//! on also receives the long waves each frame, as the target surface for its ocean edges.
+//! on also receives the long waves each frame, as the target surface for its ocean edges. On reset
+//! the same field seeds the wet interior so the grid does not start flat.
 //!
 //! Treat Bevy X, Z, and up (Y) as meters. [`OceanSimSettings::tile_size`] is the periodic patch size in meters
 //! on the horizontal plane (shaders use Δk = 2π / tile_size).
@@ -27,6 +28,8 @@
 
 mod clipmap;
 mod lod_write;
+
+pub(crate) use lod_write::OceanLodWriteFrame;
 mod query;
 mod render;
 mod shallow_water_forcing;
@@ -194,7 +197,7 @@ impl Plugin for OceanPlugin {
             .add_systems(Update, clipmap::build_ocean_clipmaps)
             .add_systems(
                 PostUpdate,
-                clipmap::follow_ocean_clipmaps.before(bevy::transform::TransformSystems::Propagate),
+                clipmap::follow_ocean_clipmaps.after(bevy::transform::TransformSystems::Propagate),
             )
             .register_type::<OceanFoamUniform>()
             .register_type::<OceanFoamMask>()

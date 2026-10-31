@@ -12,8 +12,9 @@ use bevy::{
 };
 
 use super::ShallowWaterController;
-use crate::water::{
-    WATER_LOD_SURFACE_FORMAT, WaterLodData, WaterLodGpu, WaterLodScratch, WaterLodSlices,
+use crate::{
+    ocean::{OCEAN_MAX_CASCADES, OceanLodWriteFrame},
+    water::{WATER_LOD_SURFACE_FORMAT, WaterLodData, WaterLodGpu, WaterLodScratch, WaterLodSlices},
 };
 
 /// Uniform for `lod_write.wesl`.
@@ -24,7 +25,12 @@ pub struct ShallowWaterLodParams {
     pub datum: f32,
     pub cells: UVec2,
     pub blend_cells: f32,
-    pub _pad: f32,
+    pub fill_level: f32,
+    pub cascade_tile_sizes: Vec4,
+    pub amplitude: f32,
+    pub choppiness: f32,
+    pub cascade_count: u32,
+    pub _pad: u32,
 }
 
 #[derive(Resource)]
@@ -52,6 +58,10 @@ impl FromWorld for ShallowWaterLodPipeline {
                 texture_2d_array(unfiltered),
                 texture_2d_array(unfiltered),
                 texture_2d_array(unfiltered),
+                texture_2d(unfiltered),
+                texture_2d(unfiltered),
+                texture_2d(unfiltered),
+                texture_2d(unfiltered),
                 texture_2d(unfiltered),
                 texture_2d(unfiltered),
             ),
@@ -89,6 +99,7 @@ pub(super) fn prepare_shallow_water_lod_write(
     lod_gpu: Res<WaterLodGpu>,
     scratch: Res<WaterLodScratch>,
     images: Res<RenderAssets<GpuImage>>,
+    ocean: Option<Res<OceanLodWriteFrame>>,
     mut state: ResMut<ShallowWaterLodBindGroup>,
 ) {
     state.group = None;
@@ -115,13 +126,46 @@ pub(super) fn prepare_shallow_water_lod_write(
     ) else {
         return;
     };
+    let cascades = ocean.as_ref().and_then(|frame| {
+        if frame.params.cascade_count == 0 || frame.displacement.len() < OCEAN_MAX_CASCADES {
+            return None;
+        }
+        let views = frame
+            .displacement
+            .iter()
+            .take(OCEAN_MAX_CASCADES)
+            .map(|handle| images.get(handle).map(|gpu| &gpu.texture_view))
+            .collect::<Option<Vec<_>>>()?;
+        Some((frame.params, views))
+    });
+    let (tiles, amplitude, choppiness, cascade_count, disp) = match cascades {
+        Some((params, views)) => (
+            params.cascade_tile_sizes,
+            params.amplitude,
+            params.choppiness,
+            params.cascade_count,
+            views,
+        ),
+        None => (
+            Vec4::ONE,
+            0.0,
+            0.0,
+            0,
+            vec![&bed_water.texture_view; OCEAN_MAX_CASCADES],
+        ),
+    };
     state.params.set(ShallowWaterLodParams {
         center: placement.center,
         cell_size: placement.cell_size,
         datum: placement.datum,
         cells: UVec2::new(controller.cells_x, controller.cells_y),
         blend_cells: placement.blend_cells,
-        _pad: 0.0,
+        fill_level: controller.fill_level,
+        cascade_tile_sizes: tiles,
+        amplitude,
+        choppiness,
+        cascade_count,
+        _pad: 0,
     });
     state.params.write_buffer(&device, &queue);
     let Some(params) = state.params.binding() else {
@@ -142,6 +186,10 @@ pub(super) fn prepare_shallow_water_lod_write(
             flow_in,
             &bed_water.texture_view,
             &velocity.texture_view,
+            disp[0],
+            disp[1],
+            disp[2],
+            disp[3],
         )),
     ));
     let res = lod.slices.resolution;

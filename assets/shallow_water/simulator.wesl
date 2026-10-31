@@ -33,6 +33,8 @@ struct SimulationSettings {
     pml_sigma_exponent : f32,
     pml_cosine_blend : f32,
     ocean_band_cells : f32,
+    /// Unit direction of the wind on the grid, X and then the row axis (world Z when placed).
+    wind_dir : vec2f,
 }
 
 struct Particle {
@@ -284,6 +286,9 @@ fn border_type(edge : u32) -> u32 {
 
 /// Target values below this mark a cell the ocean has not written yet.
 const OCEAN_ETA_UNSET = -1.0e29;
+/// Depth below which a seeded column is left at rest. Shallower than this, `√(g / h)` is no
+/// longer a column velocity the swash should start with.
+const SEED_MIN_DEPTH = 0.25;
 
 /// Target free-surface height for the ocean band and the PML. Reads the ocean target texture when
 /// flag bit 1 is set and the cell holds a value, otherwise the flat `pml_eta_rest`.
@@ -386,6 +391,66 @@ fn loadPreset(@builtin(global_invocation_id) id: vec3u) {
     }
     let water = max(interactionSettings.fill_level - bed, 0.0);
     textureStore(bedWaterTexture, id.xy, vec4f(bed, water, 0.0, 0.0));
+}
+
+/// Column velocity of a progressive long wave, or zero when `cell` is dry, too shallow, or has no
+/// ocean target. `.z` is 1 when the sample should count toward a face average.
+fn seed_velocity(cell : vec2i) -> vec3f {
+    if (cell.x < 0 || cell.y < 0 || cell.x >= nx() || cell.y >= ny()) {
+        return vec3f(0.0);
+    }
+    let id = vec2u(u32(cell.x), u32(cell.y));
+    let bw = textureLoad(bedWaterTexture, id);
+    let eta = textureLoad(oceanEtaTexture, id).r;
+    if (eta <= OCEAN_ETA_UNSET) { return vec3f(0.0); }
+    let h = max(0.0, eta - bw.x);
+    if (bw.x >= interactionSettings.fill_level || h < SEED_MIN_DEPTH) {
+        return vec3f(0.0);
+    }
+    let prime = eta - interactionSettings.fill_level;
+    let vel = simulationSettings.wind_dir * prime * sqrt(simulationSettings.gravity / h);
+    return vec3f(vel, 1.0);
+}
+
+fn seed_face(a : vec2i, b : vec2i, component : i32) -> f32 {
+    let sa = seed_velocity(a);
+    let sb = seed_velocity(b);
+    let n = sa.z + sb.z;
+    if (n == 0.0) { return 0.0; }
+    let sum = select(sa.y, sa.x, component == 0) * sa.z + select(sb.y, sb.x, component == 0) * sb.z;
+    return clamp_face_vel(sum / n);
+}
+
+/// Copies the ocean target into wet cells. Dry cells stay at the preset. Runs after `loadPreset`
+/// when the target texture holds the whole grid, and before `seedOceanFaces`.
+@compute @workgroup_size(16, 16)
+fn seedOceanHeight(@builtin(global_invocation_id) id: vec3u) {
+    if (id.x >= simulationSettings.size.x || id.y >= simulationSettings.size.y) { return; }
+    var bw = textureLoad(bedWaterTexture, id.xy);
+    let eta = textureLoad(oceanEtaTexture, id.xy).r;
+    if (eta <= OCEAN_ETA_UNSET || bw.x >= interactionSettings.fill_level) { return; }
+    let seeded = seed_velocity(vec2i(i32(id.x), i32(id.y)));
+    bw.y = max(0.0, eta - bw.x);
+    textureStore(bedWaterTexture, id.xy, bw);
+    textureStore(velocityTexture, id.xy, vec4f(seeded.xy, 0.0, 0.0));
+}
+
+/// Wind-aligned face velocity for the heights `seedOceanHeight` just wrote. Columns shallower
+/// than `SEED_MIN_DEPTH` stay at rest. A separate dispatch so face reads do not race the stores.
+@compute @workgroup_size(16, 16)
+fn seedOceanFaces(@builtin(global_invocation_id) id: vec3u) {
+    let sx = simulationSettings.size.x;
+    let sy = simulationSettings.size.y;
+    if (id.x <= sx && id.y < sy) {
+        let y = i32(id.y);
+        let u = seed_face(vec2i(i32(id.x) - 1, y), vec2i(i32(id.x), y), 0);
+        textureStore(faceUTexture, id.xy, vec4f(u, 0.0, 0.0, 0.0));
+    }
+    if (id.x < sx && id.y <= sy) {
+        let x = i32(id.x);
+        let w = seed_face(vec2i(x, i32(id.y) - 1), vec2i(x, i32(id.y)), 1);
+        textureStore(faceWTexture, id.xy, vec4f(w, 0.0, 0.0, 0.0));
+    }
 }
 
 fn pointToSegmentDistance(p : vec2f, s0 : vec2f, s1 : vec2f) -> f32 {
