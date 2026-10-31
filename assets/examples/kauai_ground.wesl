@@ -93,33 +93,37 @@ fn material_at(id: u32, position: vec3<f32>, dx: vec3<f32>, dy: vec3<f32>, norma
     let x = dx / repeat;
     let y = dy / repeat;
     let side = sign(normal + vec3<f32>(1e-5));
+    // Projections under this weight are skipped. Flat ground then reads one projection, not three.
     var weights = pow(abs(normal), vec3<f32>(4.0));
+    weights = select(vec3<f32>(0.0), weights, weights > vec3<f32>(0.02 * max(weights.x, max(weights.y, weights.z))));
     weights /= max(dot(weights, vec3<f32>(1.0)), 1e-5);
-    let ux = vec2<f32>(-p.z * side.x, p.y);
-    let uy = vec2<f32>(p.x, -p.z * side.y);
-    let uz = vec2<f32>(p.x * side.z, p.y);
-    let dxx = vec2<f32>(-x.z * side.x, x.y);
-    let dyx = vec2<f32>(-y.z * side.x, y.y);
-    let dxy = vec2<f32>(x.x, -x.z * side.y);
-    let dyy = vec2<f32>(y.x, -y.z * side.y);
-    let dxz = vec2<f32>(x.x * side.z, x.y);
-    let dyz = vec2<f32>(y.x * side.z, y.y);
-    let sx = ground_texture(ux, i32(layer), dxx, dyx);
-    let sy = ground_texture(uy, i32(layer), dxy, dyy);
-    let sz = ground_texture(uz, i32(layer), dxz, dyz);
-    let color = sx.color.rgb * weights.x + sy.color.rgb * weights.y + sz.color.rgb * weights.z;
-    let nx = sx.detail;
-    let ny = sy.detail;
-    let nz = sz.detail;
-    let tx = (nx.xy * 2.0 - 1.0) / max(nx.z * 2.0 - 1.0, 0.3);
-    let ty = (ny.xy * 2.0 - 1.0) / max(ny.z * 2.0 - 1.0, 0.3);
-    let tz = (nz.xy * 2.0 - 1.0) / max(nz.z * 2.0 - 1.0, 0.3);
-    var detail = vec3<f32>(0.0, tx.y, -tx.x * side.x) * weights.x
-        + vec3<f32>(ty.x, 0.0, -ty.y * side.y) * weights.y
-        + vec3<f32>(tz.x * side.z, tz.y, 0.0) * weights.z;
+    var color = vec3<f32>(0.0);
+    var roughness = 0.0;
+    var detail = vec3<f32>(0.0);
+    if weights.x > 0.0 {
+        let s = ground_texture(vec2<f32>(-p.z * side.x, p.y), i32(layer), vec2<f32>(-x.z * side.x, x.y), vec2<f32>(-y.z * side.x, y.y));
+        let t = (s.detail.xy * 2.0 - 1.0) / max(s.detail.z * 2.0 - 1.0, 0.3);
+        color += s.color.rgb * weights.x;
+        roughness += s.detail.a * weights.x;
+        detail += vec3<f32>(0.0, t.y, -t.x * side.x) * weights.x;
+    }
+    if weights.y > 0.0 {
+        let s = ground_texture(vec2<f32>(p.x, -p.z * side.y), i32(layer), vec2<f32>(x.x, -x.z * side.y), vec2<f32>(y.x, -y.z * side.y));
+        let t = (s.detail.xy * 2.0 - 1.0) / max(s.detail.z * 2.0 - 1.0, 0.3);
+        color += s.color.rgb * weights.y;
+        roughness += s.detail.a * weights.y;
+        detail += vec3<f32>(t.x, 0.0, -t.y * side.y) * weights.y;
+    }
+    if weights.z > 0.0 {
+        let s = ground_texture(vec2<f32>(p.x * side.z, p.y), i32(layer), vec2<f32>(x.x * side.z, x.y), vec2<f32>(y.x * side.z, y.y));
+        let t = (s.detail.xy * 2.0 - 1.0) / max(s.detail.z * 2.0 - 1.0, 0.3);
+        color += s.color.rgb * weights.z;
+        roughness += s.detail.a * weights.z;
+        detail += vec3<f32>(t.x * side.z, t.y, 0.0) * weights.z;
+    }
     var out: Surface;
     out.color = color;
-    out.roughness = dot(vec3<f32>(nx.a, ny.a, nz.a), weights);
+    out.roughness = roughness;
     if layer == 1u { out.color *= vec3<f32>(0.18, 0.20, 0.22); }
     if layer == 3u { out.color *= vec3<f32>(0.45, 0.80, 0.40); }
     if layer == 4u { out.color *= vec3<f32>(0.28, 0.55, 0.22); }
