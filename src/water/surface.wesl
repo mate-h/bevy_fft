@@ -4,7 +4,7 @@ import bevy_pbr::render::mesh_functions::{
     mesh_position_local_to_world,
 };
 import bevy_pbr::render::view_transformations::position_world_to_clip;
-import bevy_fft::water::lod::{WaterLodSlices, lod_chop_dir, lod_coverage, sample_lod_filtered};
+import bevy_fft::water::lod::{WaterLodSlices, lod_coverage, sample_lod_filtered};
 
 @if(PREPASS_PIPELINE)
 import bevy_pbr::prepass::io::{
@@ -114,20 +114,20 @@ fn water_quadtree_xz(position_local: vec3<f32>) -> vec3<f32> {
 }
 
 /// Water LOD data at world `xz`: R/G = height slopes along X and Z, B = elevation in meters,
-/// A = horizontal chop in meters along the chop direction. `bias` moves to coarser slices.
+/// A = horizontal displacement X in meters. `bias` moves to coarser slices.
 /// Past the coarsest slice the water is flat.
 fn water_sample(xz: vec2<f32>, bias: f32) -> vec4<f32> {
     return sample_lod_filtered(lod_displacement, lod_sampler, water_lod, xz, bias) * lod_coverage(water_lod, xz);
 }
 
-fn chop_dir() -> vec2<f32> {
-    return lod_chop_dir(water_lod);
+/// Horizontal displacement Z in meters at world `xz`, kept in the foam texture's blue lane.
+fn water_displacement_z(xz: vec2<f32>, bias: f32) -> f32 {
+    return sample_lod_filtered(lod_foam, lod_sampler, water_lod, xz, bias).b * lod_coverage(water_lod, xz);
 }
 
-/// Undisplaced position whose chop lands on `xz`, found with one fixed-point step.
+/// Undisplaced position whose horizontal displacement lands on `xz`, found with one fixed-point step.
 fn water_undisplace(xz: vec2<f32>) -> vec2<f32> {
-    let chop = water_sample(xz, 0.0).a;
-    return xz - chop * chop_dir();
+    return xz - vec2<f32>(water_sample(xz, 0.0).a, water_displacement_z(xz, 0.0));
 }
 
 fn water_normal_from_slopes(s: vec4<f32>) -> vec3<f32> {
@@ -138,7 +138,7 @@ struct DisplacedSurface {
     clip_position: vec4<f32>,
     world_position: vec4<f32>,
     world_normal: vec3<f32>,
-    /// World XZ before the chop moves the vertex. The LOD data is indexed by this position.
+    /// World XZ before horizontal displacement moves the vertex. The LOD data is indexed by this position.
     flat_xz: vec2<f32>,
 }
 
@@ -175,8 +175,8 @@ fn water_displace_surface(instance_index: u32, position_local: vec3<f32>, spacin
     }
     out.flat_xz = world.xz;
     let s = water_sample(world.xz, surface.vertex_lod_bias);
-    let w = chop_dir();
-    world = vec4<f32>(world.x + s.a * w.x, world.y + s.b, world.z + s.a * w.y, 1.0);
+    let dz = water_displacement_z(world.xz, surface.vertex_lod_bias);
+    world = vec4<f32>(world.x + s.a, world.y + s.b, world.z + dz, 1.0);
 
     out.clip_position = position_world_to_clip(world.xyz);
     out.world_position = world;

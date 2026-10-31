@@ -6,8 +6,9 @@
 //!
 //! Spawn one [`crate::fft::FftSource`] with [`OceanSimSettings`] per cascade, each with its own tile
 //! size, wavenumber band, and [`OceanCascade`] slot. One inverse FFT per cascade writes height in B,
-//! slopes in R and G, and wind-aligned horizontal chop (scalar) in W, and [`OceanFoamMask`] keeps a
-//! whitecap history that fades with a half-life in seconds. Each frame the cascades are summed into the shared
+//! slopes in R and G, and horizontal displacement X in W. [`OceanFoamMask`] keeps a whitecap
+//! history that fades with a half-life in seconds, plus horizontal displacement Z, which the FFT
+//! returns in the imaginary half of the same lane. Each frame the cascades are summed into the shared
 //! [`crate::water::WaterLodData`] slices, shaped by the [`OceanSurfaceSettings`] resource.
 //! [`crate::water::WaterSurfaceMaterial`] and [`OceanQueries`] read only those slices, so other
 //! solvers that write there show up in the same surface. Put the material on an [`OceanClipmap`]
@@ -134,7 +135,7 @@ pub const OCEAN_MAX_CASCADES: usize = 4;
 pub struct OceanSurfaceSettings {
     /// Multiplier on the summed cascade heights and slopes.
     pub amplitude: f32,
-    /// Multiplier on horizontal wind-aligned displacement, same sense as amplitude on height.
+    /// Multiplier on horizontal displacement, same sense as amplitude on height.
     /// Typical range about 0 to 2.
     pub choppiness: f32,
     /// Foam ramps up where the smaller eigenvalue of the horizontal displacement Jacobian drops
@@ -242,7 +243,7 @@ impl Plugin for OceanPlugin {
                 PostUpdate,
                 (
                     lod_write::gather_ocean_lod_write.after(sync_ocean_foam_display),
-                    publish_ocean_chop_direction.before(crate::water::WaterLodSystems),
+                    publish_ocean_wind_direction.before(crate::water::WaterLodSystems),
                 ),
             )
             .add_systems(Startup, query::setup_ocean_queries)
@@ -326,16 +327,15 @@ impl Plugin for OceanPlugin {
         render_app.add_systems(
             bevy::render::renderer::RenderGraph,
             shallow_water_forcing::run_shallow_water_forcing
-                .after(run_fft_resolve_outputs)
+                .after(run_ocean_foam)
                 .before(crate::shallow_water::run_shallow_water_sim)
                 .in_set(bevy::render::renderer::RenderGraphSystems::Render),
         );
     }
 }
 
-/// Tells LOD readers which way the chop lane points. The cascades share one wind, so slot 0
-/// decides.
-fn publish_ocean_chop_direction(
+/// Tells LOD readers which way the wind blows. The cascades share one wind, so slot 0 decides.
+fn publish_ocean_wind_direction(
     lod: Option<ResMut<crate::water::WaterLodData>>,
     cascades: Query<(&OceanSimSettings, Option<&OceanCascade>)>,
 ) {
@@ -347,8 +347,8 @@ fn publish_ocean_chop_direction(
         .min_by_key(|(_, c)| c.map_or(0, |c| c.index))
         .map(|(s, _)| s.wind_direction);
     if let Some(wind) = wind
-        && lod.slices.chop_direction != wind
+        && lod.slices.wind_direction != wind
     {
-        lod.slices.chop_direction = wind;
+        lod.slices.wind_direction = wind;
     }
 }

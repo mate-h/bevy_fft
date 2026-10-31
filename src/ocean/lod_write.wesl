@@ -4,12 +4,13 @@
 // slice once its texels are too coarse for the shorter end of the cascade's band, so coarse slices
 // hold only long waves and never alias.
 //
-// Flow is the change in displacement since the previous frame. Linear waves move each surface
-// particle with the time derivative of its displacement, so this is the orbital velocity. It uses
-// the physical chop, without the artistic choppiness factor.
+// Horizontal displacement X comes from each cascade's FFT output and Z from its foam texture,
+// which also keeps last frame's Z. Flow is the change in displacement since the previous frame.
+// Linear waves move each surface particle with the time derivative of its displacement, so this is
+// the orbital velocity. It uses the physical displacement, without the artistic choppiness factor.
 
 import bevy_fft::ocean::sampling::{WrapTaps, bilinear_taps, wrap_taps};
-import bevy_fft::water::lod::{WaterLodSlices, lod_chop_dir, lod_texel_world};
+import bevy_fft::water::lod::{WaterLodSlices, lod_texel_world};
 
 struct OceanLodWriteParams {
     /// World tile edge in meters for cascades 0 to 3.
@@ -66,15 +67,16 @@ fn previous_cascade(i: u32, t: WrapTaps) -> vec4<f32> {
     return bilinear_taps(previous_3, t);
 }
 
-fn foam_cascade(i: u32, t: WrapTaps) -> f32 {
+/// Foam in `.r`, horizontal displacement Z in `.g`, and last frame's displacement Z in `.b`.
+fn foam_cascade(i: u32, t: WrapTaps) -> vec4<f32> {
     if i == 0u {
-        return bilinear_taps(foam_0, t).r;
+        return bilinear_taps(foam_0, t);
     } else if i == 1u {
-        return bilinear_taps(foam_1, t).r;
+        return bilinear_taps(foam_1, t);
     } else if i == 2u {
-        return bilinear_taps(foam_2, t).r;
+        return bilinear_taps(foam_2, t);
     }
-    return bilinear_taps(foam_3, t).r;
+    return bilinear_taps(foam_3, t);
 }
 
 /// Size of cascade `i`. The displacement, previous and foam textures of a cascade share it.
@@ -110,22 +112,28 @@ fn ocean_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     var disp = vec4<f32>(0.0);
     var change = vec4<f32>(0.0);
     var foam = 0.0;
+    var dz = 0.0;
+    var dz_change = 0.0;
     let count = min(params.cascade_count, 4u);
     for (var i = 0u; i < count; i++) {
         let taps = wrap_taps(cascade_dims(i), xz / params.cascade_tile_sizes[i]);
         let w = cascade_weight(i, texel);
+        let f = foam_cascade(i, taps);
         if w > 0.0 {
             let now = displacement_cascade(i, taps);
             disp += now * w;
             change += (now - previous_cascade(i, taps)) * w;
+            dz += f.g * w;
+            dz_change += (f.g - f.b) * w;
         }
-        foam = max(foam, foam_cascade(i, taps));
+        foam = max(foam, f.r);
     }
     let amp = params.amplitude;
-    let scaled = vec4<f32>(disp.rgb * amp, disp.a * amp * params.choppiness);
+    let chop = amp * params.choppiness;
+    let scaled = vec4<f32>(disp.rgb * amp, disp.a * chop);
     textureStore(displacement_out, gid.xy, slice, scaled);
-    textureStore(foam_out, gid.xy, slice, vec4<f32>(foam, params.depth, 0.0, 1.0));
-    let velocity = change * (amp * params.inv_dt);
-    let horizontal = velocity.a * lod_chop_dir(lod);
-    textureStore(flow_out, gid.xy, slice, vec4<f32>(horizontal, velocity.b, 0.0));
+    textureStore(foam_out, gid.xy, slice, vec4<f32>(foam, params.depth, dz * chop, 1.0));
+    let rate = amp * params.inv_dt;
+    let velocity = vec3<f32>(change.a, dz_change, change.b) * rate;
+    textureStore(flow_out, gid.xy, slice, vec4<f32>(velocity, 0.0));
 }

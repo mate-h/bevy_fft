@@ -60,6 +60,11 @@ const BREAK_FADE_END: f32 = 3.0;
 @group(0) @binding(11) var displacement_1: texture_2d<f32>;
 @group(0) @binding(12) var displacement_2: texture_2d<f32>;
 @group(0) @binding(13) var displacement_3: texture_2d<f32>;
+/// Ocean foam textures, whose `.g` holds horizontal displacement Z.
+@group(0) @binding(14) var foam_0: texture_2d<f32>;
+@group(0) @binding(15) var foam_1: texture_2d<f32>;
+@group(0) @binding(16) var foam_2: texture_2d<f32>;
+@group(0) @binding(17) var foam_3: texture_2d<f32>;
 
 fn wrap_texel(p: vec2<i32>, dims: vec2<i32>) -> vec2<i32> {
     return ((p % dims) + dims) % dims;
@@ -89,6 +94,17 @@ fn displacement_cascade(i: u32, uv: vec2<f32>) -> vec4<f32> {
     return bilinear_wrap(displacement_3, uv);
 }
 
+fn displacement_z_cascade(i: u32, uv: vec2<f32>) -> f32 {
+    if i == 0u {
+        return bilinear_wrap(foam_0, uv).g;
+    } else if i == 1u {
+        return bilinear_wrap(foam_1, uv).g;
+    } else if i == 2u {
+        return bilinear_wrap(foam_2, uv).g;
+    }
+    return bilinear_wrap(foam_3, uv).g;
+}
+
 /// Share of cascade `i` a sample of width `texel` can resolve. Matches the ocean LOD writer.
 fn cascade_weight(i: u32, texel: f32) -> f32 {
     let tile = params.cascade_tile_sizes[i];
@@ -96,18 +112,28 @@ fn cascade_weight(i: u32, texel: f32) -> f32 {
 }
 
 /// FFT displacement the grid cells do not own, scaled the same way as the ocean LOD writer.
-/// Slopes are in `.rg`, height in `.b`, and chop in `.a`.
-fn unresolved_displacement(xz: vec2<f32>, texel: f32) -> vec4<f32> {
+struct Unresolved {
+    /// Slopes in `.rg`, height in `.b`, and horizontal displacement X in `.a`.
+    displacement: vec4<f32>,
+    /// Horizontal displacement Z, which the LOD data keeps in the foam texture.
+    displacement_z: f32,
+}
+
+fn unresolved_displacement(xz: vec2<f32>, texel: f32) -> Unresolved {
     var disp = vec4<f32>(0.0);
+    var dz = 0.0;
     let count = min(params.cascade_count, 4u);
     for (var i = 0u; i < count; i++) {
         let w = cascade_weight(i, texel) * (1.0 - cascade_weight(i, params.cell_size));
         if w > 0.0 {
-            disp += displacement_cascade(i, xz / params.cascade_tile_sizes[i]) * w;
+            let uv = xz / params.cascade_tile_sizes[i];
+            disp += displacement_cascade(i, uv) * w;
+            dz += displacement_z_cascade(i, uv) * w;
         }
     }
     let amp = params.amplitude;
-    return vec4<f32>(disp.rgb * amp, disp.a * amp * params.choppiness);
+    let chop = amp * params.choppiness;
+    return Unresolved(vec4<f32>(disp.rgb * amp, disp.a * chop), dz * chop);
 }
 
 /// Bilinear bed and depth at grid coordinate `g`, where cell `i` spans `i..i + 1`.
@@ -198,7 +224,8 @@ fn shallow_water_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     let bw = bed_water_at(g);
     let surface = vec4<f32>(slope, params.datum + eta_at(g), 0.0);
     let fade = smoothstep(DETAIL_FADE_START, DETAIL_FADE_END, bw.y);
-    let swe = surface + unresolved_displacement(xz, lod.slices[slice].z) * fade;
+    let detail = unresolved_displacement(xz, lod.slices[slice].z);
+    let swe = surface + detail.displacement * fade;
 
     let base = textureLoad(base_displacement, gid.xy, slice, 0);
     let base_f = textureLoad(base_foam, gid.xy, slice, 0);
@@ -210,7 +237,12 @@ fn shallow_water_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     let breaking = smoothstep(BREAK_SLOPE_START, BREAK_SLOPE_END, length(slope))
         * smoothstep(BREAK_MIN_DEPTH, 2.0 * BREAK_MIN_DEPTH, banks)
         * (1.0 - smoothstep(BREAK_FADE_START, BREAK_FADE_END, bw.y));
-    let foam = vec4<f32>(mix(base_f.r, breaking, w), mix(base_f.g, bw.y, w), base_f.ba);
+    let foam = vec4<f32>(
+        mix(base_f.r, breaking, w),
+        mix(base_f.g, bw.y, w),
+        mix(base_f.b, detail.displacement_z * fade, w),
+        base_f.a,
+    );
     textureStore(foam_out, gid.xy, slice, foam);
     let base_v = textureLoad(base_flow, gid.xy, slice, 0);
     let flow = vec4<f32>(velocity_at(g), rise, 0.0);

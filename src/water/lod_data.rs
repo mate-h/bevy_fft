@@ -60,21 +60,22 @@ pub struct WaterLodSlices {
     pub slices: [Vec4; WATER_LOD_MAX_SLICES],
     pub count: u32,
     pub resolution: u32,
-    /// Direction of the chop lane in radians on XZ. The horizontal displacement is
-    /// `chop * (cos θ, sin θ)`. The base writer sets it, which for the FFT ocean is the wind.
-    pub chop_direction: f32,
+    /// Wind direction in radians on XZ. The base writer sets it, which for the FFT ocean is the
+    /// wind its spectrum was built for.
+    pub wind_direction: f32,
     pub _pad1: u32,
 }
 
 /// Camera-centred LOD texture arrays and where each slice currently sits.
 ///
 /// `displacement` stores, per texel, the height slope along X, the slope along Z, the height in
-/// meters above the surface mesh plane, and the wind-aligned horizontal chop in meters. These are
-/// the same lanes as the FFT spatial output, already scaled, so contributions from several solvers
-/// add up linearly. `foam` stores foam coverage in its red channel and the depth of the water
-/// column in meters in its green channel. `flow` stores the water velocity at the surface in meters
-/// per second: X in red, Z in green, and vertical in blue. `displacement` and `foam` use
-/// [`WATER_LOD_SURFACE_FORMAT`] with a linear clamped sampler.
+/// meters above the surface mesh plane, and the horizontal displacement along X in meters. These
+/// are the same lanes as the FFT spatial output, already scaled, so contributions from several
+/// solvers add up linearly. `foam` stores foam coverage in its red channel, the depth of the water
+/// column in meters in its green channel, and the horizontal displacement along Z in meters in its
+/// blue channel. `flow` stores the water velocity at the surface in meters per second: X in red, Z
+/// in green, and vertical in blue. `displacement` and `foam` use [`WATER_LOD_SURFACE_FORMAT`] with
+/// a linear clamped sampler.
 #[derive(Resource, Clone, ExtractResource)]
 #[extract_app(RenderApp)]
 pub struct WaterLodData {

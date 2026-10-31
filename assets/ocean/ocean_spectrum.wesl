@@ -41,9 +41,11 @@ fn ocean_htilde(ip: vec2<i32>, k_vec: vec2<f32>) -> vec2<f32> {
     return t1 + t2;
 }
 
-/// Packs four bands into buffer **C** for one inverse FFT. Lanes 0 and 1 are height slopes, lane 2 is `h`, lane 3 is
-/// wind-aligned chop from `(k dot w_hat)/|k|` and `i*h` with `w_hat` on XZ. Chop shares the `i*h` factor used for slopes so it
-/// stays in phase with height. Full 2D horizontal displacement would need another band or pass.
+/// Packs four bands into buffer **C** for one inverse FFT. Lanes 0 and 1 are height slopes and lane 2
+/// is `h`. Lane 3 carries both horizontal displacements, `D_x + i D_z`, each `(k_axis / |k|) i h` so
+/// they share the `i h` factor of the slopes and stay in phase with height. Both are real in space,
+/// so with the Hermitian `h` from `init_h0` the inverse FFT returns `D_x` in the real part of lane 3
+/// and `D_z` in its imaginary part.
 @compute @workgroup_size(8, 8, 1)
 fn ocean_fill_spectrum_c(@builtin(global_invocation_id) gid: vec3<u32>) {
     let n = ocean_dyn.texture_size;
@@ -70,14 +72,13 @@ fn ocean_fill_spectrum_c(@builtin(global_invocation_id) gid: vec3<u32>) {
     let ih = vec2(-h.y, h.x);
     let d_eta_dx_k = complex_mul(vec2<f32>(k_vec.x, 0.0), ih);
     let d_eta_dz_k = complex_mul(vec2<f32>(k_vec.y, 0.0), ih);
-    let w_hat = vec2(cos(ocean_dyn.wind_direction), sin(ocean_dyn.wind_direction));
-    let k_proj = dot(k_vec, w_hat);
-    // `ih` is `i*h` (see slope lanes). Use it for chop too so horizontal displacement matches η in phase.
-    let chop_wind_k = complex_mul(vec2(k_proj / k_len, 0.0), ih);
+    let d_x_k = complex_mul(vec2(k_vec.x / k_len, 0.0), ih);
+    let d_z_k = complex_mul(vec2(k_vec.y / k_len, 0.0), ih);
+    let displacement_k = d_x_k + vec2(-d_z_k.y, d_z_k.x);
 
     let pack = c32_4(
-        vec4<f32>(d_eta_dx_k.x, d_eta_dz_k.x, h.x, chop_wind_k.x),
-        vec4<f32>(d_eta_dx_k.y, d_eta_dz_k.y, h.y, chop_wind_k.y),
+        vec4<f32>(d_eta_dx_k.x, d_eta_dz_k.x, h.x, displacement_k.x),
+        vec4<f32>(d_eta_dx_k.y, d_eta_dz_k.y, h.y, displacement_k.y),
     );
 
     let to_ifft = vec2<u32>((pos.x + n / 2u) % n, (pos.y + n / 2u) % n);

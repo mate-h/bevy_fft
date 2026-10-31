@@ -144,8 +144,8 @@ fn init_h0(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let dk_sq = delta_k * delta_k;
     // Mixing in the tile size keeps cascades with the same serial statistically independent.
-    let seed = gid.x + gid.y * n + params.h0_serial * 7919u + pcg32(bitcast<u32>(params.tile_size));
-    let xi = gaussian2(seed);
+    let seed_base = params.h0_serial * 7919u + pcg32(bitcast<u32>(params.tile_size));
+    let xi = gaussian2(gid.x + gid.y * n + seed_base);
     let phi_k = jonswap_phi_k(k);
     // Two separable IFFTs each apply 1/N. For independent Fourier coefficients on an N×N Hermitian grid,
     // target E[|h̃|²] = (N⁴/2) Φ Δk² so that E[η²] ≈ Σ Φ Δk² in meters². With h̃ = amp (ξ_r + i ξ_i),
@@ -158,7 +158,9 @@ fn init_h0(@builtin(global_invocation_id) gid: vec3<u32>) {
     let nx_m = f32(i32(mirror.x) - i32(n / 2u));
     let nz_m = f32(i32(mirror.y) - i32(n / 2u));
     let k_m = vec2<f32>(nx_m, nz_m) * delta_k;
-    let xi_m = gaussian2(seed ^ 0xdeadbeefu);
+    // The mirrored texel's own draw, so h(-k) = conj(h(k)) and every lane of the inverse FFT is real.
+    // The ocean packs two real fields into one complex lane and relies on this.
+    let xi_m = gaussian2(mirror.x + mirror.y * n + seed_base);
     let phi_m = jonswap_phi_k(k_m);
     let amp_m =
         sqrt(max(phi_m * dk_sq, 0.0)) * n_f * n_f * 0.5 * params.amplitude_scale;

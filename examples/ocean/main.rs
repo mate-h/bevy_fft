@@ -1,7 +1,7 @@
 //! Tessendorf-style ocean: GPU spectrum into FFT buffer **C**, inverse FFT, mesh displacement.
 //!
 //! The egui window shows [`FftTextures::power_spectrum`] and [`FftTextures::spatial_output`]. `spatial_output`
-//! uses R, G, B for slopes and height and W for wind-along chop after the ocean pack.
+//! uses R, G, B for slopes and height and W for horizontal displacement X after the ocean pack.
 //!
 //! **Plugin order:** add [`FftPlugin`](bevy_fft::fft::FftPlugin) before [`OceanPlugin`](bevy_fft::ocean::OceanPlugin).
 //! `OceanPlugin::finish` needs FFT render resources; reversing the order panics at startup.

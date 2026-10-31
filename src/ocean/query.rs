@@ -48,8 +48,8 @@ pub struct OceanSample {
     pub height: f32,
     /// Surface slope `(∂h/∂x, ∂h/∂z)`.
     pub slope: Vec2,
-    /// Horizontal chop offset in meters along the chop direction at the sampled point.
-    pub chop: f32,
+    /// Horizontal displacement `(x, z)` in meters that carries the surface at the sampled point.
+    pub displacement: Vec2,
     /// Water velocity at the surface in m/s. `x` and `z` are horizontal flow and `y` is the rate
     /// the surface rises.
     pub velocity: Vec3,
@@ -152,7 +152,7 @@ impl OceanQueries {
             OceanSample {
                 height: f(0),
                 slope: Vec2::new(f(1), f(2)),
-                chop: f(3),
+                displacement: Vec2::new(f(3), f(7)),
                 velocity: Vec3::new(f(4), f(6), f(5)),
             }
         }));
@@ -217,6 +217,7 @@ pub struct OceanQueryFrame {
     pub(super) output: Handle<ShaderBuffer>,
     pub(super) lod_displacement: Handle<Image>,
     pub(super) lod_flow: Handle<Image>,
+    pub(super) lod_foam: Handle<Image>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -273,6 +274,7 @@ pub(super) fn submit_ocean_queries(
     frame_out.output = queries.output.clone();
     frame_out.lod_displacement = lod.displacement.clone();
     frame_out.lod_flow = lod.flow.clone();
+    frame_out.lod_foam = lod.foam.clone();
 
     if !has_readback {
         commands
@@ -298,6 +300,7 @@ impl FromWorld for OceanQueryPipeline {
                 storage_buffer_sized(false, None),
                 texture_2d_array(TextureSampleType::Float { filterable: false }),
                 uniform_buffer::<WaterLodSlices>(false),
+                texture_2d_array(TextureSampleType::Float { filterable: false }),
                 texture_2d_array(TextureSampleType::Float { filterable: false }),
             ),
         );
@@ -339,9 +342,10 @@ pub(super) fn prepare_ocean_query_bind_group(
     else {
         return;
     };
-    let (Some(lod_view), Some(flow_view), Some(slices)) = (
+    let (Some(lod_view), Some(flow_view), Some(foam_view), Some(slices)) = (
         images.get(&frame.lod_displacement).map(|g| &g.texture_view),
         images.get(&frame.lod_flow).map(|g| &g.texture_view),
+        images.get(&frame.lod_foam).map(|g| &g.texture_view),
         lod_gpu.slices.binding(),
     ) else {
         return;
@@ -356,6 +360,7 @@ pub(super) fn prepare_ocean_query_bind_group(
             lod_view,
             slices,
             flow_view,
+            foam_view,
         )),
     ));
 }

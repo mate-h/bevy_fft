@@ -64,6 +64,10 @@ impl FromWorld for ShallowWaterLodPipeline {
                 texture_2d(unfiltered),
                 texture_2d(unfiltered),
                 texture_2d(unfiltered),
+                texture_2d(unfiltered),
+                texture_2d(unfiltered),
+                texture_2d(unfiltered),
+                texture_2d(unfiltered),
             ),
         );
         let layout = BindGroupLayoutDescriptor::new("shallow_water_lod_write_layout", &entries);
@@ -130,27 +134,34 @@ pub(super) fn prepare_shallow_water_lod_write(
         if frame.params.cascade_count == 0 || frame.displacement.len() < OCEAN_MAX_CASCADES {
             return None;
         }
-        let views = frame
-            .displacement
-            .iter()
-            .take(OCEAN_MAX_CASCADES)
-            .map(|handle| images.get(handle).map(|gpu| &gpu.texture_view))
-            .collect::<Option<Vec<_>>>()?;
-        Some((frame.params, views))
+        let views = |handles: &[Handle<Image>]| {
+            handles
+                .iter()
+                .take(OCEAN_MAX_CASCADES)
+                .map(|handle| images.get(handle).map(|gpu| &gpu.texture_view))
+                .collect::<Option<Vec<_>>>()
+        };
+        Some((
+            frame.params,
+            views(&frame.displacement)?,
+            views(&frame.foam)?,
+        ))
     });
-    let (tiles, amplitude, choppiness, cascade_count, disp) = match cascades {
-        Some((params, views)) => (
+    let (tiles, amplitude, choppiness, cascade_count, disp, foam) = match cascades {
+        Some((params, disp, foam)) => (
             params.cascade_tile_sizes,
             params.amplitude,
             params.choppiness,
             params.cascade_count,
-            views,
+            disp,
+            foam,
         ),
         None => (
             Vec4::ONE,
             0.0,
             0.0,
             0,
+            vec![&bed_water.texture_view; OCEAN_MAX_CASCADES],
             vec![&bed_water.texture_view; OCEAN_MAX_CASCADES],
         ),
     };
@@ -190,6 +201,10 @@ pub(super) fn prepare_shallow_water_lod_write(
             disp[1],
             disp[2],
             disp[3],
+            foam[0],
+            foam[1],
+            foam[2],
+            foam[3],
         )),
     ));
     let res = lod.slices.resolution;

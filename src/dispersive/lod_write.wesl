@@ -109,7 +109,7 @@ fn dispersive_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     if params.blend == BLEND_REPLACE {
         let surface = vec4<f32>(slope, params.datum + eta, 0.0);
         textureStore(displacement_out, gid.xy, slice, mix(base, surface, w));
-        let foam = vec4<f32>(base_f.r * (1.0 - w), mix(base_f.g, bd.y, w), base_f.ba);
+        let foam = vec4<f32>(base_f.r * (1.0 - w), mix(base_f.g, bd.y, w), base_f.b * (1.0 - w), base_f.a);
         textureStore(foam_out, gid.xy, slice, foam);
         textureStore(flow_out, gid.xy, slice, mix(base_v, flow, w));
     } else {

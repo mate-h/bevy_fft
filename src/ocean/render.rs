@@ -159,10 +159,10 @@ pub struct OceanFoamUniform {
     pub texture_size: u32,
     pub _pad0: u32,
     pub tile_size: f32,
-    pub _pad1: f32,
+    /// [`FftSource::spatial_display_gain`], which the resolve applies to the real lanes only.
+    pub normalization: f32,
     pub amplitude: f32,
     pub choppiness: f32,
-    pub wind_direction: f32,
     pub foam_cutoff: f32,
     pub foam_falloff: f32,
     pub foam_retention: f32,
@@ -255,6 +255,7 @@ impl FromWorld for OceanFoamPipelines {
             ShaderStages::COMPUTE,
             (
                 uniform_buffer::<OceanFoamUniform>(false),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadOnly),
                 texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadOnly),
                 texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadOnly),
                 texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
@@ -465,13 +466,17 @@ pub(super) fn prepare_ocean_foam_mask_image(
 
 pub(super) fn sync_ocean_foam_uniform(
     time: Res<Time>,
-    mut q: Query<(&crate::ocean::OceanSimSettings, &mut OceanFoamUniform)>,
+    mut q: Query<(
+        &crate::ocean::OceanSimSettings,
+        &FftSource,
+        &mut OceanFoamUniform,
+    )>,
     settings: Res<crate::ocean::OceanSurfaceSettings>,
 ) {
-    for (s, mut u) in &mut q {
+    for (s, source, mut u) in &mut q {
         u.texture_size = s.texture_size;
         u.tile_size = s.tile_size;
-        u.wind_direction = s.wind_direction;
+        u.normalization = source.spatial_display_gain;
         u.amplitude = settings.amplitude;
         u.choppiness = settings.choppiness;
         u.foam_cutoff = settings.foam_cutoff;
@@ -587,6 +592,12 @@ pub(super) fn prepare_ocean_foam_bind_groups(
         else {
             continue;
         };
+        let Some(spatial_im) = gpu_images
+            .get(&textures.buffer_b_im)
+            .map(|g| &g.texture_view)
+        else {
+            continue;
+        };
         let read_handle = if phase.0 % 2 == 0 {
             &foam_mask.texture_a
         } else {
@@ -607,7 +618,13 @@ pub(super) fn prepare_ocean_foam_bind_groups(
         let group = render_device.create_bind_group(
             "ocean_foam_bind_group",
             &layout,
-            &BindGroupEntries::sequential((foam_binding, spatial, foam_read, foam_write)),
+            &BindGroupEntries::sequential((
+                foam_binding,
+                spatial,
+                spatial_im,
+                foam_read,
+                foam_write,
+            )),
         );
 
         commands

@@ -21,17 +21,13 @@ use bevy::{
 };
 
 use super::{OCEAN_MAX_CASCADES, lod_write::OceanLodWriteFrame};
-use crate::{
-    shallow_water::{ShallowWaterController, ShallowWaterGpuResources},
-    water::WaterLodData,
-};
+use crate::shallow_water::{ShallowWaterController, ShallowWaterGpuResources};
 
 /// Uniform for `shallow_water_forcing.wesl`.
 #[derive(Clone, Copy, Default, ShaderType)]
 pub struct ShallowWaterForcingParams {
     pub cascade_tile_sizes: Vec4,
     pub grid_center: Vec2,
-    pub chop_dir: Vec2,
     pub cells: UVec2,
     pub cell_size: f32,
     pub datum: f32,
@@ -61,6 +57,10 @@ impl FromWorld for ShallowWaterForcingPipeline {
             (
                 uniform_buffer::<ShallowWaterForcingParams>(false),
                 texture_storage_2d(TextureFormat::R32Float, StorageTextureAccess::WriteOnly),
+                tex(),
+                tex(),
+                tex(),
+                tex(),
                 tex(),
                 tex(),
                 tex(),
@@ -99,7 +99,6 @@ pub(super) fn prepare_shallow_water_forcing(
     pipeline: Res<ShallowWaterForcingPipeline>,
     frame: Res<OceanLodWriteFrame>,
     controller: Option<Res<ShallowWaterController>>,
-    lod: Option<Res<WaterLodData>>,
     gpu: Option<Res<ShallowWaterGpuResources>>,
     images: Res<RenderAssets<GpuImage>>,
     mut state: ResMut<ShallowWaterForcingBindGroup>,
@@ -121,16 +120,17 @@ pub(super) fn prepare_shallow_water_forcing(
     let Some(eta_out) = images.get(&controller.ocean_eta) else {
         return;
     };
-    let Some(disp) = frame
-        .displacement
-        .iter()
-        .map(|h| images.get(h).map(|g| &g.texture_view))
-        .collect::<Option<Vec<_>>>()
-    else {
+    let views = |handles: &[Handle<Image>]| {
+        handles
+            .iter()
+            .take(OCEAN_MAX_CASCADES)
+            .map(|h| images.get(h).map(|g| &g.texture_view))
+            .collect::<Option<Vec<_>>>()
+    };
+    let (Some(disp), Some(foam)) = (views(&frame.displacement), views(&frame.foam)) else {
         return;
     };
 
-    let chop = lod.map_or(0.0, |l| l.slices.chop_direction);
     let seeding = gpu.is_some_and(|gpu| {
         controller.sim_apply_serial != gpu.last_applied_serial.load(Ordering::Relaxed)
     });
@@ -138,7 +138,6 @@ pub(super) fn prepare_shallow_water_forcing(
     state.params.set(ShallowWaterForcingParams {
         cascade_tile_sizes: frame.params.cascade_tile_sizes,
         grid_center: placement.center,
-        chop_dir: Vec2::from_angle(chop),
         cells: UVec2::new(controller.cells_x, controller.cells_y),
         cell_size: placement.cell_size,
         datum: placement.datum,
@@ -168,6 +167,10 @@ pub(super) fn prepare_shallow_water_forcing(
             disp[1],
             disp[2],
             disp[3],
+            foam[0],
+            foam[1],
+            foam[2],
+            foam[3],
         )),
     );
     state.group = Some(group);

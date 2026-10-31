@@ -50,7 +50,7 @@ pub struct OceanLodWriteParams {
 pub struct OceanLodWriteFrame {
     pub(crate) params: OceanLodWriteParams,
     pub(crate) displacement: Vec<Handle<Image>>,
-    pub(super) foam: Vec<Handle<Image>>,
+    pub(crate) foam: Vec<Handle<Image>>,
 }
 
 #[allow(clippy::type_complexity)]

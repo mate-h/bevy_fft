@@ -3,9 +3,9 @@
 // The input buffer starts with a header the main world writes each frame, then one `vec2` per query
 // point. The output starts with a header that echoes the frame id, then one `QuerySample` per point.
 
-import bevy_fft::water::lod::{WaterLodSlices, lod_chop_dir, sample_lod_finest};
+import bevy_fft::water::lod::{WaterLodSlices, sample_lod_finest};
 
-/// Fixed-point steps that undo horizontal chop, so a query returns the surface above the point.
+/// Fixed-point steps that undo horizontal displacement, so a query returns the surface above the point.
 const INVERT_STEPS: u32 = 4u;
 
 struct QueryHeader {
@@ -21,9 +21,9 @@ struct QueryInput {
 }
 
 struct QuerySample {
-    /// Height in meters, height slope along X, slope along Z, chop offset in meters.
+    /// Height in meters, height slope along X, slope along Z, horizontal displacement X in meters.
     surface: vec4<f32>,
-    /// Velocity in m/s along X, along Z, and vertical.
+    /// Velocity in m/s along X, along Z, and vertical, then horizontal displacement Z in meters.
     flow: vec4<f32>,
 }
 
@@ -38,11 +38,17 @@ struct QueryOutput {
 @group(0) @binding(2) var lod_displacement: texture_2d_array<f32>;
 @group(0) @binding(3) var<uniform> lod: WaterLodSlices;
 @group(0) @binding(4) var lod_flow: texture_2d_array<f32>;
+@group(0) @binding(5) var lod_foam: texture_2d_array<f32>;
 
 /// Finest available LOD data at `xz`, in the lane order the surface uses
-/// (slope x, slope z, height, chop).
+/// (slope x, slope z, height, displacement x).
 fn ocean_sample(xz: vec2<f32>) -> vec4<f32> {
     return sample_lod_finest(lod_displacement, lod, xz);
+}
+
+/// Horizontal displacement at `xz`. Z lives in the foam texture's blue lane.
+fn ocean_horizontal(xz: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(ocean_sample(xz).a, sample_lod_finest(lod_foam, lod, xz).b);
 }
 
 @compute @workgroup_size(64, 1, 1)
@@ -55,16 +61,15 @@ fn ocean_query(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let target_xz = query_in.points[gid.x];
-    let chop_dir = lod_chop_dir(lod);
-    // Find the undisplaced point whose chop lands on the target (Bowles, fixed-point iteration).
+    // Find the undisplaced point whose displacement lands on the target (Bowles, fixed-point iteration).
     var xz = target_xz;
     for (var step = 0u; step < INVERT_STEPS; step++) {
-        let s = ocean_sample(xz);
-        xz = target_xz - s.a * chop_dir;
+        xz = target_xz - ocean_horizontal(xz);
     }
-    // `ocean_sample` keeps the FFT lane order (slope x, slope z, height, chop). The output puts
-    // height first, matching `OceanSample` on the CPU.
+    // `ocean_sample` keeps the FFT lane order (slope x, slope z, height, displacement x). The
+    // output puts height first, matching `OceanSample` on the CPU.
     let s = ocean_sample(xz);
+    let dz = sample_lod_finest(lod_foam, lod, xz).b;
     let flow = sample_lod_finest(lod_flow, lod, xz);
-    query_out.samples[gid.x] = QuerySample(vec4<f32>(s.b, s.r, s.g, s.a), vec4<f32>(flow.xyz, 0.0));
+    query_out.samples[gid.x] = QuerySample(vec4<f32>(s.b, s.r, s.g, s.a), vec4<f32>(flow.xyz, dz));
 }

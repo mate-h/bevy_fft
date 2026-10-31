@@ -330,7 +330,7 @@ pub fn prepare_shallow_water_gpu(
 
     let wind_dir = lod
         .as_ref()
-        .map(|lod| Vec2::from_angle(lod.slices.chop_direction))
+        .map(|lod| Vec2::from_angle(lod.slices.wind_direction))
         .unwrap_or(Vec2::X);
     let simulation = build_simulation_uniform(
         controller.as_ref(),
