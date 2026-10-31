@@ -51,6 +51,10 @@ fn behind_scene(projected: vec3<f32>) -> bool {
     return depth > 0.0 && depth >= projected.z;
 }
 
+/// March and bisection steps of the screen-space traces.
+const TRACE_STEPS: u32 = 12u;
+const TRACE_REFINE_STEPS: u32 = 5u;
+
 // Bracket a crossing of the opaque depth surface, then refine it. Hits outside the screen,
 // across a depth discontinuity, or on the wrong side of the water interface are rejected.
 fn trace_scene(origin: vec3<f32>, direction: vec3<f32>, limit: f32, reflection: bool) -> RayHit {
@@ -58,15 +62,15 @@ fn trace_scene(origin: vec3<f32>, direction: vec3<f32>, limit: f32, reflection: 
     let clip_origin = view.clip_from_world * vec4<f32>(origin, 1.0);
     let clip_direction = view.clip_from_world * vec4<f32>(direction, 0.0);
     var previous = 0.025;
-    for (var i = 1u; i <= 20u; i++) {
-        let fraction = f32(i) / 20.0;
+    for (var i = 1u; i <= TRACE_STEPS; i++) {
+        let fraction = f32(i) / f32(TRACE_STEPS);
         let distance = 0.025 + fraction * fraction * limit;
         let projected = clip_to_uv_depth(clip_origin + clip_direction * distance);
         if projected.z < 0.0 || any(projected.xy <= vec2<f32>(0.0)) || any(projected.xy >= vec2<f32>(1.0)) { break; }
         if behind_scene(projected) {
             var lo = previous;
             var hi = distance;
-            for (var j = 0u; j < 6u; j++) {
+            for (var j = 0u; j < TRACE_REFINE_STEPS; j++) {
                 let mid = (lo + hi) * 0.5;
                 if behind_scene(clip_to_uv_depth(clip_origin + clip_direction * mid)) { hi = mid; }
                 else { lo = mid; }
