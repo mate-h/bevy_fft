@@ -5,8 +5,8 @@
 // the cells cannot resolve are added back from the FFT, faded out in the last half meter of
 // depth, and stay at full strength through the edge blend. Dry cells contribute the still-water
 // level so the mesh does not follow the bed up onto land. Flow takes the solver's velocity the
-// same way, with the vertical lane from mass conservation. The base data comes from a scratch
-// copy made just before this pass.
+// same way, with the vertical lane from mass conservation. Steep fronts between wet columns
+// write breaking foam. The base data comes from a scratch copy made just before this pass.
 
 import bevy_fft::water::lod::{WaterLodSlices, lod_texel_world};
 
@@ -33,6 +33,16 @@ const DRY_DEPTH: f32 = 1e-4;
 /// Unresolved FFT detail fades in across this depth range, in meters.
 const DETAIL_FADE_START: f32 = 0.05;
 const DETAIL_FADE_END: f32 = 0.5;
+/// Surface slopes across this range turn a solver front into breaking foam. A bore resolved over
+/// one or two cells is a near-vertical step that the surface normals cannot show.
+const BREAK_SLOPE_START: f32 = 0.12;
+const BREAK_SLOPE_END: f32 = 0.3;
+/// Water this deep on both sides of the front counts as breaking. Shallower columns are the
+/// wet and dry edge, where dry cells render at the still-water level and the slope is not a wave.
+const BREAK_MIN_DEPTH: f32 = 0.03;
+/// Breaking is depth limited. Steep fronts fade out of foam across this depth range, in meters.
+const BREAK_FADE_START: f32 = 1.5;
+const BREAK_FADE_END: f32 = 3.0;
 
 @group(0) @binding(0) var<uniform> params: ShallowWaterLodParams;
 @group(0) @binding(1) var<uniform> lod: WaterLodSlices;
@@ -193,7 +203,14 @@ fn shallow_water_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     let base = textureLoad(base_displacement, gid.xy, slice, 0);
     let base_f = textureLoad(base_foam, gid.xy, slice, 0);
     textureStore(displacement_out, gid.xy, slice, mix(base, swe, w));
-    let foam = vec4<f32>(base_f.r * (1.0 - w), mix(base_f.g, bw.y, w), base_f.ba);
+    let banks = min(
+        min(bed_water_at(g + dx).y, bed_water_at(g - dx).y),
+        min(bed_water_at(g + dz).y, bed_water_at(g - dz).y),
+    );
+    let breaking = smoothstep(BREAK_SLOPE_START, BREAK_SLOPE_END, length(slope))
+        * smoothstep(BREAK_MIN_DEPTH, 2.0 * BREAK_MIN_DEPTH, banks)
+        * (1.0 - smoothstep(BREAK_FADE_START, BREAK_FADE_END, bw.y));
+    let foam = vec4<f32>(mix(base_f.r, breaking, w), mix(base_f.g, bw.y, w), base_f.ba);
     textureStore(foam_out, gid.xy, slice, foam);
     let base_v = textureLoad(base_flow, gid.xy, slice, 0);
     let flow = vec4<f32>(velocity_at(g), rise, 0.0);
