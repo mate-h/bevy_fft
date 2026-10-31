@@ -2,7 +2,7 @@
 import bevy_pbr::render::mesh_view_bindings::{view, view_transmission_texture, view_transmission_sampler};
 import bevy_pbr::render::pbr_types::PbrInput;
 import bevy_pbr::render::pbr_functions::apply_pbr_lighting;
-import bevy_pbr::render::view_transformations::{position_ndc_to_world, position_world_to_view};
+import bevy_pbr::render::view_transformations::position_ndc_to_world;
 
 struct WaterOpticsUniform {
     extinction: vec3<f32>,
@@ -34,41 +34,45 @@ fn receiver_at(uv: vec2<f32>) -> Receiver {
     return result;
 }
 
-fn project_uv(world: vec3<f32>) -> vec3<f32> {
-    let clip = view.clip_from_world * vec4<f32>(world, 1.0);
+// Screen UV and reverse-Z depth of a clip-space point. Clip space is linear along a world ray,
+// so the march interpolates two clip positions instead of transforming every sample.
+fn clip_to_uv_depth(clip: vec4<f32>) -> vec3<f32> {
     if clip.w <= 0.0 { return vec3<f32>(-1.0); }
     let viewport_uv = clip.xy / clip.w * vec2<f32>(0.5, -0.5) + 0.5;
     let uv = (viewport_uv * view.viewport.zw + view.viewport.xy) / vec2<f32>(textureDimensions(opaque_depth));
     return vec3<f32>(uv, clip.z / clip.w);
 }
 
+// True where the opaque surface at the projected point is at or in front of it. Sky never is.
+fn behind_scene(projected: vec3<f32>) -> bool {
+    if any(projected.xy <= vec2<f32>(0.0)) || any(projected.xy >= vec2<f32>(1.0)) { return false; }
+    let pixel = vec2<i32>(projected.xy * vec2<f32>(textureDimensions(opaque_depth)));
+    let depth = textureLoad(opaque_depth, pixel, 0);
+    return depth > 0.0 && depth >= projected.z;
+}
+
 // Bracket a crossing of the opaque depth surface, then refine it. Hits outside the screen,
 // across a depth discontinuity, or on the wrong side of the water interface are rejected.
 fn trace_scene(origin: vec3<f32>, direction: vec3<f32>, limit: f32, reflection: bool) -> RayHit {
     var result: RayHit;
+    let clip_origin = view.clip_from_world * vec4<f32>(origin, 1.0);
+    let clip_direction = view.clip_from_world * vec4<f32>(direction, 0.0);
     var previous = 0.025;
     for (var i = 1u; i <= 20u; i++) {
         let fraction = f32(i) / 20.0;
         let distance = 0.025 + fraction * fraction * limit;
-        let point = origin + direction * distance;
-        let projected = project_uv(point);
+        let projected = clip_to_uv_depth(clip_origin + clip_direction * distance);
         if projected.z < 0.0 || any(projected.xy <= vec2<f32>(0.0)) || any(projected.xy >= vec2<f32>(1.0)) { break; }
-        let receiver = receiver_at(projected.xy);
-        if !receiver.valid { previous = distance; continue; }
-        let delta = position_world_to_view(receiver.position).z - position_world_to_view(point).z;
-        if delta >= 0.0 {
+        if behind_scene(projected) {
             var lo = previous;
             var hi = distance;
             for (var j = 0u; j < 6u; j++) {
                 let mid = (lo + hi) * 0.5;
-                let q = origin + direction * mid;
-                let uv = project_uv(q).xy;
-                let bed = receiver_at(uv);
-                if bed.valid && position_world_to_view(bed.position).z - position_world_to_view(q).z >= 0.0 { hi = mid; }
+                if behind_scene(clip_to_uv_depth(clip_origin + clip_direction * mid)) { hi = mid; }
                 else { lo = mid; }
             }
             let ray_point = origin + direction * hi;
-            let hit_uv = project_uv(ray_point).xy;
+            let hit_uv = clip_to_uv_depth(clip_origin + clip_direction * hi).xy;
             let hit = receiver_at(hit_uv);
             if !hit.valid { return result; }
             let tolerance = max(0.08, distance - previous);
@@ -128,19 +132,21 @@ fn shade_water(input: PbrInput, solver_depth: f32, foam: f32) -> vec4<f32> {
     reflection_input.material.specular_transmission = 0.0;
     reflection_input.material.base_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     reflection_input.material.perceptual_roughness = mix(input.material.perceptual_roughness, 0.65, foam);
-    let environment_reflection = apply_pbr_lighting(reflection_input).rgb;
-    var reflected = environment_reflection;
-    if optics.ssr_strength > 0.0 && foam < 0.95 {
-        let hit = trace_scene(input.world_position.xyz, reflect(-input.V, input.N), optics.max_distance, true);
-        if hit.confidence > 0.0 {
-            reflected = mix(environment_reflection, scene_color(hit.uv) * fresnel, hit.confidence * optics.ssr_strength * (1.0 - foam));
-        }
-    }
+    // Lighting the scattering body also yields the environment reflection as its specular part.
+    // The reflection alone is lit separately only where a screen-space hit replaces it.
     var body_input = reflection_input;
     body_input.material.base_color = vec4<f32>(mix(optics.scattering * (1.0 - transmittance), vec3<f32>(0.85), foam), 1.0);
-    let scattered = max(apply_pbr_lighting(body_input).rgb - environment_reflection, vec3<f32>(0.0));
+    var lit = apply_pbr_lighting(body_input).rgb;
+    if optics.ssr_strength > 0.0 && foam < 0.95 {
+        let hit = trace_scene(input.world_position.xyz, reflect(-input.V, input.N), optics.max_distance, true);
+        let weight = hit.confidence * optics.ssr_strength * (1.0 - foam);
+        if weight > 0.0 {
+            let environment_reflection = apply_pbr_lighting(reflection_input).rgb;
+            lit += (scene_color(hit.uv) * fresnel - environment_reflection) * weight;
+        }
+    }
     let transmitted = (vec3<f32>(1.0) - fresnel) * transmittance * bottom * (1.0 - foam);
-    var color = mix(background, reflected + scattered + transmitted, coverage);
+    var color = mix(background, lit + transmitted, coverage);
     if optics.debug_view == 1u { color = vec3<f32>(clamp(path / 5.0, 0.0, 1.0)); }
     if optics.debug_view == 2u { color = transmittance; }
     if optics.debug_view == 3u { color = vec3<f32>(coverage); }
