@@ -347,6 +347,10 @@ fn setup(
         asset_server.load(TERRAIN_CONFIG),
         TerrainViewConfig {
             view_lod: TERRAIN_VIEW_LOD,
+            // The default 40 meshes the ground with triangles about two pixels wide, and the GPU
+            // shades every edge quad of those twice or more. At 24 the cells stay finer than the
+            // 1 m data out to about 600 m. At 16 small cracks open between tile levels.
+            morph_distance: 24.0,
             ..default()
         },
         ground_material,
