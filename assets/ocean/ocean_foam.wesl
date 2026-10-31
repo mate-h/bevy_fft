@@ -8,8 +8,8 @@ struct OceanFoamParams {
     wind_direction: f32,
     foam_cutoff: f32,
     foam_falloff: f32,
-    /// Multiply last frame's foam each tick; lower values shorten trails (typical 0.9 to 0.99).
-    foam_trail_decay: f32,
+    /// Fraction of last frame's foam kept this frame, 0.5^(dt / half-life).
+    foam_retention: f32,
     _pad2: f32,
     _pad3: f32,
     _pad4: f32,
@@ -32,7 +32,9 @@ fn load_chop(ix: i32, iz: i32) -> f32 {
     return s.w;
 }
 
-/// Jacobian of horizontal displacement vs. plane coordinates; foam when folding drives J below `foam_cutoff`.
+/// Whitecaps from the horizontal displacement Jacobian. Foam starts where its smaller eigenvalue
+/// drops below `foam_cutoff`, so compression along any direction counts, then fades with the
+/// half-life folded into `foam_retention`.
 @compute @workgroup_size(8, 8, 1)
 fn ocean_jacobian_foam(@builtin(global_invocation_id) gid: vec3<u32>) {
     let n = params.texture_size;
@@ -58,14 +60,18 @@ fn ocean_jacobian_foam(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dv_dx = amp_chop * wz * dchop_dx;
     let dv_dz = amp_chop * wz * dchop_dz;
 
-    let J = (1.0 + du_dx) * (1.0 + dv_dz) - du_dz * dv_dx;
+    let jxx = 1.0 + du_dx;
+    let jzz = 1.0 + dv_dz;
+    let half_trace = 0.5 * (jxx + jzz);
+    let det = jxx * jzz - du_dz * dv_dx;
+    let lambda_min = half_trace - sqrt(max(half_trace * half_trace - det, 0.0));
 
     let c = params.foam_cutoff;
     let fall = max(params.foam_falloff, 1e-5);
-    let instant = clamp((c - J) / fall, 0.0, 1.0);
+    let instant = clamp((c - lambda_min) / fall, 0.0, 1.0);
     let prev = textureLoad(foam_prev, vec2<i32>(ix, iz)).r;
-    let decay = clamp(params.foam_trail_decay, 0.0, 1.0);
-    let trails = max(instant, prev * decay);
+    let retention = clamp(params.foam_retention, 0.0, 1.0);
+    let trails = max(instant, prev * retention);
 
     textureStore(foam_out, vec2<i32>(ix, iz), vec4<f32>(trails, 0.0, 0.0, 1.0));
 }

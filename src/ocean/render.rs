@@ -165,7 +165,7 @@ pub struct OceanFoamUniform {
     pub wind_direction: f32,
     pub foam_cutoff: f32,
     pub foam_falloff: f32,
-    pub foam_trail_decay: f32,
+    pub foam_retention: f32,
     pub _foam_uniform_pad2: f32,
     pub _foam_uniform_pad3: f32,
     pub _foam_uniform_pad4: f32,
@@ -464,6 +464,7 @@ pub(super) fn prepare_ocean_foam_mask_image(
 }
 
 pub(super) fn sync_ocean_foam_uniform(
+    time: Res<Time>,
     mut q: Query<(&crate::ocean::OceanSimSettings, &mut OceanFoamUniform)>,
     settings: Res<crate::ocean::OceanSurfaceSettings>,
 ) {
@@ -475,7 +476,8 @@ pub(super) fn sync_ocean_foam_uniform(
         u.choppiness = settings.choppiness;
         u.foam_cutoff = settings.foam_cutoff;
         u.foam_falloff = settings.foam_falloff;
-        u.foam_trail_decay = settings.foam_trail_decay;
+        let dt = time.delta_secs() * s.time_scale;
+        u.foam_retention = 0.5f32.powf(dt / settings.foam_half_life.max(1e-3));
     }
 }
 

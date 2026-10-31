@@ -530,7 +530,9 @@ fn ocean_egui_panel(
         ui.add(egui::Slider::new(&mut shaping.foam_cutoff, 0.2..=1.2).text("Foam cutoff"));
         ui.add(egui::Slider::new(&mut shaping.foam_falloff, 0.02..=0.8).text("Foam falloff"));
         ui.add(
-            egui::Slider::new(&mut shaping.foam_trail_decay, 0.85..=0.999).text("Foam trail decay"),
+            egui::Slider::new(&mut shaping.foam_half_life, 0.05..=4.0)
+                .logarithmic(true)
+                .text("Foam half-life (s)"),
         );
         ui.add(egui::Slider::new(&mut sun_settings.elevation, 0.0..=1.0).text("Sun light height"));
         if ui.button("Regenerate spectrum").clicked() {
