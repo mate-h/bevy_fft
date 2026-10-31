@@ -25,7 +25,7 @@ These Poly Haven assets are [CC0](https://polyhaven.com/license). The preparatio
 
 Class 2 marks structures. Without building geometry, the terrain beneath them uses the rock layer. The classification schema is read from the supplied `surface_classes_schema.json`. This is a material interpretation of that dataset, not an independent verification of its land-cover or benthic labels.
 
-The arrays contain 1K maps with a full mip chain. Color mips are filtered in linear light. Normal mips are renormalized, and roughness is packed into the normal texture's alpha channel. Triplanar projection keeps texture scale consistent on cliffs. Translated scan patches blend on a triangular lattice to reduce visible repetition while retaining the same physical scale. Rock albedo is darkened toward basalt, and vegetation layers receive a green tint for coastal ground cover. Adjacent classes blend their shaded materials across one source texel, without interpolating class IDs.
+The arrays contain 1K maps with a full mip chain. Color mips are filtered in linear light. Normal mips are renormalized, and roughness is packed into the normal texture's alpha channel. Triplanar projection keeps texture scale consistent on cliffs. Translated scan patches blend on a triangular lattice to reduce visible repetition while retaining the same physical scale. Rock albedo is darkened toward basalt, and vegetation layers receive a green tint for coastal ground cover. Adjacent classes blend their shaded materials across one source texel, without interpolating class IDs. The class lookup is offset by up to about 2 m of smooth world-space noise, so the raster's axis-aligned label edges render as irregular outlines instead of 1 m staircases.
 
 ## Sand moisture
 

@@ -49,6 +49,22 @@ struct TexturePair { color: vec4<f32>, detail: vec4<f32> }
 fn tile_hash(cell: vec2<f32>) -> vec2<f32> {
     return fract(sin(vec2<f32>(dot(cell, vec2<f32>(127.1, 311.7)), dot(cell, vec2<f32>(269.5, 183.3)))) * 43758.5453);
 }
+fn value_noise(p: vec2<f32>) -> vec2<f32> {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = tile_hash(i);
+    let b = tile_hash(i + vec2<f32>(1.0, 0.0));
+    let c = tile_hash(i + vec2<f32>(0.0, 1.0));
+    let d = tile_hash(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y) * 2.0 - 1.0;
+}
+
+// Offset in class texels that bends the raster's axis-aligned label edges into organic outlines.
+fn class_warp(xz: vec2<f32>) -> vec2<f32> {
+    return value_noise(xz / 7.0) * 1.6 + value_noise(xz / 2.3 + 17.0) * 0.6;
+}
+
 fn ground_texture(uv: vec2<f32>, layer: i32, dx: vec2<f32>, dy: vec2<f32>) -> TexturePair {
     let cell = floor(uv);
     let f = fract(uv);
@@ -140,10 +156,13 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     let i0 = vec2<i32>(floor(grid));
     let f = fract(grid);
     let wet = mix(mix(moisture_at(i0), moisture_at(i0 + vec2<i32>(1, 0)), f.x), mix(moisture_at(i0 + vec2<i32>(0, 1)), moisture_at(i0 + vec2<i32>(1, 1)), f.x), f.y);
-    let ida = class_at(i0);
-    let idb = class_at(i0 + vec2<i32>(1, 0));
-    let idc = class_at(i0 + vec2<i32>(0, 1));
-    let idd = class_at(i0 + vec2<i32>(1, 1));
+    let class_grid = grid + class_warp(world.xz);
+    let c0 = vec2<i32>(floor(class_grid));
+    let cf = fract(class_grid);
+    let ida = class_at(c0);
+    let idb = class_at(c0 + vec2<i32>(1, 0));
+    let idc = class_at(c0 + vec2<i32>(0, 1));
+    let idd = class_at(c0 + vec2<i32>(1, 1));
     let a = material_at(ida, world, dx, dy, normal, wet);
     var b = a;
     if idb != ida { b = material_at(idb, world, dx, dy, normal, wet); }
@@ -151,14 +170,14 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     if idc == idb { c = b; } else if idc != ida { c = material_at(idc, world, dx, dy, normal, wet); }
     var d = a;
     if idd == idb { d = b; } else if idd == idc { d = c; } else if idd != ida { d = material_at(idd, world, dx, dy, normal, wet); }
-    var color = mix(mix(a.color, b.color, f.x), mix(c.color, d.color, f.x), f.y);
-    if settings.domain.z > 0.5 && settings.domain.z < 1.5 { color = class_color(class_at(vec2<i32>(floor(grid + 0.5)))); }
+    var color = mix(mix(a.color, b.color, cf.x), mix(c.color, d.color, cf.x), cf.y);
+    if settings.domain.z > 0.5 && settings.domain.z < 1.5 { color = class_color(class_at(vec2<i32>(floor(class_grid + 0.5)))); }
     if settings.domain.z > 1.5 {
-        let id = class_at(vec2<i32>(floor(grid + 0.5)));
+        let id = class_at(vec2<i32>(floor(class_grid + 0.5)));
         color = vec3<f32>(select(0.0, wet, id == 4u || id == 9u));
     }
-    let shading_normal = normalize(mix(mix(a.normal, b.normal, f.x), mix(c.normal, d.normal, f.x), f.y));
-    let roughness = mix(mix(a.roughness, b.roughness, f.x), mix(c.roughness, d.roughness, f.x), f.y);
+    let shading_normal = normalize(mix(mix(a.normal, b.normal, cf.x), mix(c.normal, d.normal, cf.x), cf.y));
+    let roughness = mix(mix(a.roughness, b.roughness, cf.x), mix(c.roughness, d.roughness, cf.x), cf.y);
     var pbr = pbr_input_new();
     pbr.material.base_color = vec4<f32>(color, 1.0);
     pbr.material.perceptual_roughness = roughness;
