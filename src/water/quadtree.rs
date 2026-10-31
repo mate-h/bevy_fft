@@ -4,14 +4,15 @@
 //! is closer than its level's range, so tile size grows with distance, including distance above
 //! the water. Tiles outside the camera frustum are dropped. The surviving tiles go to the GPU as a
 //! list, and the mesh is a fixed pool of tile grids that the water vertex shader places from that
-//! list. Pool slots past the end of the list collapse to a point and draw nothing.
+//! list. Indirect draws visit only the selected slots. Without indirect drawing, unused slots
+//! collapse outside the clip volume.
 //!
 //! Vertices near the far edge of a tile's range morph onto the grid of the next coarser level, so
 //! neighbouring tiles of different levels meet without cracks and levels change without popping.
 //! [`WaterQuadtree::lod_range`] is clamped so that this holds for every tile.
 //!
-//! Selection runs on the CPU. A few hundred tiles take microseconds to select, and keeping the
-//! draw in Bevy's material pipeline means shadows, prepasses, and deferred shading all work.
+//! Selection runs in compute by default. The CPU path remains available as a reference.
+//! Both paths use Bevy's material pipeline for shadows, prepasses, and deferred shading.
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -22,6 +23,10 @@ use bevy::{
     mesh::{Indices, PrimitiveTopology},
     prelude::*,
     render::storage::ShaderBuffer,
+    render::{
+        batching::NoAutomaticBatching,
+        gpu_readback::{Readback, ReadbackComplete},
+    },
 };
 
 use super::{WaterSurfaceMaterial, WaterSurfaceTag, WaterViewer};
@@ -30,8 +35,16 @@ use super::{WaterSurfaceMaterial, WaterSurfaceTag, WaterViewer};
 /// [`WaterSurfaceMaterial`](super::WaterSurfaceMaterial). The plugin builds the tile pool
 /// [`Mesh3d`], tags the entity with [`WaterSurfaceTag`], and refreshes the tile list each frame.
 #[derive(Component, Clone, Copy, Debug, Reflect)]
-#[require(Transform, Visibility, NoFrustumCulling, WaterQuadtreeStats)]
+#[require(
+    Transform,
+    Visibility,
+    NoFrustumCulling,
+    NoAutomaticBatching,
+    WaterQuadtreeStats
+)]
 pub struct WaterQuadtree {
+    /// Selects tiles in compute. Disable to use the CPU reference selector.
+    pub gpu_selection: bool,
     /// Edge length of the smallest tiles in meters.
     pub leaf_size: f32,
     /// Grid cells along each tile edge. Rounded to an even number, since morphing pairs cells.
@@ -58,6 +71,7 @@ pub struct WaterQuadtree {
 impl Default for WaterQuadtree {
     fn default() -> Self {
         Self {
+            gpu_selection: true,
             leaf_size: 2.0,
             tile_cells: 8,
             levels: 13,
@@ -71,7 +85,9 @@ impl Default for WaterQuadtree {
     }
 }
 
-/// Tiles drawn last frame, for comparing against other meshes.
+/// Most recent completed tile selection, for comparing against other meshes.
+/// GPU results arrive asynchronously. Without indirect drawing, unused pool slots still run
+/// the vertex shader and collapse outside the clip volume.
 #[derive(Component, Clone, Copy, Debug, Default, Reflect)]
 pub struct WaterQuadtreeStats {
     /// Tiles selected and inside the frustum.
@@ -93,11 +109,11 @@ pub struct WaterQuadtreeTile {
 }
 
 impl WaterQuadtree {
-    fn cells(&self) -> u32 {
+    pub(super) fn cells(&self) -> u32 {
         (self.tile_cells.max(2) / 2) * 2
     }
 
-    fn morph_start_ratio(&self) -> f32 {
+    pub(super) fn morph_start_ratio(&self) -> f32 {
         self.morph_start.clamp(0.05, 0.95)
     }
 
@@ -303,11 +319,25 @@ pub(super) fn build_water_quadtrees(
         if let Some(material) = material {
             entity.insert(material.clone());
         }
-        if buffer.is_none() {
-            let words = quadtree.gpu_words(Vec3::ZERO, &[]);
-            entity.insert(WaterQuadtreeBuffer(
-                buffers.add(ShaderBuffer::new(words, RenderAssetUsages::default())),
-            ));
+        let mut words = quadtree.gpu_words(Vec3::ZERO, &[]);
+        words.resize(2 + quadtree.max_tiles.max(1) as usize * 2, [0.0; 4]);
+        let handle = buffer.map(|b| b.0.clone()).unwrap_or_else(|| {
+            buffers.add(ShaderBuffer::new(
+                words.clone(),
+                RenderAssetUsages::default(),
+            ))
+        });
+        buffers
+            .insert(
+                handle.id(),
+                ShaderBuffer::new(words, RenderAssetUsages::default()),
+            )
+            .unwrap();
+        entity.insert(WaterQuadtreeBuffer(handle.clone()));
+        if quadtree.gpu_selection {
+            entity.insert(Readback::buffer_range(handle, 16, 16));
+        } else {
+            entity.remove::<Readback>();
         }
     }
 }
@@ -320,15 +350,28 @@ pub(super) fn select_water_quadtrees(
     mut quadtrees: Query<(
         &WaterQuadtree,
         &WaterQuadtreeBuffer,
+        &Mesh3d,
         &mut WaterQuadtreeStats,
     )>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
+    mut frame: ResMut<super::quadtree_gpu::WaterQuadtreeFrame>,
 ) {
+    frame.0.clear();
     let Some((camera, frustum)) = viewers.iter().next().or_else(|| cameras.iter().next()) else {
         return;
     };
     let eye = camera.translation();
-    for (quadtree, buffer, mut stats) in &mut quadtrees {
+    for (quadtree, buffer, mesh, mut stats) in &mut quadtrees {
+        if quadtree.gpu_selection {
+            frame.0.push(super::quadtree_gpu::FrameEntry::new(
+                *quadtree,
+                eye,
+                frustum,
+                buffer.0.clone(),
+                mesh.0.id(),
+            ));
+            continue;
+        }
         let (tiles, dropped) = quadtree.select(eye, |aabb| match frustum {
             Some(f) if quadtree.frustum_cull => f.intersects_obb_identity(aabb),
             _ => true,
@@ -346,6 +389,25 @@ pub(super) fn select_water_quadtrees(
             );
         }
     }
+}
+
+pub(super) fn read_quadtree_stats(
+    event: On<ReadbackComplete>,
+    mut quadtrees: Query<(&WaterQuadtree, &mut WaterQuadtreeStats)>,
+) {
+    let Ok((q, mut stats)) = quadtrees.get_mut(event.entity) else {
+        return;
+    };
+    if !q.gpu_selection || event.data.len() < 16 {
+        return;
+    }
+    let word = |i: usize| u32::from_le_bytes(event.data[i..i + 4].try_into().unwrap());
+    let tiles = word(0).min(q.max_tiles);
+    *stats = WaterQuadtreeStats {
+        tiles,
+        vertices: tiles * (q.cells() + 1).pow(2),
+        dropped: word(12),
+    };
 }
 
 #[cfg(test)]

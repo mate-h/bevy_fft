@@ -22,6 +22,7 @@ use bevy::{
     },
     post_process::bloom::Bloom,
     prelude::*,
+    render::{batching::NoAutomaticBatching, gpu_readback::Readback},
 };
 use bevy_egui::{
     EguiContexts, EguiPlugin, EguiPrimaryContextPass, EguiTextureHandle, egui,
@@ -282,8 +283,12 @@ fn spawn_ocean_when_ready(
     };
 
     let mut surface = commands.spawn((MeshMaterial3d(materials.add(material)), WaterSurfaceTag));
-    if std::env::var("BEVY_FFT_OCEAN_MESH").as_deref() == Ok("quadtree") {
-        surface.insert(WaterQuadtree::default());
+    let mesh = std::env::var("BEVY_FFT_OCEAN_MESH").unwrap_or_default();
+    if mesh == "quadtree" || mesh == "cpu_quadtree" {
+        surface.insert(WaterQuadtree {
+            gpu_selection: mesh != "cpu_quadtree",
+            ..default()
+        });
     } else {
         surface.insert(OceanClipmap::default());
     }
@@ -300,12 +305,13 @@ fn water_mesh_panel(
             Option<&mut OceanClipmap>,
             Option<&WaterQuadtreeStats>,
             Option<&Mesh3d>,
+            Option<&mut WaterQuadtree>,
         ),
         With<WaterSurfaceTag>,
     >,
     meshes: Res<Assets<Mesh>>,
 ) {
-    let Ok((entity, clipmap, stats, mesh)) = surfaces.single_mut() else {
+    let Ok((entity, clipmap, stats, mesh, quadtree_settings)) = surfaces.single_mut() else {
         return;
     };
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -333,11 +339,18 @@ fn water_mesh_panel(
             }
             if let Some(stats) = stats {
                 ui.label(format!(
-                    "{} vertices in {} tiles",
+                    "{} selected vertices in {} tiles",
                     stats.vertices, stats.tiles
                 ));
                 if stats.dropped > 0 {
                     ui.label(format!("{} tiles did not fit the pool", stats.dropped));
+                }
+            }
+            if let Some(mut settings) = quadtree_settings {
+                let mut gpu = settings.gpu_selection;
+                ui.checkbox(&mut gpu, "GPU selection");
+                if gpu != settings.gpu_selection {
+                    settings.gpu_selection = gpu;
                 }
             }
             if pick_quadtree != quadtree {
@@ -350,6 +363,8 @@ fn water_mesh_panel(
                     OceanClipmap,
                     NoFrustumCulling,
                     Aabb,
+                    Readback,
+                    NoAutomaticBatching,
                 )>()
                 .insert(Transform::IDENTITY);
                 if pick_quadtree {

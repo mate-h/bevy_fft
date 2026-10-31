@@ -20,6 +20,7 @@
 mod blend;
 mod lod_data;
 mod quadtree;
+mod quadtree_gpu;
 mod surface;
 
 pub use blend::WaterLodScratch;
@@ -40,7 +41,7 @@ use bevy::{
     asset::embedded_asset,
     prelude::*,
     render::{
-        Render, RenderApp, RenderSystems,
+        GpuResourceAppExt, Render, RenderApp, RenderSystems,
         extract_resource::ExtractResourcePlugin,
         renderer::{RenderGraph, RenderGraphSystems},
     },
@@ -70,14 +71,18 @@ impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
         bevy::shader::load_shader_library!(app, "lod.wesl");
         embedded_asset!(app, "surface.wesl");
+        embedded_asset!(app, "quadtree.wesl");
         app.register_type::<WaterLodSettings>()
             .register_type::<WaterViewer>()
             .register_type::<WaterSurfaceUniform>()
             .register_type::<WaterQuadtree>()
             .register_type::<WaterQuadtreeStats>()
             .init_resource::<WaterLodSettings>()
+            .init_resource::<quadtree_gpu::WaterQuadtreeFrame>()
+            .add_plugins(ExtractResourcePlugin::<quadtree_gpu::WaterQuadtreeFrame>::default())
             .add_plugins(ExtractResourcePlugin::<WaterLodData>::default())
             .add_plugins(MaterialPlugin::<WaterSurfaceMaterial>::default())
+            .add_observer(quadtree::read_quadtree_stats)
             .add_systems(
                 PreStartup,
                 (
@@ -99,6 +104,8 @@ impl Plugin for WaterPlugin {
             );
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
+                .init_resource::<quadtree_gpu::GpuQuadtrees>()
+                .init_gpu_resource::<quadtree_gpu::QuadtreePipeline>()
                 .init_resource::<WaterLodGpu>()
                 .init_resource::<WaterLodScratch>()
                 .add_systems(
@@ -106,6 +113,7 @@ impl Plugin for WaterPlugin {
                     (
                         lod_data::prepare_water_lod_gpu,
                         blend::prepare_water_lod_scratch,
+                        quadtree_gpu::prepare_quadtrees,
                     )
                         .in_set(RenderSystems::PrepareResources),
                 )
@@ -119,7 +127,18 @@ impl Plugin for WaterPlugin {
                         .chain()
                         .in_set(RenderGraphSystems::Render)
                         .before(bevy::core_pipeline::schedule::camera_driver),
+                )
+                .add_systems(
+                    RenderGraph,
+                    quadtree_gpu::select_quadtrees
+                        .in_set(RenderGraphSystems::Render)
+                        .before(bevy::core_pipeline::schedule::camera_driver),
                 );
+            quadtree_gpu::configure_draws(render_app);
         }
+    }
+
+    fn finish(&self, app: &mut App) {
+        quadtree_gpu::install_draws(app);
     }
 }
