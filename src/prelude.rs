@@ -8,8 +8,9 @@
 //! internals remain on [`crate::fft`] and [`crate::fft::resources`].
 
 pub use crate::dispersive::{
-    DispersiveController, DispersiveGridImages, DispersiveMaterialUniform, DispersivePlugin,
-    DispersiveSimRoot, DispersiveSurfaceExtension, DispersiveSurfaceMaterial, DispersiveSurfaceTag,
+    DispersiveController, DispersiveGridImages, DispersiveLodBlend, DispersiveMaterialUniform,
+    DispersivePlacement, DispersivePlugin, DispersiveSimRoot, DispersiveSurfaceExtension,
+    DispersiveSurfaceMaterial, DispersiveSurfaceTag,
 };
 pub use crate::ewave::{
     EwaveController, EwaveGridImages, EwaveMaterialUniform, EwavePlugin, EwaveSimRoot,
@@ -22,12 +23,20 @@ pub use crate::fft::{
     run_fft_resolve_outputs, run_fft_resolve_spectrum,
 };
 pub use crate::ocean::{
-    OceanDynamicUniform, OceanFoamMask, OceanFoamPhase, OceanFoamUniform, OceanH0Image,
-    OceanH0Uniform, OceanMaterialUniform, OceanPlugin, OceanSimSettings, OceanSurfaceExtension,
-    OceanSurfaceMaterial, OceanSurfaceTag,
+    OCEAN_MAX_CASCADES, OCEAN_QUERY_MAX_POINTS, OceanCascade, OceanClipmap, OceanDynamicUniform,
+    OceanFoamMask, OceanFoamPhase, OceanFoamUniform, OceanH0Image, OceanH0Uniform, OceanPlugin,
+    OceanQueries, OceanQueryResults, OceanSample, OceanSimSettings, OceanSurfaceSettings,
 };
 pub use crate::shallow_water::{
-    ShallowWaterBorder, ShallowWaterController, ShallowWaterMaterialUniform, ShallowWaterPlugin,
+    SHALLOW_WATER_PRESET_BED_SOURCE, ShallowWaterBorder, ShallowWaterController,
+    ShallowWaterMaterialUniform, ShallowWaterPlacement, ShallowWaterPlugin,
     ShallowWaterSurfaceExtension, ShallowWaterSurfaceMaterial, ShallowWaterSurfaceTag,
-    round_particle_count,
+    bed_source_image, round_particle_count,
+};
+pub use crate::water::{
+    WATER_LOD_MAX_SLICES, WATER_LOD_SURFACE_FORMAT, WaterLodData, WaterLodGraphSystems,
+    WaterLodScratch, WaterLodSettings, WaterLodSlices, WaterLodSystems, WaterOpticsUniform,
+    WaterPlugin, WaterQuadtree, WaterQuadtreeBuffer, WaterQuadtreeStats, WaterQuadtreeTile,
+    WaterSurfaceExtension, WaterSurfaceMaterial, WaterSurfaceTag, WaterSurfaceUniform,
+    WaterTransmission, WaterViewer,
 };

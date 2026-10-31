@@ -9,7 +9,6 @@ use bevy::{
         VolumetricLight, atmosphere::ScatteringMedium, light_consts::lux,
     },
     material::OpaqueRendererMethod,
-    math::primitives::InfinitePlane3d,
     mesh::Meshable,
     pbr::{AtmosphereSettings, DefaultOpaqueRendererMethod, StandardMaterial},
     post_process::bloom::Bloom,
@@ -19,6 +18,7 @@ use bevy::{
         render_resource::WgpuFeatures,
         settings::{RenderCreation, WgpuSettings},
     },
+    shape::InfinitePlane3d,
     transform::TransformSystems,
 };
 use bevy_egui::{
@@ -290,6 +290,7 @@ fn border_combo(ui: &mut egui::Ui, label: &str, value: &mut ShallowWaterBorder) 
                 ui.selectable_value(value, ShallowWaterBorder::Source, "Source");
                 ui.selectable_value(value, ShallowWaterBorder::Drain, "Drain");
                 ui.selectable_value(value, ShallowWaterBorder::Waves, "Waves");
+                ui.selectable_value(value, ShallowWaterBorder::Ocean, "Ocean");
             });
     });
 }

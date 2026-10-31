@@ -6,6 +6,7 @@ use bevy::{
     },
     log::{error, info},
     render::{
+        diagnostic::RecordDiagnostics,
         render_resource::{ComputePass, ComputePassDescriptor, PipelineCache},
         renderer::{RenderContext, RenderGraph, RenderGraphSystems},
     },
@@ -272,7 +273,10 @@ pub fn run_fft_forward(
     pipeline_cache: bevy::prelude::Res<PipelineCache>,
     query: Query<(&FftBindGroups, &FftSettings)>,
 ) {
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let command_encoder = ctx.command_encoder();
+    let time_span = diagnostics.time_span(command_encoder, "fft_forward");
     let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
         label: Some("fft_forward"),
         timestamp_writes: None,
@@ -295,6 +299,8 @@ pub fn run_fft_forward(
             settings,
         );
     }
+    drop(compute_pass);
+    time_span.end(command_encoder);
 }
 
 pub fn run_fft_inverse(
@@ -303,7 +309,10 @@ pub fn run_fft_inverse(
     pipeline_cache: bevy::prelude::Res<PipelineCache>,
     query: Query<(&FftBindGroups, &FftSettings)>,
 ) {
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let command_encoder = ctx.command_encoder();
+    let time_span = diagnostics.time_span(command_encoder, "fft_inverse");
     let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
         label: Some("fft_inverse"),
         timestamp_writes: None,
@@ -323,6 +332,8 @@ pub fn run_fft_inverse(
             settings,
         );
     }
+    drop(compute_pass);
+    time_span.end(command_encoder);
 }
 
 fn fft_spectrum_passthrough() {}
@@ -337,7 +348,10 @@ pub fn run_fft_resolve_spectrum(
         return;
     };
 
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let command_encoder = ctx.command_encoder();
+    let time_span = diagnostics.time_span(command_encoder, "fft_resolve_spectrum");
     let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
         label: Some("fft_resolve_spectrum_pass"),
         timestamp_writes: None,
@@ -352,6 +366,8 @@ pub fn run_fft_resolve_spectrum(
         let ny = settings.size.y.div_ceil(wg);
         compute_pass.dispatch_workgroups(nx, ny, 1);
     }
+    drop(compute_pass);
+    time_span.end(command_encoder);
 }
 
 pub fn run_fft_resolve_outputs(
@@ -364,7 +380,10 @@ pub fn run_fft_resolve_outputs(
         return;
     };
 
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let command_encoder = ctx.command_encoder();
+    let time_span = diagnostics.time_span(command_encoder, "fft_resolve_spatial");
     let mut compute_pass = command_encoder.begin_compute_pass(&ComputePassDescriptor {
         label: Some("fft_resolve_spatial_pass"),
         timestamp_writes: None,
@@ -379,4 +398,6 @@ pub fn run_fft_resolve_outputs(
         let ny = settings.size.y.div_ceil(wg);
         compute_pass.dispatch_workgroups(nx, ny, 1);
     }
+    drop(compute_pass);
+    time_span.end(command_encoder);
 }

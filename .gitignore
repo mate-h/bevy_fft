@@ -1,3 +1,7 @@
 /target
 /bevy
 /assets/test_patterns
+/.dev
+/assets/terrains
+
+/assets/beach_materials

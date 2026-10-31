@@ -1,6 +1,6 @@
 //! Compute pipelines, GPU buffers, bind groups, and the root render-graph node for shallow water.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use bevy::{
     app::SubApp,
@@ -9,9 +9,10 @@ use bevy::{
     prelude::*,
     render::{
         Render, RenderSystems,
+        diagnostic::RecordDiagnostics,
         render_asset::RenderAssets,
         render_resource::{
-            binding_types::{storage_buffer, texture_storage_2d, uniform_buffer},
+            binding_types::{storage_buffer, texture_2d, texture_storage_2d, uniform_buffer},
             encase::internal::{WriteInto, Writer},
             *,
         },
@@ -39,6 +40,7 @@ pub struct ShallowWaterPipelines {
     pub clear: CachedComputePipelineId,
     pub load_preset: CachedComputePipelineId,
     pub interact: CachedComputePipelineId,
+    pub ocean_band: CachedComputePipelineId,
     pub mac_u_copy: CachedComputePipelineId,
     pub mac_u_sl_forward: CachedComputePipelineId,
     pub mac_u_sl_reverse: CachedComputePipelineId,
@@ -61,6 +63,8 @@ pub struct ShallowWaterPipelines {
     pub overshoot_reduce: CachedComputePipelineId,
     pub reconstruct_cell_velocity: CachedComputePipelineId,
     pub update_particles: CachedComputePipelineId,
+    pub seed_height: CachedComputePipelineId,
+    pub seed_faces: CachedComputePipelineId,
 }
 
 impl FromWorld for ShallowWaterPipelines {
@@ -81,6 +85,7 @@ impl FromWorld for ShallowWaterPipelines {
                     texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
                     texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
                     storage_buffer::<GpuParticle>(false),
+                    texture_storage_2d(TextureFormat::R32Float, StorageTextureAccess::ReadWrite),
                 ),
             ),
         );
@@ -92,6 +97,7 @@ impl FromWorld for ShallowWaterPipelines {
                 (
                     uniform_buffer::<GpuInteractionUniform>(false),
                     uniform_buffer::<GpuSimulationUniform>(false),
+                    texture_2d(TextureSampleType::Float { filterable: false }),
                 ),
             ),
         );
@@ -118,6 +124,7 @@ impl FromWorld for ShallowWaterPipelines {
             clear: q("shallow_water_clear", "clearBuffers"),
             load_preset: q("shallow_water_preset", "loadPreset"),
             interact: q("shallow_water_interact", "interact"),
+            ocean_band: q("shallow_water_ocean_band", "oceanBand"),
             mac_u_copy: q("shallow_water_mac_u_copy", "macU_copy"),
             mac_u_sl_forward: q("shallow_water_mac_u_fwd", "macU_sl_forward"),
             mac_u_sl_reverse: q("shallow_water_mac_u_rev", "macU_sl_reverse"),
@@ -139,6 +146,8 @@ impl FromWorld for ShallowWaterPipelines {
             pml_damp_w: q("shallow_water_pml_w", "pmlDampFaceW"),
             overshoot_reduce: q("shallow_water_overshoot", "overshootReduce"),
             reconstruct_cell_velocity: q("shallow_water_recon_vel", "reconstructCellVelocity"),
+            seed_height: q("shallow_water_seed_height", "seedOceanHeight"),
+            seed_faces: q("shallow_water_seed_faces", "seedOceanFaces"),
             update_particles: pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("shallow_water_particles".into()),
                 layout,
@@ -162,6 +171,9 @@ pub struct ShallowWaterGpuResources {
     pub buffer_bind_group: Option<BindGroup>,
     pub settings_bind_group: Option<BindGroup>,
     pub last_applied_serial: AtomicU32,
+    /// Set for this frame when the ocean forcing pass wrote a target height for every cell.
+    /// The sim consumes it to seed the wet interior after `loadPreset`.
+    pub ocean_seed_written: AtomicBool,
 }
 
 impl Default for ShallowWaterGpuResources {
@@ -174,6 +186,7 @@ impl Default for ShallowWaterGpuResources {
             buffer_bind_group: None,
             settings_bind_group: None,
             last_applied_serial: AtomicU32::new(0),
+            ocean_seed_written: AtomicBool::new(false),
         }
     }
 }
@@ -216,8 +229,9 @@ impl SimWorkgroups {
 fn build_simulation_uniform(
     controller: &ShallowWaterController,
     timestamp: u32,
+    wind_dir: Vec2,
 ) -> GpuSimulationUniform {
-    let dx = 1.0_f32;
+    let dx = controller.cell_size();
     let friction_factor = (1.0 - controller.friction.clamp(0.0, 1.0)).powf(controller.dt);
     GpuSimulationUniform {
         size: UVec2::new(controller.cells_x, controller.cells_y),
@@ -228,7 +242,7 @@ fn build_simulation_uniform(
         timestamp,
         border_mask: controller.packed_border_mask(),
         pml_width: controller.pml_width,
-        flags: 1,
+        flags: 1 | if controller.ocean_forcing { 2 } else { 0 },
         pml_eta_rest: controller.pml_eta_rest,
         vel_clamp_alpha: 0.5,
         h_avgmax_beta: 2.0,
@@ -240,6 +254,8 @@ fn build_simulation_uniform(
         overshoot_lambda_edge: 2.0 * dx,
         pml_sigma_exponent: controller.pml_sigma_exponent.clamp(1.0, 4.0),
         pml_cosine_blend: controller.pml_cosine_blend.clamp(0.0, 1.0),
+        ocean_band_cells: controller.ocean_band_cells.max(0.0),
+        wind_dir,
     }
 }
 
@@ -249,6 +265,7 @@ pub fn prepare_shallow_water_gpu(
     render_queue: Res<RenderQueue>,
     gpu_images: Res<RenderAssets<GpuImage>>,
     controller: Res<ShallowWaterController>,
+    lod: Option<Res<crate::water::WaterLodData>>,
     timestamp: Res<ShallowWaterTimestamp>,
     pipelines: Res<ShallowWaterPipelines>,
     pipeline_cache: Res<PipelineCache>,
@@ -307,11 +324,19 @@ pub fn prepare_shallow_water_gpu(
         old_position: controller.pointer_prev_sim,
         position: controller.pointer_sim,
         preset: controller.preset_index,
+        fill_level: controller.fill_level,
     };
     write_uniform(&render_queue, interaction_buf, &interaction);
 
-    let simulation =
-        build_simulation_uniform(controller.as_ref(), timestamp.0.load(Ordering::Relaxed));
+    let wind_dir = lod
+        .as_ref()
+        .map(|lod| Vec2::from_angle(lod.slices.chop_direction))
+        .unwrap_or(Vec2::X);
+    let simulation = build_simulation_uniform(
+        controller.as_ref(),
+        timestamp.0.load(Ordering::Relaxed),
+        wind_dir,
+    );
     write_uniform(&render_queue, simulation_buf, &simulation);
 
     let Some(bed) = gpu_images.get(&controller.bed_water) else {
@@ -349,6 +374,16 @@ pub fn prepare_shallow_water_gpu(
         gpu.settings_bind_group = None;
         return;
     };
+    let Some(ocean_eta) = gpu_images.get(&controller.ocean_eta) else {
+        gpu.buffer_bind_group = None;
+        gpu.settings_bind_group = None;
+        return;
+    };
+    let Some(bed_source) = gpu_images.get(&controller.bed_source) else {
+        gpu.buffer_bind_group = None;
+        gpu.settings_bind_group = None;
+        return;
+    };
 
     let buffers_layout = pipeline_cache.get_bind_group_layout(&pipelines.layout_buffers);
     let settings_layout = pipeline_cache.get_bind_group_layout(&pipelines.layout_settings);
@@ -365,6 +400,7 @@ pub fn prepare_shallow_water_gpu(
             &vel.texture_view,
             &pml.texture_view,
             particles_buf.as_entire_buffer_binding(),
+            &ocean_eta.texture_view,
         )),
     );
 
@@ -374,6 +410,7 @@ pub fn prepare_shallow_water_gpu(
         &BindGroupEntries::sequential((
             interaction_buf.as_entire_buffer_binding(),
             simulation_buf.as_entire_buffer_binding(),
+            &bed_source.texture_view,
         )),
     );
 
@@ -415,24 +452,24 @@ pub fn run_shallow_water_sim(
         return;
     };
 
-    macro_rules! require_pipe {
-        ($name:ident) => {
-            match pipe!($name) {
-                Some(p) => p,
-                None => return,
-            }
-        };
-    }
-
     let wg = SimWorkgroups::new(controller.cells_x, controller.cells_y);
     let pc = gpu_res.particle_count / 64;
 
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let enc = ctx.command_encoder();
+    let time_span = diagnostics.time_span(enc, "shallow_water");
 
     let apply_init =
         controller.sim_apply_serial != gpu_res.last_applied_serial.load(Ordering::Relaxed);
+    // Wait for a full-grid ocean target before consuming the reset, so the seed is the FFT
+    // field and not still water. Without a placement the forcing pass never writes one.
+    let defer_init = controller.ocean_forcing
+        && controller.placement.is_some()
+        && apply_init
+        && !gpu_res.ocean_seed_written.load(Ordering::Relaxed);
 
-    {
+    let encoded = (|| -> Option<()> {
         let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
             label: Some("shallow_water_pass"),
             timestamp_writes: None,
@@ -446,70 +483,83 @@ pub fn run_shallow_water_sim(
             pass.dispatch_workgroups(wg.border.0, wg.border.1, 1);
             pass.set_pipeline(p_preset);
             pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
+            if controller.ocean_forcing && !defer_init {
+                pass.set_pipeline(pipe!(seed_height)?);
+                pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
+                pass.set_pipeline(pipe!(seed_faces)?);
+                pass.dispatch_workgroups(wg.border.0, wg.border.1, 1);
+            }
         }
 
         pass.set_pipeline(p_interact);
         pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
-
-        if !controller.paused {
-            pass.set_pipeline(require_pipe!(mac_u_copy));
-            pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-            pass.set_pipeline(require_pipe!(mac_u_sl_forward));
-            pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-            pass.set_pipeline(require_pipe!(mac_u_sl_reverse));
-            pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-            pass.set_pipeline(require_pipe!(mac_u_combine));
-            pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-
-            pass.set_pipeline(require_pipe!(mac_w_copy));
-            pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-            pass.set_pipeline(require_pipe!(mac_w_sl_forward));
-            pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-            pass.set_pipeline(require_pipe!(mac_w_sl_reverse));
-            pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-            pass.set_pipeline(require_pipe!(mac_w_combine));
-            pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-
-            pass.set_pipeline(require_pipe!(integrate_height));
+        if !controller.paused && !defer_init {
+            pass.set_pipeline(pipe!(ocean_band)?);
             pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
-            pass.set_pipeline(require_pipe!(integrate_velocity_u));
+
+            pass.set_pipeline(pipe!(mac_u_copy)?);
             pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-            pass.set_pipeline(require_pipe!(integrate_velocity_w));
+            pass.set_pipeline(pipe!(mac_u_sl_forward)?);
+            pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
+            pass.set_pipeline(pipe!(mac_u_sl_reverse)?);
+            pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
+            pass.set_pipeline(pipe!(mac_u_combine)?);
+            pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
+
+            pass.set_pipeline(pipe!(mac_w_copy)?);
             pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-            pass.set_pipeline(require_pipe!(apply_domain_boundaries));
+            pass.set_pipeline(pipe!(mac_w_sl_forward)?);
+            pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
+            pass.set_pipeline(pipe!(mac_w_sl_reverse)?);
+            pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
+            pass.set_pipeline(pipe!(mac_w_combine)?);
+            pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
+
+            pass.set_pipeline(pipe!(integrate_height)?);
+            pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
+            pass.set_pipeline(pipe!(integrate_velocity_u)?);
+            pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
+            pass.set_pipeline(pipe!(integrate_velocity_w)?);
+            pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
+            pass.set_pipeline(pipe!(apply_domain_boundaries)?);
             pass.dispatch_workgroups(wg.border.0, wg.border.1, 1);
-            pass.set_pipeline(require_pipe!(wet_dry_u));
+            pass.set_pipeline(pipe!(wet_dry_u)?);
             pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-            pass.set_pipeline(require_pipe!(wet_dry_w));
+            pass.set_pipeline(pipe!(wet_dry_w)?);
             pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-            pass.set_pipeline(require_pipe!(friction_u));
+            pass.set_pipeline(pipe!(friction_u)?);
             pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-            pass.set_pipeline(require_pipe!(friction_w));
+            pass.set_pipeline(pipe!(friction_w)?);
             pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-            pass.set_pipeline(require_pipe!(pml_step));
+            pass.set_pipeline(pipe!(pml_step)?);
             pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
-            pass.set_pipeline(require_pipe!(pml_damp_u));
+            pass.set_pipeline(pipe!(pml_damp_u)?);
             pass.dispatch_workgroups(wg.u_face.0, wg.u_face.1, 1);
-            pass.set_pipeline(require_pipe!(pml_damp_w));
+            pass.set_pipeline(pipe!(pml_damp_w)?);
             pass.dispatch_workgroups(wg.w_face.0, wg.w_face.1, 1);
-            pass.set_pipeline(require_pipe!(apply_domain_boundaries));
+            pass.set_pipeline(pipe!(apply_domain_boundaries)?);
             pass.dispatch_workgroups(wg.border.0, wg.border.1, 1);
-            pass.set_pipeline(require_pipe!(overshoot_reduce));
+            pass.set_pipeline(pipe!(overshoot_reduce)?);
             pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
-            pass.set_pipeline(require_pipe!(reconstruct_cell_velocity));
+            pass.set_pipeline(pipe!(reconstruct_cell_velocity)?);
             pass.dispatch_workgroups(wg.cell.0, wg.cell.1, 1);
-            pass.set_pipeline(require_pipe!(update_particles));
+            pass.set_pipeline(pipe!(update_particles)?);
             pass.dispatch_workgroups(pc, 1, 1);
         }
+        Some(())
+    })();
+    time_span.end(enc);
+    if encoded.is_none() {
+        return;
     }
 
-    if apply_init {
+    if apply_init && !defer_init {
         gpu_res
             .last_applied_serial
             .store(controller.sim_apply_serial, Ordering::Relaxed);
     }
 
-    if !controller.paused {
+    if !controller.paused && !defer_init {
         timestamp.0.fetch_add(1, Ordering::Relaxed);
     }
 }

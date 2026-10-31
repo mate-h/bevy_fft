@@ -8,6 +8,7 @@ struct InteractionSettings {
     oldPosition : vec2f,
     position : vec2f,
     preset : u32,
+    fill_level : f32,
 }
 
 struct SimulationSettings {
@@ -31,6 +32,9 @@ struct SimulationSettings {
     overshoot_lambda_edge : f32,
     pml_sigma_exponent : f32,
     pml_cosine_blend : f32,
+    ocean_band_cells : f32,
+    /// Unit direction of the wind on the grid, X and then the row axis (world Z when placed).
+    wind_dir : vec2f,
 }
 
 struct Particle {
@@ -102,9 +106,12 @@ fn perlinNoise(point : vec2f, gridSize : f32, seed : u32) -> f32 {
 @group(0) @binding(5) var velocityTexture : texture_storage_2d<rgba32float, read_write>;
 @group(0) @binding(6) var pmlStateTexture : texture_storage_2d<rgba32float, read_write>;
 @group(0) @binding(7) var<storage, read_write> particles : array<Particle>;
+@group(0) @binding(8) var oceanEtaTexture : texture_storage_2d<r32float, read_write>;
 
 @group(1) @binding(0) var<uniform> interactionSettings : InteractionSettings;
 @group(1) @binding(1) var<uniform> simulationSettings : SimulationSettings;
+/// Bed height per cell for the bed source preset.
+@group(1) @binding(2) var bedSource : texture_2d<f32>;
 
 fn nx() -> i32 { return i32(simulationSettings.size.x); }
 fn ny() -> i32 { return i32(simulationSettings.size.y); }
@@ -267,6 +274,64 @@ fn semi_lag_w_reverse_hat(pos : vec2f) -> f32 {
     return sample_w_bilinear(pback.x, pback.y);
 }
 
+const BORDER_SOURCE = 1u;
+const BORDER_DRAIN = 2u;
+const BORDER_WAVES = 3u;
+const BORDER_OCEAN = 4u;
+
+/// Edge 0 to 3 is left, right, bottom, top. Each edge takes three bits of `border_mask`.
+fn border_type(edge : u32) -> u32 {
+    return (simulationSettings.border_mask >> (3u * edge)) & 7u;
+}
+
+/// Target values below this mark a cell the ocean has not written yet.
+const OCEAN_ETA_UNSET = -1.0e29;
+/// Depth below which a seeded column is left at rest. Shallower than this, `√(g / h)` is no
+/// longer a column velocity the swash should start with.
+const SEED_MIN_DEPTH = 0.25;
+
+/// Target free-surface height for the ocean band and the PML. Reads the ocean target texture when
+/// flag bit 1 is set and the cell holds a value, otherwise the flat `pml_eta_rest`.
+fn target_eta(cell : vec2u) -> f32 {
+    if ((simulationSettings.flags & 2u) != 0u) {
+        let eta = textureLoad(oceanEtaTexture, cell).r;
+        if (eta > OCEAN_ETA_UNSET) { return eta; }
+    }
+    return simulationSettings.pml_eta_rest;
+}
+
+/// Blend weight b of Chentanez, Müller and Kim 2015, eq. 17, measured from the PML's inner edge.
+/// It is 1 in the first band cell and falls linearly to 0 after `ocean_band_cells` cells. Cells
+/// inside the PML get 0, so the PML absorbs what passes the band. Corners take the larger weight.
+fn ocean_band_weight(i : i32, j : i32) -> f32 {
+    let nb = simulationSettings.ocean_band_cells;
+    if (nb <= 0.0) { return 0.0; }
+    let pml = i32(simulationSettings.pml_width);
+    let dist = vec4i(i, nx() - 1 - i, j, ny() - 1 - j) - vec4i(pml);
+    var b = 0.0;
+    for (var edge = 0u; edge < 4u; edge++) {
+        let d = dist[edge];
+        if (border_type(edge) == BORDER_OCEAN && d >= 0) {
+            b = max(b, clamp((nb - f32(d)) / nb, 0.0, 1.0));
+        }
+    }
+    return b;
+}
+
+/// Ocean boundary band, Chentanez, Müller and Kim 2015, eq. 18. Blends the water depth toward the
+/// target surface and leaves the face velocities to the solver, which makes them consistent with
+/// the forced height before the waves leave the band.
+@compute @workgroup_size(16, 16)
+fn oceanBand(@builtin(global_invocation_id) id: vec3u) {
+    if (id.x >= simulationSettings.size.x || id.y >= simulationSettings.size.y) { return; }
+    let b = ocean_band_weight(i32(id.x), i32(id.y));
+    if (b <= 0.0) { return; }
+    var bw = textureLoad(bedWaterTexture, id.xy);
+    let h_target = max(0.0, target_eta(id.xy) - bw.x);
+    bw.y = max(0.0, (1.0 - b) * bw.y + b * h_target);
+    textureStore(bedWaterTexture, id.xy, bw);
+}
+
 fn vel_max_clamp() -> f32 {
     return simulationSettings.vel_clamp_alpha * simulationSettings.dx / simulationSettings.dt;
 }
@@ -320,8 +385,72 @@ fn loadPreset(@builtin(global_invocation_id) id: vec3u) {
     } else if (interactionSettings.preset == 3u) {
         let noise = perlinNoise(vec2f(position.x, 0.0), baseNoiseGridSize * 2.0, simulationSettings.timestamp);
         bed = clamp(40.0 * (position.y / f32(simulationSettings.size.y) - mix(0.4, 0.6, noise)), 0.0, 10.0);
+    } else if (interactionSettings.preset == 4u) {
+        let last = vec2u(textureDimensions(bedSource)) - 1u;
+        bed = textureLoad(bedSource, min(id.xy, last), 0).r;
     }
-    textureStore(bedWaterTexture, id.xy, vec4f(bed, 0.0, 0.0, 0.0));
+    let water = max(interactionSettings.fill_level - bed, 0.0);
+    textureStore(bedWaterTexture, id.xy, vec4f(bed, water, 0.0, 0.0));
+}
+
+/// Column velocity of a progressive long wave, or zero when `cell` is dry, too shallow, or has no
+/// ocean target. `.z` is 1 when the sample should count toward a face average.
+fn seed_velocity(cell : vec2i) -> vec3f {
+    if (cell.x < 0 || cell.y < 0 || cell.x >= nx() || cell.y >= ny()) {
+        return vec3f(0.0);
+    }
+    let id = vec2u(u32(cell.x), u32(cell.y));
+    let bw = textureLoad(bedWaterTexture, id);
+    let eta = textureLoad(oceanEtaTexture, id).r;
+    if (eta <= OCEAN_ETA_UNSET) { return vec3f(0.0); }
+    let h = max(0.0, eta - bw.x);
+    if (bw.x >= interactionSettings.fill_level || h < SEED_MIN_DEPTH) {
+        return vec3f(0.0);
+    }
+    let prime = eta - interactionSettings.fill_level;
+    let vel = simulationSettings.wind_dir * prime * sqrt(simulationSettings.gravity / h);
+    return vec3f(vel, 1.0);
+}
+
+fn seed_face(a : vec2i, b : vec2i, component : i32) -> f32 {
+    let sa = seed_velocity(a);
+    let sb = seed_velocity(b);
+    let n = sa.z + sb.z;
+    if (n == 0.0) { return 0.0; }
+    let sum = select(sa.y, sa.x, component == 0) * sa.z + select(sb.y, sb.x, component == 0) * sb.z;
+    return clamp_face_vel(sum / n);
+}
+
+/// Copies the ocean target into wet cells. Dry cells stay at the preset. Runs after `loadPreset`
+/// when the target texture holds the whole grid, and before `seedOceanFaces`.
+@compute @workgroup_size(16, 16)
+fn seedOceanHeight(@builtin(global_invocation_id) id: vec3u) {
+    if (id.x >= simulationSettings.size.x || id.y >= simulationSettings.size.y) { return; }
+    var bw = textureLoad(bedWaterTexture, id.xy);
+    let eta = textureLoad(oceanEtaTexture, id.xy).r;
+    if (eta <= OCEAN_ETA_UNSET || bw.x >= interactionSettings.fill_level) { return; }
+    let seeded = seed_velocity(vec2i(i32(id.x), i32(id.y)));
+    bw.y = max(0.0, eta - bw.x);
+    textureStore(bedWaterTexture, id.xy, bw);
+    textureStore(velocityTexture, id.xy, vec4f(seeded.xy, 0.0, 0.0));
+}
+
+/// Wind-aligned face velocity for the heights `seedOceanHeight` just wrote. Columns shallower
+/// than `SEED_MIN_DEPTH` stay at rest. A separate dispatch so face reads do not race the stores.
+@compute @workgroup_size(16, 16)
+fn seedOceanFaces(@builtin(global_invocation_id) id: vec3u) {
+    let sx = simulationSettings.size.x;
+    let sy = simulationSettings.size.y;
+    if (id.x <= sx && id.y < sy) {
+        let y = i32(id.y);
+        let u = seed_face(vec2i(i32(id.x) - 1, y), vec2i(i32(id.x), y), 0);
+        textureStore(faceUTexture, id.xy, vec4f(u, 0.0, 0.0, 0.0));
+    }
+    if (id.x < sx && id.y <= sy) {
+        let x = i32(id.x);
+        let w = seed_face(vec2i(x, i32(id.y) - 1), vec2i(x, i32(id.y)), 1);
+        textureStore(faceWTexture, id.xy, vec4f(w, 0.0, 0.0, 0.0));
+    }
 }
 
 fn pointToSegmentDistance(p : vec2f, s0 : vec2f, s1 : vec2f) -> f32 {
@@ -344,10 +473,9 @@ fn interact(@builtin(global_invocation_id) id: vec3u) {
             * smoothstep(interactionSettings.radius, interactionSettings.radius * interactionSettings.force - 1.0, distance);
         var value = textureLoad(bedWaterTexture, id.xy);
         if (interactionSettings.mode == 1u) { value.x += 10.0 * delta; }
-        else if (interactionSettings.mode == 2u) { value.x -= 10.0 * delta; }
+        else if (interactionSettings.mode == 2u) { value.x = max(0.0, value.x - 10.0 * delta); }
         else if (interactionSettings.mode == 3u) { value.y += delta; }
         else if (interactionSettings.mode == 4u) { value.y -= delta; }
-        value.x = max(0.0, min(10.0, value.x));
         value.y = max(0.0, value.y);
         textureStore(bedWaterTexture, id.xy, value);
     } else if (interactionSettings.mode == 5u) {
@@ -561,21 +689,22 @@ fn integrateVelocityW(@builtin(global_invocation_id) id: vec3u) {
 
 /// `sign` is +1 on the left or bottom domain edge, -1 on the right or top.
 /// Positive face velocity is along +x for u and +y for w. Source is inflow from outside; drain is outflow to outside.
+/// Ocean edges are closed at the face. The band and the PML behind it exchange water with the target.
 fn border_velocity(borderType : u32, bed : f32, sign : f32) -> f32 {
     if (bed > 1.0) { return 0.0; }
-    if (borderType == 0u) { return 0.0; }
     let mag = 3.0;
-    if (borderType == 1u) { return sign * mag; }
-    if (borderType == 2u) { return -sign * mag; }
-    return sign * mag * sin(f32(simulationSettings.timestamp) / 30.0);
+    if (borderType == BORDER_SOURCE) { return sign * mag; }
+    if (borderType == BORDER_DRAIN) { return -sign * mag; }
+    if (borderType == BORDER_WAVES) { return sign * mag * sin(f32(simulationSettings.timestamp) / 30.0); }
+    return 0.0;
 }
 
 @compute @workgroup_size(16, 16)
 fn applyDomainBoundaries(@builtin(global_invocation_id) id: vec3u) {
-    let leftBorder = simulationSettings.border_mask & 3u;
-    let rightBorder = (simulationSettings.border_mask >> 2u) & 3u;
-    let bottomBorder = (simulationSettings.border_mask >> 4u) & 3u;
-    let topBorder = (simulationSettings.border_mask >> 6u) & 3u;
+    let leftBorder = border_type(0u);
+    let rightBorder = border_type(1u);
+    let bottomBorder = border_type(2u);
+    let topBorder = border_type(3u);
     let sy = simulationSettings.size.y;
     let sx = simulationSettings.size.x;
     if (id.x == 0u && id.y < sy) {
@@ -747,7 +876,7 @@ fn sigma_w_face(fj : i32) -> f32 {
 }
 
 /// CMF10 §2.1.4 and appendix 3.1: x-strip uses σ and φ (Eq. 10–13); y-strip uses γ and ψ (Eq. 21–24).
-/// `pml_eta_rest` gives a flat target surface; rest depth per cell is max(0, η_rest − H) so (h − h_rest) matches the paper form on varying terrain.
+/// `target_eta` gives the target surface, flat or from the ocean. Rest depth per cell is max(0, η_target − H) so (h − h_rest) matches the paper form on varying terrain.
 @compute @workgroup_size(16, 16)
 fn pmlStep(@builtin(global_invocation_id) id: vec3u) {
     if (id.x >= simulationSettings.size.x || id.y >= simulationSettings.size.y) { return; }
@@ -765,7 +894,7 @@ fn pmlStep(@builtin(global_invocation_id) id: vec3u) {
     }
     let dt = simulationSettings.dt;
     let dx = simulationSettings.dx;
-    let eta_rest = simulationSettings.pml_eta_rest;
+    let eta_rest = target_eta(id.xy);
     let lam_decay = simulationSettings.pml_lambda_decay;
     let lam_update = simulationSettings.pml_lambda_update;
     var bw = textureLoad(bedWaterTexture, id.xy);

@@ -3,9 +3,16 @@
 //! Brush and presets mirror [webgpu-shallow-water](https://github.com/mate-h/webgpu-shallow-water) UX only.
 //!
 //! Add [`ShallowWaterPlugin`], insert [`ShallowWaterController`] as a resource with GPU images, and use
-//! [`ShallowWaterSurfaceMaterial`] on an XZ plane. The compute pass runs on the root [`RenderGraph`]
-//! before the camera driver on the root [`RenderGraph`](bevy::render::renderer::RenderGraph) schedule.
+//! [`ShallowWaterSurfaceMaterial`] on an XZ plane. The compute pass runs on the root
+//! [`RenderGraph`](bevy::render::renderer::RenderGraph) schedule before the camera driver.
+//!
+//! To place the grid in a larger scene, set [`ShallowWaterController::placement`] and add
+//! [`WaterPlugin`](crate::water::WaterPlugin), which [`OceanPlugin`](crate::ocean::OceanPlugin)
+//! also brings in. The surface is then blended into the shared
+//! [`WaterLodData`](crate::water::WaterLodData) each frame, so the ocean surface material and
+//! [`OceanQueries`](crate::ocean::OceanQueries) show it and it fades into the ocean at its edges.
 
+mod lod_write;
 mod render;
 
 use bevy::{
@@ -15,7 +22,7 @@ use bevy::{
     prelude::*,
     reflect::Reflect,
     render::{
-        RenderApp,
+        Render, RenderApp, RenderSystems,
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_resource::{
             AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat, TextureUsages,
@@ -30,19 +37,67 @@ pub use render::{
     run_shallow_water_sim,
 };
 
-/// Border condition encoded like the reference: wall, source, drain, waves.
+/// What happens at one edge of the grid.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Reflect, Debug)]
 pub enum ShallowWaterBorder {
+    /// Closed. Water reflects.
     #[default]
     Wall,
+    /// Fixed inflow.
     Source,
+    /// Fixed outflow.
     Drain,
+    /// Sine inflow and outflow, a simple wave maker for standalone tests.
     Waves,
+    /// Open edge that follows the surrounding water. Over
+    /// [`ShallowWaterController::ocean_band_cells`] cells inside the PML, the water height is
+    /// blended toward the target surface (Chentanez, Müller and Kim 2015, eq. 18) and velocities
+    /// are left to the solver. The target is the FFT ocean when
+    /// [`ShallowWaterController::ocean_forcing`] is on, otherwise the flat
+    /// [`ShallowWaterController::pml_eta_rest`].
+    Ocean,
 }
 
 impl ShallowWaterBorder {
     fn bits(self) -> u32 {
         self as u32
+    }
+}
+
+/// Where the grid sits in the world, for writing into the shared
+/// [`WaterLodData`](crate::water::WaterLodData).
+///
+/// With a placement the solver runs in meters: [`Self::cell_size`] becomes its cell width, so
+/// [`ShallowWaterController::gravity`] is in m/s² and bed and water heights are in meters.
+#[derive(Clone, Copy, Debug, Reflect)]
+pub struct ShallowWaterPlacement {
+    /// World X and Z of the grid centre in meters.
+    pub center: Vec2,
+    /// Width of one cell in meters.
+    pub cell_size: f32,
+    /// Height of the solver's zero level above the surface mesh plane, in meters. A surface at
+    /// solver height `η` lands at `datum + η`.
+    pub datum: f32,
+    /// Width in cells of the band along the grid edge where the solver fades into the data
+    /// below it, such as the FFT ocean.
+    pub blend_cells: f32,
+}
+
+impl Default for ShallowWaterPlacement {
+    fn default() -> Self {
+        Self {
+            center: Vec2::ZERO,
+            cell_size: 1.0,
+            datum: 0.0,
+            blend_cells: 16.0,
+        }
+    }
+}
+
+impl ShallowWaterPlacement {
+    /// Grid coordinates in cells of world `xz`, with cell `i` spanning `i..i + 1`.
+    pub fn world_to_cells(&self, xz: Vec2, cells: UVec2) -> Vec2 {
+        (xz - self.center) / self.cell_size + 0.5 * cells.as_vec2()
     }
 }
 
@@ -69,8 +124,16 @@ pub struct ShallowWaterController {
     pub brush_force: f32,
     pub pointer_sim: Vec2,
     pub pointer_prev_sim: Vec2,
-    /// Terrain preset index for `loadPreset` (0–3).
+    /// Terrain preset index for `loadPreset`. 0 to 3 are procedural, and
+    /// [`SHALLOW_WATER_PRESET_BED_SOURCE`] reads [`Self::bed_source`].
     pub preset_index: u32,
+    /// Bed height per cell in solver units (`R32Float`, `cells_x × cells_y`), loaded on reset when
+    /// [`Self::preset_index`] is [`SHALLOW_WATER_PRESET_BED_SOURCE`]. Use it to start the grid from
+    /// a terrain. Starts as a 1×1 placeholder.
+    pub bed_source: Handle<Image>,
+    /// Still water level that `loadPreset` fills to, in solver height units. Cells whose bed is
+    /// above it start dry. Zero leaves every preset dry.
+    pub fill_level: f32,
     pub bed_water: Handle<Image>,
     /// Cell-centered velocity (.xy) for particles and diagnostics; .zw unused.
     pub velocity: Handle<Image>,
@@ -88,20 +151,35 @@ pub struct ShallowWaterController {
     pub pml_width: u32,
     /// Target free-surface height **η** in the PML strip (same units as bed + water in the sim).
     pub pml_eta_rest: f32,
+    /// Target water height per cell (`R32Float`, `cells_x × cells_y`) for [`ShallowWaterBorder::Ocean`]
+    /// edges and the PML, written each frame by [`OceanPlugin`](crate::ocean::OceanPlugin) when
+    /// [`Self::ocean_forcing`] is on. The edge strip covering the PML and the ocean band is written
+    /// every frame. On reset the whole grid is written so the wet interior can be seeded from it.
+    pub ocean_eta: Handle<Image>,
+    /// Takes the target surface for ocean edges and the PML from the FFT ocean's long waves, and
+    /// seeds the wet interior from those waves on each reset. Needs [`Self::placement`] and
+    /// [`OceanPlugin`](crate::ocean::OceanPlugin).
+    pub ocean_forcing: bool,
+    /// Width in cells of the band inside the PML where [`ShallowWaterBorder::Ocean`] edges blend the
+    /// water height toward the target.
+    pub ocean_band_cells: f32,
     /// PML absorption ramp: **2** = quadratic ([Joh08] / CMF10 default), **3** = cubic.
     pub pml_sigma_exponent: f32,
     /// **0** = uniform damping in each strip; **1** = full [Joh08] style scaling by **|u|/|v|** (x strip) and **|w|/|v|** (y strip) from cell-centered velocity.
     pub pml_cosine_blend: f32,
     /// Increment to re-run `clearBuffers` + `loadPreset` on the GPU.
     pub sim_apply_serial: u32,
+    /// World placement. When set and [`WaterPlugin`](crate::water::WaterPlugin) is present, the
+    /// surface is blended into the shared water LOD data every frame.
+    pub placement: Option<ShallowWaterPlacement>,
 }
 
 impl ShallowWaterController {
     pub fn packed_border_mask(&self) -> u32 {
         self.left_border.bits()
-            | (self.right_border.bits() << 2)
-            | (self.bottom_border.bits() << 4)
-            | (self.top_border.bits() << 6)
+            | (self.right_border.bits() << 3)
+            | (self.bottom_border.bits() << 6)
+            | (self.top_border.bits() << 9)
     }
 
     /// Builds textures and returns a controller. `cells_*` should be multiples of 32.
@@ -116,6 +194,10 @@ impl ShallowWaterController {
             mac_u_temps: images.add(shallow_rg32_image(cells_x + 1, cells_y)),
             mac_w_temps: images.add(shallow_rg32_image(cells_x, cells_y + 1)),
             pml_state: images.add(shallow_rg32_image(cells_x, cells_y)),
+            ocean_eta: images.add(ocean_eta_image(cells_x, cells_y)),
+            bed_source: images.add(bed_source_image(1, 1, &[0.0])),
+            ocean_forcing: false,
+            ocean_band_cells: 5.0,
             pml_width: 0,
             pml_eta_rest: 2.0,
             pml_sigma_exponent: 2.0,
@@ -136,8 +218,15 @@ impl ShallowWaterController {
             pointer_sim: Vec2::ZERO,
             pointer_prev_sim: Vec2::ZERO,
             preset_index: 0,
+            fill_level: 0.0,
             sim_apply_serial: 1,
+            placement: None,
         }
+    }
+
+    /// Cell width the solver uses: [`ShallowWaterPlacement::cell_size`] when placed, otherwise 1.
+    pub fn cell_size(&self) -> f32 {
+        self.placement.map_or(1.0, |p| p.cell_size)
     }
 
     /// Recreate grid textures after a resolution change and schedule GPU re-init.
@@ -151,6 +240,7 @@ impl ShallowWaterController {
         self.mac_u_temps = images.add(shallow_rg32_image(cells_x + 1, cells_y));
         self.mac_w_temps = images.add(shallow_rg32_image(cells_x, cells_y + 1));
         self.pml_state = images.add(shallow_rg32_image(cells_x, cells_y));
+        self.ocean_eta = images.add(ocean_eta_image(cells_x, cells_y));
         self.sim_apply_serial = self.sim_apply_serial.wrapping_add(1);
     }
 }
@@ -190,6 +280,34 @@ pub fn shallow_r32_image(width: u32, height: u32) -> Image {
     image
 }
 
+/// Value the ocean target texture starts with. The solver treats cells below `-1e29` as not yet
+/// written and falls back to [`ShallowWaterController::pml_eta_rest`].
+const OCEAN_ETA_UNSET: f32 = -1.0e30;
+
+/// [`ShallowWaterController::preset_index`] that loads the bed from
+/// [`ShallowWaterController::bed_source`].
+pub const SHALLOW_WATER_PRESET_BED_SOURCE: u32 = 4;
+
+/// `R32Float` bed image for [`ShallowWaterController::bed_source`], from `heights` in row order
+/// with `width` cells per row. Row `j` is grid row `j`, which runs along world +Z when placed.
+pub fn bed_source_image(width: u32, height: u32, heights: &[f32]) -> Image {
+    assert_eq!(heights.len(), (width * height) as usize);
+    let mut image = shallow_r32_image(width, height);
+    image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    image.data = Some(heights.iter().flat_map(|h| h.to_le_bytes()).collect());
+    image
+}
+
+fn ocean_eta_image(width: u32, height: u32) -> Image {
+    let mut image = shallow_r32_image(width, height);
+    image.data = Some(
+        OCEAN_ETA_UNSET
+            .to_le_bytes()
+            .repeat((width * height) as usize),
+    );
+    image
+}
+
 #[derive(Clone, Copy, Default, ShaderType)]
 pub struct GpuInteractionUniform {
     pub mode: u32,
@@ -199,6 +317,7 @@ pub struct GpuInteractionUniform {
     pub old_position: Vec2,
     pub position: Vec2,
     pub preset: u32,
+    pub fill_level: f32,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -211,7 +330,8 @@ pub struct GpuSimulationUniform {
     pub timestamp: u32,
     pub border_mask: u32,
     pub pml_width: u32,
-    /// Bit 0: enable overshoot reduction in WGSL (other bits reserved).
+    /// Bit 0 enables overshoot reduction. Bit 1 reads the target surface from the ocean target
+    /// texture instead of `pml_eta_rest`.
     pub flags: u32,
     pub pml_eta_rest: f32,
     pub vel_clamp_alpha: f32,
@@ -224,6 +344,9 @@ pub struct GpuSimulationUniform {
     pub overshoot_lambda_edge: f32,
     pub pml_sigma_exponent: f32,
     pub pml_cosine_blend: f32,
+    pub ocean_band_cells: f32,
+    /// Unit wind direction on XZ. The reset seed points column velocity along it.
+    pub wind_dir: Vec2,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -290,6 +413,7 @@ pub struct ShallowWaterSurfaceTag;
 
 pub mod shaders {
     pub const SHALLOW_WATER_SURFACE: &str = "embedded://bevy_fft/shallow_water/surface.wesl";
+    pub const SHALLOW_WATER_LOD_WRITE: &str = "embedded://bevy_fft/shallow_water/lod_write.wesl";
 }
 
 fn sync_shallow_water_mesh_material(
@@ -313,9 +437,11 @@ pub struct ShallowWaterPlugin;
 impl Plugin for ShallowWaterPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "surface.wesl");
+        embedded_asset!(app, "lod_write.wesl");
 
         app.register_type::<ShallowWaterController>()
             .register_type::<ShallowWaterBorder>()
+            .register_type::<ShallowWaterPlacement>()
             .register_type::<ShallowWaterMaterialUniform>()
             .add_plugins(ExtractResourcePlugin::<ShallowWaterController>::default())
             .add_plugins(MaterialPlugin::<ShallowWaterSurfaceMaterial>::default())
@@ -323,9 +449,26 @@ impl Plugin for ShallowWaterPlugin {
     }
 
     fn finish(&self, app: &mut App) {
+        let with_lod = app.is_plugin_added::<crate::water::WaterPlugin>();
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
         plug_shallow_water_render_app(render_app);
+        if with_lod {
+            render_app
+                .init_resource::<lod_write::ShallowWaterLodPipeline>()
+                .init_resource::<lod_write::ShallowWaterLodBindGroup>()
+                .add_systems(
+                    Render,
+                    lod_write::prepare_shallow_water_lod_write
+                        .in_set(RenderSystems::PrepareBindGroups),
+                )
+                .add_systems(
+                    bevy::render::renderer::RenderGraph,
+                    lod_write::run_shallow_water_lod_write
+                        .after(run_shallow_water_sim)
+                        .in_set(crate::water::WaterLodGraphSystems::Blend),
+                );
+        }
     }
 }
