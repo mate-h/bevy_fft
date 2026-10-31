@@ -32,7 +32,8 @@ pub struct WaterSurfaceUniform {
 /// with positive `specular_transmission` and a water IOR near 1.333.
 #[derive(Clone, Copy, ShaderType, Reflect)]
 pub struct WaterOpticsUniform {
-    /// RGB extinction coefficients in inverse meters.
+    /// RGB extinction coefficients in inverse meters. [`JerlovWaterType::extinction`] gives
+    /// measured values for natural waters.
     pub extinction: Vec3,
     /// Weight of validated screen-space refraction, from 0 to 1.
     pub refraction_strength: f32,
@@ -53,7 +54,7 @@ pub struct WaterOpticsUniform {
 impl Default for WaterOpticsUniform {
     fn default() -> Self {
         Self {
-            extinction: Vec3::new(0.35, 0.10, 0.045),
+            extinction: JerlovWaterType::OceanIB.extinction(),
             refraction_strength: 0.8,
             scattering: Vec3::new(0.008, 0.035, 0.065),
             contact_fade: 0.02,
@@ -61,6 +62,54 @@ impl Default for WaterOpticsUniform {
             ssr_strength: 1.0,
             debug_view: 0,
             enabled: 0,
+        }
+    }
+}
+
+impl WaterOpticsUniform {
+    /// Default optics with extinction taken from a Jerlov water type.
+    pub fn jerlov(water: JerlovWaterType) -> Self {
+        Self {
+            extinction: water.extinction(),
+            ..default()
+        }
+    }
+}
+
+/// Jerlov's classification of natural waters by how fast daylight fades with depth. The five
+/// open ocean types run from the clearest, I, to III. The five coastal types run from 1 to 9 as
+/// suspended sediment and dissolved organic matter grow.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
+pub enum JerlovWaterType {
+    OceanI,
+    OceanIA,
+    #[default]
+    OceanIB,
+    OceanII,
+    OceanIII,
+    Coastal1,
+    Coastal3,
+    Coastal5,
+    Coastal7,
+    Coastal9,
+}
+
+impl JerlovWaterType {
+    /// Diffuse downwelling attenuation K_d in inverse meters at 625, 550, and 450 nm, read from
+    /// Jerlov's 1976 table for the upper 10 m. Used as RGB Beer-Lambert extinction, it slightly
+    /// underestimates beam attenuation, since K_d leaves out light scattered forward.
+    pub fn extinction(self) -> Vec3 {
+        match self {
+            Self::OceanI => Vec3::new(0.305, 0.063, 0.019),
+            Self::OceanIA => Vec3::new(0.310, 0.067, 0.026),
+            Self::OceanIB => Vec3::new(0.315, 0.072, 0.036),
+            Self::OceanII => Vec3::new(0.335, 0.080, 0.053),
+            Self::OceanIII => Vec3::new(0.346, 0.104, 0.094),
+            Self::Coastal1 => Vec3::new(0.37, 0.12, 0.17),
+            Self::Coastal3 => Vec3::new(0.40, 0.17, 0.29),
+            Self::Coastal5 => Vec3::new(0.45, 0.25, 0.43),
+            Self::Coastal7 => Vec3::new(0.50, 0.36, 0.70),
+            Self::Coastal9 => Vec3::new(0.64, 0.52, 1.1),
         }
     }
 }

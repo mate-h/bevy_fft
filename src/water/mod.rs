@@ -35,8 +35,8 @@ pub use quadtree::{
 };
 pub use scene_depth::WaterTransmission;
 pub use surface::{
-    WATER_SURFACE_SHADER, WaterOpticsUniform, WaterSurfaceExtension, WaterSurfaceMaterial,
-    WaterSurfaceTag, WaterSurfaceUniform,
+    JerlovWaterType, WATER_SURFACE_SHADER, WaterOpticsUniform, WaterSurfaceExtension,
+    WaterSurfaceMaterial, WaterSurfaceTag, WaterSurfaceUniform,
 };
 
 use bevy::{
@@ -80,6 +80,7 @@ impl Plugin for WaterPlugin {
             .register_type::<WaterViewer>()
             .register_type::<WaterSurfaceUniform>()
             .register_type::<WaterOpticsUniform>()
+            .register_type::<JerlovWaterType>()
             .register_type::<WaterQuadtree>()
             .register_type::<WaterQuadtreeStats>()
             .init_resource::<WaterLodSettings>()
