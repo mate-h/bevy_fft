@@ -44,9 +44,7 @@ use bevy::{
         atmosphere::ScatteringMedium, light_consts::lux,
     },
     material::OpaqueRendererMethod,
-    pbr::{
-        AtmosphereSettings, DefaultOpaqueRendererMethod, StandardMaterial,
-    },
+    pbr::{AtmosphereSettings, DefaultOpaqueRendererMethod, StandardMaterial},
     post_process::bloom::Bloom,
     prelude::*,
     render::storage::ShaderBuffer,
