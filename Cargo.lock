@@ -1825,7 +1825,7 @@ dependencies = [
 [[package]]
 name = "bevy_terrain"
 version = "0.1.0"
-source = "git+https://github.com/mate-h/bevy_terrain?branch=bevy-0.20.0#37b7890c2d0bf3eb27e95c0cb8cfeffd56fc6544"
+source = "git+https://github.com/mate-h/bevy_terrain?branch=bevy-0.20.0#5c2b57382477ed30de890ea2883d4d00f1e8a31c"
 dependencies = [
  "async-channel",
  "bevy",
