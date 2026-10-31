@@ -8,7 +8,7 @@
 // particle with the time derivative of its displacement, so this is the orbital velocity. It uses
 // the physical chop, without the artistic choppiness factor.
 
-import bevy_fft::ocean::sampling::bilinear_wrap;
+import bevy_fft::ocean::sampling::{WrapTaps, bilinear_taps, wrap_taps};
 import bevy_fft::water::lod::{WaterLodSlices, lod_chop_dir, lod_texel_world};
 
 struct OceanLodWriteParams {
@@ -44,37 +44,49 @@ struct OceanLodWriteParams {
 @group(0) @binding(15) var previous_2: texture_2d<f32>;
 @group(0) @binding(16) var previous_3: texture_2d<f32>;
 
-fn displacement_cascade(i: u32, uv: vec2<f32>) -> vec4<f32> {
+fn displacement_cascade(i: u32, t: WrapTaps) -> vec4<f32> {
     if i == 0u {
-        return bilinear_wrap(displacement_0, uv);
+        return bilinear_taps(displacement_0, t);
     } else if i == 1u {
-        return bilinear_wrap(displacement_1, uv);
+        return bilinear_taps(displacement_1, t);
     } else if i == 2u {
-        return bilinear_wrap(displacement_2, uv);
+        return bilinear_taps(displacement_2, t);
     }
-    return bilinear_wrap(displacement_3, uv);
+    return bilinear_taps(displacement_3, t);
 }
 
-fn previous_cascade(i: u32, uv: vec2<f32>) -> vec4<f32> {
+fn previous_cascade(i: u32, t: WrapTaps) -> vec4<f32> {
     if i == 0u {
-        return bilinear_wrap(previous_0, uv);
+        return bilinear_taps(previous_0, t);
     } else if i == 1u {
-        return bilinear_wrap(previous_1, uv);
+        return bilinear_taps(previous_1, t);
     } else if i == 2u {
-        return bilinear_wrap(previous_2, uv);
+        return bilinear_taps(previous_2, t);
     }
-    return bilinear_wrap(previous_3, uv);
+    return bilinear_taps(previous_3, t);
 }
 
-fn foam_cascade(i: u32, uv: vec2<f32>) -> f32 {
+fn foam_cascade(i: u32, t: WrapTaps) -> f32 {
     if i == 0u {
-        return bilinear_wrap(foam_0, uv).r;
+        return bilinear_taps(foam_0, t).r;
     } else if i == 1u {
-        return bilinear_wrap(foam_1, uv).r;
+        return bilinear_taps(foam_1, t).r;
     } else if i == 2u {
-        return bilinear_wrap(foam_2, uv).r;
+        return bilinear_taps(foam_2, t).r;
     }
-    return bilinear_wrap(foam_3, uv).r;
+    return bilinear_taps(foam_3, t).r;
+}
+
+/// Size of cascade `i`. The displacement, previous and foam textures of a cascade share it.
+fn cascade_dims(i: u32) -> vec2<i32> {
+    if i == 0u {
+        return vec2<i32>(textureDimensions(displacement_0, 0));
+    } else if i == 1u {
+        return vec2<i32>(textureDimensions(displacement_1, 0));
+    } else if i == 2u {
+        return vec2<i32>(textureDimensions(displacement_2, 0));
+    }
+    return vec2<i32>(textureDimensions(displacement_3, 0));
 }
 
 /// Share of cascade `i` kept in a slice with texel width `texel`. A cascade's band runs down to
@@ -100,14 +112,14 @@ fn ocean_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     var foam = 0.0;
     let count = min(params.cascade_count, 4u);
     for (var i = 0u; i < count; i++) {
-        let uv = xz / params.cascade_tile_sizes[i];
+        let taps = wrap_taps(cascade_dims(i), xz / params.cascade_tile_sizes[i]);
         let w = cascade_weight(i, texel);
         if w > 0.0 {
-            let now = displacement_cascade(i, uv);
+            let now = displacement_cascade(i, taps);
             disp += now * w;
-            change += (now - previous_cascade(i, uv)) * w;
+            change += (now - previous_cascade(i, taps)) * w;
         }
-        foam = max(foam, foam_cascade(i, uv));
+        foam = max(foam, foam_cascade(i, taps));
     }
     let amp = params.amplitude;
     let scaled = vec4<f32>(disp.rgb * amp, disp.a * amp * params.choppiness);
