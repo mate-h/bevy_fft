@@ -1,5 +1,7 @@
 // Terrain-aware optical composition over the opaque scene, in exposed linear HDR.
-import bevy_pbr::render::mesh_view_bindings::{view, view_transmission_texture, view_transmission_sampler};
+import bevy_pbr::render::mesh_view_bindings::{view, view_transmission_texture, view_transmission_sampler, light_probes};
+@if(ENVIRONMENT_MAP) import bevy_pbr::render::mesh_view_bindings as view_bindings;
+import bevy_render::maths::quat_rotate;
 import bevy_pbr::render::pbr_types::PbrInput;
 import bevy_pbr::render::pbr_functions::apply_pbr_lighting;
 import bevy_pbr::render::view_transformations::position_ndc_to_world;
@@ -98,6 +100,29 @@ fn scene_color(uv: vec2<f32>) -> vec3<f32> {
     return textureSampleLevel(view_transmission_texture, view_transmission_sampler, uv, 0.0).rgb;
 }
 
+/// Specular radiance of the view environment map along `R`, as Bevy's lighting samples it.
+fn environment_radiance(N: vec3<f32>, R: vec3<f32>, perceptual_roughness: f32) -> vec3<f32> {
+    var radiance = vec3<f32>(0.0);
+    @if(ENVIRONMENT_MAP) {
+        if light_probes.view_cubemap_index >= 0 {
+            let roughness = perceptual_roughness * perceptual_roughness;
+            let smoothness = saturate(1.0 - roughness);
+            var direction = quat_rotate(light_probes.view_rotation, mix(N, R, smoothness * (sqrt(smoothness) + roughness)));
+            // Cube maps are left-handed.
+            direction.z = -direction.z;
+            let level = perceptual_roughness * f32(light_probes.smallest_specular_mip_level_for_view);
+            @if(MULTIPLE_LIGHT_PROBES_IN_ARRAY) {
+                radiance = textureSampleLevel(view_bindings::specular_environment_maps[light_probes.view_cubemap_index], view_bindings::environment_map_sampler, direction, level).rgb;
+            }
+            @if(!MULTIPLE_LIGHT_PROBES_IN_ARRAY) {
+                radiance = textureSampleLevel(view_bindings::specular_environment_map, view_bindings::environment_map_sampler, direction, level).rgb;
+            }
+            radiance *= light_probes.intensity_for_view;
+        }
+    }
+    return radiance;
+}
+
 fn shade_water(input: PbrInput, solver_depth: f32, foam: f32) -> vec4<f32> {
     if any(textureDimensions(opaque_depth) != textureDimensions(view_transmission_texture)) {
         return apply_pbr_lighting(input);
@@ -137,15 +162,17 @@ fn shade_water(input: PbrInput, solver_depth: f32, foam: f32) -> vec4<f32> {
     reflection_input.material.base_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     reflection_input.material.perceptual_roughness = mix(input.material.perceptual_roughness, 0.65, foam);
     // Lighting the scattering body also yields the environment reflection as its specular part.
-    // The reflection alone is lit separately only where a screen-space hit replaces it.
+    // A screen-space hit replaces that reflection, estimated from one environment map sample.
     var body_input = reflection_input;
     body_input.material.base_color = vec4<f32>(mix(optics.scattering * (1.0 - transmittance), vec3<f32>(0.85), foam), 1.0);
     var lit = apply_pbr_lighting(body_input).rgb;
     if optics.ssr_strength > 0.0 && foam < 0.95 {
-        let hit = trace_scene(input.world_position.xyz, reflect(-input.V, input.N), optics.max_distance, true);
+        let R = reflect(-input.V, input.N);
+        let hit = trace_scene(input.world_position.xyz, R, optics.max_distance, true);
         let weight = hit.confidence * optics.ssr_strength * (1.0 - foam);
         if weight > 0.0 {
-            let environment_reflection = apply_pbr_lighting(reflection_input).rgb;
+            let environment_reflection = environment_radiance(input.N, R, reflection_input.material.perceptual_roughness)
+                * fresnel * view.exposure;
             lit += (scene_color(hit.uv) * fresnel - environment_reflection) * weight;
         }
     }
