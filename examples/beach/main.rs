@@ -44,7 +44,9 @@ use bevy::{
         atmosphere::ScatteringMedium, light_consts::lux,
     },
     material::OpaqueRendererMethod,
-    pbr::{AtmosphereSettings, DefaultOpaqueRendererMethod, StandardMaterial},
+    pbr::{
+        AtmosphereSettings, DefaultOpaqueRendererMethod, ScreenSpaceReflections, StandardMaterial,
+    },
     post_process::bloom::Bloom,
     prelude::*,
     render::render_resource::AsBindGroup,
@@ -59,7 +61,7 @@ use bevy_egui::{
 use bevy_fft::prelude::*;
 use bevy_terrain::prelude::{
     SpawnTerrainCommandsExt, TerrainMaterialPlugin, TerrainPlugin, TerrainSettings,
-    TerrainViewConfig,
+    TerrainShadowSettings, TerrainViewConfig,
 };
 
 #[path = "../common/screenshot.rs"]
@@ -113,6 +115,15 @@ fn main() {
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(GlobalAmbientLight::NONE)
         .insert_resource(TerrainSettings::default())
+        .insert_resource(TerrainShadowSettings {
+            enabled: true,
+            map_size: 1024,
+            extent: 3000.0,
+            max_distance: 3000.0,
+            steps: 128,
+            min_penumbra: 0.5,
+            ..default()
+        })
         // Twelve slices still reach past the map from the surf view.
         .insert_resource(WaterLodSettings {
             slice_count: 12,
@@ -332,6 +343,7 @@ fn setup(
             Fxaa::default(),
             DepthPrepass,
             DeferredPrepass,
+            ScreenSpaceReflections::default(),
         ))
         .id();
     commands.spawn_terrain(
