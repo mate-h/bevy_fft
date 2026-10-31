@@ -98,7 +98,9 @@ const BUOY_POSITIONS: [Vec2; 3] = [
 ];
 
 mod ground;
+mod sky_light;
 use ground::{CoastGroundPlugin, KauaiGroundMaterial};
+use sky_light::StaticSkyLightPlugin;
 
 fn main() {
     App::new()
@@ -129,6 +131,7 @@ fn main() {
             TerrainPlugin,
             TerrainMaterialPlugin::<KauaiGroundMaterial>::default(),
             CoastGroundPlugin,
+            StaticSkyLightPlugin,
             EguiPlugin::default(),
             screenshot::ScreenshotOnEnvPlugin,
         ))
