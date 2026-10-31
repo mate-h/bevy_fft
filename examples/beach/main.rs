@@ -17,16 +17,16 @@
 //! the band has nothing to do. A PML behind the band absorbs the backwash. The panel switches the
 //! edges to walls or drains for comparison. Drag with the left mouse button to add water.
 //!
-//! The terrain is baked from bevy_terrain's
-//! `source_data/kauai_lumahai_hanalei_shoreline_lidar_1m_2048x2048.tif` into a planar tile set.
-//! The tiles are not in git. From this directory, with bevy_terrain checked out next to it:
+//! The elevation and class rasters come from the matching 1 m shoreline square in
+//! `~/Downloads/hawaii_topobathy`. Prepare the CC0 texture arrays, class map, sand capillary mask,
+//! and planar height tiles with the neighboring bevy_terrain processor:
 //!
 //! ```sh
-//! cargo run --release --manifest-path ../bevy_terrain/Cargo.toml -p bevy_terrain_preprocess -- \
-//!     ../bevy_terrain/source_data/kauai_lumahai_hanalei_shoreline_lidar_1m_2048x2048.tif \
-//!     --terrain-path assets/terrains/kauai_shoreline --overwrite \
-//!     --data-type float32 --format r32f --planar --side-length 2048
+//! python3 tools/prepare_beach_materials.py --bake-terrain
 //! ```
+//!
+//! The script needs NumPy and GDAL. Generated assets stay out of git. Texture sources, physical
+//! repeats, class mapping, and moisture behavior are documented in `assets/examples/beach_materials.md`.
 //!
 //! The planar bake puts the GeoTIFF's columns along +X and its north along +Z, so the map is
 //! mirrored east to west compared with a top-down view with north up.
@@ -49,8 +49,7 @@ use bevy::{
     },
     post_process::bloom::Bloom,
     prelude::*,
-    render::render_resource::AsBindGroup,
-    shader::ShaderRef,
+    render::storage::ShaderBuffer,
     shape::InfinitePlane3d,
     transform::TransformSystems,
 };
@@ -100,14 +99,8 @@ const BUOY_POSITIONS: [Vec2; 3] = [
     Vec2::new(-420.0, 240.0),
 ];
 
-#[derive(Asset, AsBindGroup, TypePath, Clone, Default)]
-struct KauaiGroundMaterial {}
-
-impl Material for KauaiGroundMaterial {
-    fn fragment_shader() -> ShaderRef {
-        "examples/kauai_ground.wesl".into()
-    }
-}
+mod ground;
+use ground::{CoastGroundPlugin, KauaiGroundMaterial};
 
 fn main() {
     App::new()
@@ -137,6 +130,7 @@ fn main() {
             ShallowWaterPlugin,
             TerrainPlugin,
             TerrainMaterialPlugin::<KauaiGroundMaterial>::default(),
+            CoastGroundPlugin,
             EguiPlugin::default(),
             screenshot::ScreenshotOnEnvPlugin,
         ))
@@ -241,6 +235,7 @@ fn setup(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut standard_materials: ResMut<Assets<StandardMaterial>>,
     mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
     asset_server: Res<AssetServer>,
@@ -335,7 +330,7 @@ fn setup(
                 ..default()
             },
             AtmosphereSettings::default(),
-            Exposure { ev100: 12.0 },
+            Exposure { ev100: 13.0 },
             Tonemapping::AcesFitted,
             Bloom::NATURAL,
             AtmosphereEnvironmentMapLight::default(),
@@ -346,13 +341,14 @@ fn setup(
             ScreenSpaceReflections::default(),
         ))
         .id();
+    let ground_material = ground::load_ground(&mut commands, &asset_server, &mut buffers);
     commands.spawn_terrain(
         asset_server.load(TERRAIN_CONFIG),
         TerrainViewConfig {
             view_lod: TERRAIN_VIEW_LOD,
             ..default()
         },
-        KauaiGroundMaterial::default(),
+        ground_material,
         camera,
     );
 
@@ -477,12 +473,36 @@ fn pointer_to_sim_space(
     controller.brush_input_active = paint;
 }
 
-fn beach_panel(mut contexts: EguiContexts, mut controller: ResMut<ShallowWaterController>) {
+fn beach_panel(
+    mut contexts: EguiContexts,
+    mut controller: ResMut<ShallowWaterController>,
+    mut ground_materials: ResMut<Assets<KauaiGroundMaterial>>,
+) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
     egui::Window::new("Beach").show(ctx, |ui| {
         ui.checkbox(&mut controller.paused, "Paused");
+        let material_view = ground_materials
+            .iter()
+            .next()
+            .map(|(id, material)| (id, material.settings.domain.z as u32));
+        if let Some((id, current)) = material_view {
+            let mut view = current;
+            egui::ComboBox::from_label("Ground view")
+                .selected_text(
+                    ["Material", "Surface classes", "Sand wetness"][view.min(2) as usize],
+                )
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut view, 0, "Material");
+                    ui.selectable_value(&mut view, 1, "Surface classes");
+                    ui.selectable_value(&mut view, 2, "Sand wetness");
+                });
+            if view != current {
+                ground_materials.get_mut(id).unwrap().settings.domain.z = view as f32;
+            }
+        }
+
         if ui.button("Reset").clicked() {
             controller.sim_apply_serial = controller.sim_apply_serial.wrapping_add(1);
         }
