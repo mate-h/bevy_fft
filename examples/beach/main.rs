@@ -45,7 +45,7 @@ use bevy::{
     },
     material::OpaqueRendererMethod,
     pbr::{
-        AtmosphereSettings, DefaultOpaqueRendererMethod, ScreenSpaceReflections, StandardMaterial,
+        AtmosphereSettings, DefaultOpaqueRendererMethod, StandardMaterial,
     },
     post_process::bloom::Bloom,
     prelude::*,
@@ -338,7 +338,6 @@ fn setup(
             Fxaa::default(),
             DepthPrepass,
             DeferredPrepass,
-            ScreenSpaceReflections::default(),
             WaterTransmission,
         ))
         .id();
