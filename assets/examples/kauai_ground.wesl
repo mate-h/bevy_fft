@@ -197,8 +197,11 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     pbr.directional_shadow_factor = terrain_shadow_factor_at(world, terrain_shadow, shadow_map, shadow_map_sampler);
     var output: FragmentOutput;
 @if(DEFERRED_PREPASS) {
-    if settings.domain.z < 0.5 { pbr.material.base_color = apply_pbr_lighting(pbr); }
-    pbr.material.flags |= STANDARD_MATERIAL_FLAGS_UNLIT_BIT;
+    // bevy_terrain lights the G-buffer once per pixel after this draw and looks up the terrain
+    // shadow there. Only when it defines TERRAIN_SHADOW for this draw does the factor come from
+    // here, carried in the diffuse occlusion that the ground otherwise leaves at 1.0.
+    pbr.diffuse_occlusion = vec3<f32>(pbr.directional_shadow_factor);
+    if settings.domain.z > 0.5 { pbr.material.flags |= STANDARD_MATERIAL_FLAGS_UNLIT_BIT; }
     output.deferred = deferred_gbuffer_from_pbr_input(pbr);
     output.deferred_lighting_pass_id = pbr.material.deferred_lighting_pass_id;
 }
