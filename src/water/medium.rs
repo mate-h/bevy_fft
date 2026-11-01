@@ -9,6 +9,10 @@
 //! as Bevy's deferred lighting does, so it lights the medium with the same sun and sky as the
 //! surface.
 //!
+//! When [`super::WaterCausticsSettings::enabled`] is set, the sun's share of the light on scene
+//! points under water follows [`super::WaterCaustics::map`]. Each point looks up the map where
+//! the refracted sun beam through it crosses the receiver plane.
+//!
 //! Sunlight scattered once adds Eq. 5 of Monzon et al., with a Henyey-Greenstein phase function and
 //! the sun's shadow map, so objects under water cast light shafts. Monzon et al. gather it in a
 //! froxel volume. This pass marches each pixel's ray instead, the way Bevy's volumetric fog does,
@@ -39,7 +43,7 @@ use bevy::{
 
 use super::{
     WaterLodData, WaterLodGpu, WaterLodSlices, WaterMediumUniform, WaterUnderwater,
-    underwater::WaterWaterlineFrame,
+    caustics::WaterCausticsFrame, underwater::WaterWaterlineFrame,
 };
 
 pub const WATER_MEDIUM_SHADER: &str = "embedded://bevy_fft/water/medium.wesl";
@@ -96,6 +100,8 @@ pub(super) fn init_water_medium_layout(
                 ),
                 (6, sampler(SamplerBindingType::Filtering)),
                 (7, uniform_buffer::<Vec4>(false)),
+                (8, texture_2d(unfiltered)),
+                (9, uniform_buffer::<Vec4>(false)),
                 (112, uniform_buffer::<WaterMediumUniform>(false)),
             ),
         ),
@@ -220,6 +226,7 @@ pub(super) fn prepare_water_medium_pipelines(
 pub struct WaterMediumGpu {
     medium: UniformBuffer<WaterMediumUniform>,
     plane: UniformBuffer<Vec4>,
+    caustics: UniformBuffer<Vec4>,
 }
 
 pub(super) fn prepare_water_medium(
@@ -227,12 +234,15 @@ pub(super) fn prepare_water_medium(
     queue: Res<RenderQueue>,
     medium: Option<Res<WaterMedium>>,
     frame: Res<WaterWaterlineFrame>,
+    caustics: Res<WaterCausticsFrame>,
     mut gpu: ResMut<WaterMediumGpu>,
 ) {
     gpu.medium.set(medium.map_or_else(default, |m| m.0));
     gpu.medium.write_buffer(&device, &queue);
     gpu.plane.set(Vec4::new(frame.plane(), 0.0, 0.0, 0.0));
     gpu.plane.write_buffer(&device, &queue);
+    gpu.caustics.set(caustics.params());
+    gpu.caustics.write_buffer(&device, &queue);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -247,6 +257,7 @@ pub(super) fn water_medium(
     pipeline_cache: Res<PipelineCache>,
     layout: Res<WaterMediumLayout>,
     frame: Res<WaterWaterlineFrame>,
+    caustics: Res<WaterCausticsFrame>,
     gpu: Res<WaterMediumGpu>,
     lod: Option<Res<WaterLodData>>,
     lod_gpu: Res<WaterLodGpu>,
@@ -263,17 +274,19 @@ pub(super) fn water_medium(
     let Some(lod) = lod else {
         return;
     };
-    let (Some(mask), Some(displacement), Some(foam)) = (
+    let (Some(mask), Some(displacement), Some(foam), Some(caustic_map)) = (
         images.get(frame.mask()),
         images.get(&lod.displacement),
         images.get(&lod.foam),
+        images.get(caustics.map()),
     ) else {
         return;
     };
-    let (Some(slices), Some(medium), Some(plane)) = (
+    let (Some(slices), Some(medium), Some(plane), Some(caustic_params)) = (
         lod_gpu.slices.binding(),
         gpu.medium.binding(),
         gpu.plane.binding(),
+        gpu.caustics.binding(),
     ) else {
         return;
     };
@@ -308,6 +321,8 @@ pub(super) fn water_medium(
             (5, &foam.texture_view),
             (6, &displacement.sampler),
             (7, plane),
+            (8, &caustic_map.texture_view),
+            (9, caustic_params),
             (112, medium),
         )),
     );

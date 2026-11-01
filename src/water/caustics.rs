@@ -32,7 +32,7 @@ pub const WATER_CAUSTICS_FORMAT: TextureFormat = TextureFormat::R32Float;
 #[derive(Resource, Clone, Copy, Debug, Reflect)]
 pub struct WaterCausticsSettings {
     /// Runs the pass. Off by default, since it traces `rays_per_texel` squared rays per texel of
-    /// the slice every frame and the map has no reader in the library yet.
+    /// the slice every frame.
     pub enabled: bool,
     /// LOD slice the map covers. Coarser slices reach further but resolve only longer waves.
     pub slice: u32,
@@ -57,7 +57,8 @@ impl Default for WaterCausticsSettings {
 }
 
 /// Caustic intensity on the receiver, one texel per texel of the chosen LOD slice and placed like
-/// it. Rewritten every frame before the cameras draw.
+/// it. Rewritten every frame before the cameras draw. The underwater medium pass of
+/// [`super::WaterUnderwater`] projects it onto the scene.
 #[derive(Resource, Clone)]
 pub struct WaterCaustics {
     pub map: Handle<Image>,
@@ -80,6 +81,22 @@ pub struct WaterCausticsFrame {
     enabled: bool,
     uniform: CausticsUniform,
     map: Handle<Image>,
+}
+
+impl WaterCausticsFrame {
+    /// Whether the map was traced this frame, the receiver depth, and the slice it covers.
+    pub(super) fn params(&self) -> Vec4 {
+        Vec4::new(
+            if self.enabled { 1.0 } else { 0.0 },
+            self.uniform.receiver_depth,
+            self.uniform.slice as f32,
+            0.0,
+        )
+    }
+
+    pub(super) fn map(&self) -> &Handle<Image> {
+        &self.map
+    }
 }
 
 pub(super) fn create_water_caustics(
@@ -113,10 +130,11 @@ pub(super) fn gather_water_caustics(
     mut frame: ResMut<WaterCausticsFrame>,
 ) {
     frame.enabled = false;
-    if !settings.enabled {
+    let Some(caustics) = caustics else {
         return;
-    }
-    let (Some(caustics), Some(lod), Some(sun)) = (caustics, lod, lights.iter().next()) else {
+    };
+    frame.map = caustics.map.clone();
+    let (true, Some(lod), Some(sun)) = (settings.enabled, lod, lights.iter().next()) else {
         return;
     };
     let direction_to_light = sun.back().as_vec3();
@@ -124,7 +142,6 @@ pub(super) fn gather_water_caustics(
         return;
     }
     frame.enabled = true;
-    frame.map = caustics.map.clone();
     frame.uniform = CausticsUniform {
         direction_to_light,
         receiver_depth: settings.receiver_depth,

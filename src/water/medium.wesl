@@ -7,12 +7,13 @@
 // multiple-scattered light of Eq. 9 and the single-scattered sunlight of Eq. 5, and is lit as if
 // by the downwelling irradiance at its depth, which is the `exp(-K_d y_S)` factor of Eq. 10.
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
-import bevy_pbr::render::mesh_view_bindings::view;
+import bevy_pbr::render::mesh_view_bindings::{view, lights};
 import bevy_pbr::render::view_transformations::position_ndc_to_world;
 import bevy_fft::water::lod::{WaterLodSlices, displaced_height, lod_coverage, sample_lod_filtered};
 import bevy_fft::water::underside::{
     MEDIUM_MAX_PATH,
     downwelling_irradiance,
+    fresnel_dielectric,
     medium,
     medium_multiple_scattering,
     single_scattering,
@@ -29,6 +30,10 @@ import bevy_fft::water::underside::{
 @group(constants::MATERIAL_BIND_GROUP) @binding(6) var lod_sampler: sampler;
 /// Height of the water mesh plane in `x`.
 @group(constants::MATERIAL_BIND_GROUP) @binding(7) var<uniform> water_plane: vec4<f32>;
+/// Caustic intensity on the receiver plane, laid out like one LOD slice.
+@group(constants::MATERIAL_BIND_GROUP) @binding(8) var caustic_map: texture_2d<f32>;
+/// One in `x` when the map was traced this frame, the receiver depth in `y`, the slice in `z`.
+@group(constants::MATERIAL_BIND_GROUP) @binding(9) var<uniform> caustic_params: vec4<f32>;
 
 /// Meters a scene point may sit below the displaced surface and still count as the surface, which
 /// covers the difference between the mesh and the per-pixel height.
@@ -44,6 +49,47 @@ fn surface_height(xz: vec2<f32>) -> f32 {
 fn water_column(xz: vec2<f32>) -> f32 {
     let c = lod_coverage(lod, xz);
     return mix(OPEN_WATER_DEPTH, sample_lod_filtered(lod_foam, lod_sampler, lod, xz, 0.0).g, c);
+}
+
+/// Bilinear caustic intensity at world `xz` on the receiver, one outside the map.
+fn caustic_at_receiver(xz: vec2<f32>) -> f32 {
+    let s = lod.slices[u32(caustic_params.z)];
+    let n = vec2<f32>(textureDimensions(caustic_map));
+    let x = ((xz - s.xy) / s.w + 0.5) * n - 0.5;
+    let i0 = vec2<i32>(floor(x));
+    if any(i0 < vec2<i32>(0)) || any(i0 + 1 >= vec2<i32>(n)) {
+        return 1.0;
+    }
+    let f = x - floor(x);
+    let a = textureLoad(caustic_map, i0, 0).r;
+    let b = textureLoad(caustic_map, i0 + vec2<i32>(1, 0), 0).r;
+    let c = textureLoad(caustic_map, i0 + vec2<i32>(0, 1), 0).r;
+    let d = textureLoad(caustic_map, i0 + vec2<i32>(1, 1), 0).r;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+/// Scale on the light reaching scene point `p` from the caustic map. The first directional light
+/// refracts at a level surface, and the map is read where that beam through `p` crosses the
+/// receiver plane. The map holds the pattern at the receiver depth only, so points far above or
+/// below it see that pattern rather than their own focus. Only the sun's share of the downwelling
+/// irradiance `e0` follows the map.
+fn caustic_lighting(p: vec3<f32>, e0: vec3<f32>) -> vec3<f32> {
+    if caustic_params.x == 0.0 || lights.n_directional_lights == 0u {
+        return vec3<f32>(1.0);
+    }
+    let light = &lights.directional_lights[0];
+    let L = (*light).direction_to_light.xyz;
+    if L.y <= 0.0 {
+        return vec3<f32>(1.0);
+    }
+    let eta = 1.0 / medium.ior;
+    let beam = refract(-L, vec3<f32>(0.0, 1.0, 0.0), eta);
+    let depth = water_plane.x - p.y;
+    let back = (depth - caustic_params.y) / max(-beam.y, 1e-3);
+    let intensity = caustic_at_receiver(p.xz - beam.xz * back);
+    let sun = (*light).color.rgb * L.y * (1.0 - fresnel_dielectric(L.y, eta));
+    let share = select(sun / e0, vec3<f32>(0.0), e0 <= vec3<f32>(0.0));
+    return 1.0 + (intensity - 1.0) * saturate(share);
 }
 
 @fragment
@@ -64,6 +110,7 @@ fn water_medium(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 
     var path = MEDIUM_MAX_PATH;
     var lighting = vec3<f32>(1.0);
+    let e0 = downwelling_irradiance();
     let depth = textureLoad(scene_depth, pixel, 0);
     if depth > 0.0 {
         let far = position_ndc_to_world(vec3<f32>(ndc, depth));
@@ -72,7 +119,8 @@ fn water_medium(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
             return color;
         }
         path = distance(near, far);
-        lighting = exp(-max(medium.diffuse_attenuation, vec3<f32>(0.0)) * (h - far.y));
+        lighting = exp(-max(medium.diffuse_attenuation, vec3<f32>(0.0)) * (h - far.y))
+            * caustic_lighting(far, e0);
     } else if descent < 0.0 {
         // A ray that rises without meeting the surface mesh stops at the surface.
         path = depth_near / max(-descent, 1e-3);
@@ -82,7 +130,7 @@ fn water_medium(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 
     let sigma_t = max(medium.absorption + medium.scattering, vec3<f32>(0.0));
     let transmittance = exp(-sigma_t * path);
-    let scattered = medium_multiple_scattering(depth_near, descent, path, floor_depth, downwelling_irradiance())
+    let scattered = medium_multiple_scattering(depth_near, descent, path, floor_depth, e0)
         + single_scattering(near, direction, path, water_plane.x, in.position.xy);
     return vec4<f32>(color.rgb * lighting * transmittance + scattered * view.exposure, color.a);
 }

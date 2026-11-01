@@ -4,12 +4,18 @@
 //! lens. For small slopes, a ray at `x` refracts by `(1 - 1/n) h'(x)` and lands at depth `d` at
 //! `x + d (1 - 1/n) h'(x)`, so the light spreads by `1 - d / f` with
 //! `f = 1 / ((1 - 1/n) A k^2 cos(k x))`. Halfway to the focus, crests show nearly twice the light
-//! and troughs two thirds, and the mean stays one. The test compares texels with the exact refraction
+//! and troughs two thirds, and the mean stays one. The tests compare with the exact refraction
 //! seen through the one-texel tent the map spreads each ray over.
 use bevy::{
     app::PluginsState,
+    camera::{Exposure, Hdr, ImageRenderTarget, RenderTarget, ScalingMode},
+    core_pipeline::tonemapping::{DebandDither, Tonemapping},
+    light::{GlobalAmbientLight, NotShadowCaster},
     prelude::*,
-    render::gpu_readback::{Readback, ReadbackComplete},
+    render::{
+        gpu_readback::{Readback, ReadbackComplete},
+        render_resource::{TextureFormat, TextureUsages},
+    },
     window::ExitCondition,
     winit::WinitPlugin,
 };
@@ -25,10 +31,11 @@ const TEXEL: f32 = 0.25;
 const IOR: f32 = 1.333;
 const WAVELENGTH: f32 = 4.0;
 const AMPLITUDE: f32 = 0.05;
+const K: f32 = TAU / WAVELENGTH;
 
 #[derive(Resource, Default)]
 struct Capture {
-    map: Vec<f32>,
+    data: Vec<u8>,
     serial: u64,
 }
 
@@ -36,6 +43,16 @@ fn step(app: &mut App) {
     app.update();
     assert!(app.should_exit().is_none(), "renderer must remain healthy");
     thread::sleep(Duration::from_millis(2));
+}
+
+fn capture(app: &mut App) -> Vec<u8> {
+    let first = app.world().resource::<Capture>().serial;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while app.world().resource::<Capture>().serial < first + 4 {
+        step(app);
+        assert!(Instant::now() < deadline, "readback timed out");
+    }
+    app.world().resource::<Capture>().data.clone()
 }
 
 /// Half float bits for `value`, rounded to nearest. Covers the normal range used here.
@@ -60,14 +77,55 @@ fn half_bits(value: f32) -> u16 {
     sign | ((exponent as u16) << 10) | rounded as u16
 }
 
-fn focal_depth() -> f32 {
-    let k = TAU / WAVELENGTH;
-    1.0 / ((1.0 - 1.0 / IOR) * AMPLITUDE * k * k)
+fn half(bits: u16) -> f32 {
+    let exponent = ((bits >> 10) & 0x1f) as i32;
+    let mantissa = (bits & 0x3ff) as f32;
+    let magnitude = match exponent {
+        0 => mantissa * 2f32.powi(-24),
+        e => (1.0 + mantissa / 1024.0) * 2f32.powi(e - 15),
+    };
+    if bits & 0x8000 != 0 {
+        -magnitude
+    } else {
+        magnitude
+    }
 }
 
-#[test]
-#[ignore = "requires a graphics adapter"]
-fn wave_crests_focus_sunlight_at_the_lens_depth() {
+fn focal_depth() -> f32 {
+    1.0 / ((1.0 - 1.0 / IOR) * AMPLITUDE * K * K)
+}
+
+/// World X of texel `i` of the single slice, which is centred on the camera at the origin.
+fn texel_x(i: u32) -> f32 {
+    (i as f32 + 0.5 - RESOLUTION as f32 * 0.5) * TEXEL
+}
+
+/// Where the ray through surface point `x` lands at `depth`, by exact refraction.
+fn landing(x: f32, depth: f32) -> f32 {
+    let n = Vec2::new(AMPLITUDE * K * (K * x).sin(), 1.0).normalize();
+    let i = Vec2::NEG_Y;
+    let eta = 1.0 / IOR;
+    let cos_i = -i.dot(n);
+    let cos_t = (1.0 - eta * eta * (1.0 - cos_i * cos_i)).sqrt();
+    let t = eta * i + (eta * cos_i - cos_t) * n;
+    x + t.x * (AMPLITUDE * (K * x).cos() + depth) / -t.y
+}
+
+/// Light landing under the one-texel tent around receiver point `c`, relative to a level surface.
+fn expected_intensity(c: f32, depth: f32) -> f32 {
+    let samples = 20000;
+    let span = 4.0 * TEXEL;
+    (0..samples)
+        .map(|j| {
+            let x = c - span + 2.0 * span * (j as f32 + 0.5) / samples as f32;
+            (1.0 - ((landing(x, depth) - c) / TEXEL).abs()).max(0.0)
+        })
+        .sum::<f32>()
+        * (2.0 * span / samples as f32)
+        / TEXEL
+}
+
+fn caustics_app() -> App {
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -93,6 +151,7 @@ fn wave_crests_focus_sunlight_at_the_lens_depth() {
         rays_per_texel: 8,
         ior: IOR,
     })
+    .insert_resource(GlobalAmbientLight::NONE)
     .insert_resource(bevy::render::error_handler::RenderErrorHandler(
         |error, _, _| {
             panic!("GPU validation failed: {error:?}");
@@ -106,54 +165,60 @@ fn wave_crests_focus_sunlight_at_the_lens_depth() {
     app.finish();
     app.cleanup();
     app.world_mut().spawn((
-        Camera3d::default(),
-        Transform::from_xyz(0.0, 10.0, 0.0).looking_at(Vec3::ZERO, Vec3::Z),
-    ));
-    app.world_mut().spawn((
-        DirectionalLight::default(),
+        DirectionalLight {
+            illuminance: 2.0,
+            ..default()
+        },
         Transform::default().looking_to(Vec3::NEG_Y, Vec3::Z),
     ));
-    step(&mut app);
+    app
+}
 
-    // The single slice is centred on the camera at the origin, so texel `i` sits at
-    // x = (i + 0.5 - RESOLUTION / 2) * TEXEL.
-    let k = TAU / WAVELENGTH;
-    let x_of = |i: u32| (i as f32 + 0.5 - RESOLUTION as f32 * 0.5) * TEXEL;
+/// Fills the LOD data with the sinusoidal surface. The data exists after the first update.
+fn set_sinusoid(app: &mut App) {
     let displacement = app.world().resource::<WaterLodData>().displacement.clone();
-    {
-        let mut images = app.world_mut().resource_mut::<Assets<Image>>();
-        let mut image = images.get_mut(&displacement).unwrap();
-        let data = image.data.as_mut().unwrap();
-        for (n, texel) in data.chunks_exact_mut(8).enumerate() {
-            let x = x_of(n as u32 % RESOLUTION);
-            let lanes = [
-                -AMPLITUDE * k * (k * x).sin(),
-                0.0,
-                AMPLITUDE * (k * x).cos(),
-                0.0,
-            ];
-            for (lane, value) in lanes.iter().enumerate() {
-                texel[lane * 2..lane * 2 + 2].copy_from_slice(&half_bits(*value).to_le_bytes());
-            }
+    let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+    let mut image = images.get_mut(&displacement).unwrap();
+    let data = image.data.as_mut().unwrap();
+    for (n, texel) in data.chunks_exact_mut(8).enumerate() {
+        let x = texel_x(n as u32 % RESOLUTION);
+        let lanes = [
+            -AMPLITUDE * K * (K * x).sin(),
+            0.0,
+            AMPLITUDE * (K * x).cos(),
+            0.0,
+        ];
+        for (lane, value) in lanes.iter().enumerate() {
+            texel[lane * 2..lane * 2 + 2].copy_from_slice(&half_bits(*value).to_le_bytes());
         }
     }
-    let map = app.world().resource::<WaterCaustics>().map.clone();
-    app.world_mut().spawn(Readback::texture(map)).observe(
+}
+
+fn observe_into_capture(app: &mut App, readback: Readback) {
+    app.world_mut().spawn(readback).observe(
         |event: On<ReadbackComplete>, mut capture: ResMut<Capture>| {
-            capture.map = event
-                .data
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
-                .collect();
+            capture.data = event.data.clone();
             capture.serial += 1;
         },
     );
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while app.world().resource::<Capture>().serial < 4 {
-        step(&mut app);
-        assert!(Instant::now() < deadline, "caustics readback timed out");
-    }
-    let map = app.world().resource::<Capture>().map.clone();
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn wave_crests_focus_sunlight_at_the_lens_depth() {
+    let mut app = caustics_app();
+    app.world_mut().spawn((
+        Camera3d::default(),
+        Transform::from_xyz(0.0, 10.0, 0.0).looking_at(Vec3::ZERO, Vec3::Z),
+    ));
+    step(&mut app);
+    set_sinusoid(&mut app);
+    let map = app.world().resource::<WaterCaustics>().map.clone();
+    observe_into_capture(&mut app, Readback::texture(map));
+    let map: Vec<f32> = capture(&mut app)
+        .chunks_exact(4)
+        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .collect();
     assert_eq!(map.len(), (RESOLUTION * RESOLUTION) as usize);
 
     // Columns away from the slice edges, where rays from outside the slice would be missing.
@@ -170,50 +235,132 @@ fn wave_crests_focus_sunlight_at_the_lens_depth() {
     eprintln!("focal depth {} m, mean intensity {mean}", focal_depth());
     assert!((mean - 1.0).abs() < 0.01, "mean intensity {mean}");
 
-    // The map spreads each ray over the receiver texels around its hit with a tent one texel wide,
-    // so the expected value is the light landing under that tent, from the exact refraction.
     let depth = 0.5 * focal_depth();
-    let landing = |x: f32| {
-        let s = AMPLITUDE * k * (k * x).sin();
-        let n = Vec2::new(s, 1.0).normalize();
-        let i = Vec2::NEG_Y;
-        let eta = 1.0 / IOR;
-        let cos_i = -i.dot(n);
-        let cos_t = (1.0 - eta * eta * (1.0 - cos_i * cos_i)).sqrt();
-        let t = eta * i + (eta * cos_i - cos_t) * n;
-        let drop = AMPLITUDE * (k * x).cos() + depth;
-        x + t.x * drop / -t.y
-    };
-    let expected = |i: u32| {
-        let c = x_of(i);
-        let samples = 20000;
-        let span = 4.0 * TEXEL;
-        (0..samples)
-            .map(|j| {
-                let x = c - span + 2.0 * span * (j as f32 + 0.5) / samples as f32;
-                (1.0 - ((landing(x) - c) / TEXEL).abs()).max(0.0)
-            })
-            .sum::<f32>()
-            * (2.0 * span / samples as f32)
-            / TEXEL
-    };
     let crest = interior
         .iter()
         .copied()
-        .find(|&i| (k * x_of(i)).cos() > 0.98)
+        .find(|&i| (K * texel_x(i)).cos() > 0.98)
         .unwrap();
     let trough = interior
         .iter()
         .copied()
-        .find(|&i| (k * x_of(i)).cos() < -0.98)
+        .find(|&i| (K * texel_x(i)).cos() < -0.98)
         .unwrap();
     for (label, i) in [("crest", crest), ("trough", trough)] {
         let measured = column(i);
-        eprintln!("{label}: {measured} against {}", expected(i));
+        let expected = expected_intensity(texel_x(i), depth);
+        eprintln!("{label}: {measured} against {expected}");
         assert!(
-            (measured / expected(i) - 1.0).abs() < 0.02,
-            "{label}: {measured} against {}",
-            expected(i)
+            (measured / expected - 1.0).abs() < 0.02,
+            "{label}: {measured} against {expected}"
         );
     }
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn caustics_light_a_plate_on_the_receiver() {
+    const SIZE: u32 = 256;
+    const VIEW: f32 = 16.0;
+    let depth = 0.5 * focal_depth();
+    let mut app = caustics_app();
+    // Clear water, so the plate shows only the sun and its caustics.
+    app.insert_resource(WaterMedium(WaterMediumUniform {
+        absorption: Vec3::ZERO,
+        scattering: Vec3::ZERO,
+        diffuse_attenuation: Vec3::ZERO,
+        ..default()
+    }));
+    let mut image = Image::new_target_texture(SIZE, SIZE, TextureFormat::Rgba16Float, None);
+    image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+    let target = app.world_mut().resource_mut::<Assets<Image>>().add(image);
+    app.world_mut().spawn((
+        Camera3d::default(),
+        WaterUnderwater,
+        Hdr,
+        Msaa::Off,
+        Tonemapping::None,
+        DebandDither::Disabled,
+        Exposure { ev100: 0.0 },
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: ScalingMode::Fixed {
+                width: VIEW,
+                height: VIEW,
+            },
+            ..OrthographicProjection::default_3d()
+        }),
+        Transform::from_xyz(0.0, 1.0 - depth, 0.0).looking_to(Vec3::NEG_Y, Vec3::Z),
+        RenderTarget::Image(ImageRenderTarget {
+            handle: target.clone(),
+            scale_factor: 1.0,
+        }),
+    ));
+    let (surface_mesh, plate_mesh) = {
+        let mut assets = app.world_mut().resource_mut::<Assets<Mesh>>();
+        (
+            assets.add(Plane3d::default().mesh().size(32.0, 32.0)),
+            assets.add(Plane3d::default().mesh().size(40.0, 40.0)),
+        )
+    };
+    let surface_material = app
+        .world_mut()
+        .resource_mut::<Assets<WaterSurfaceMaterial>>()
+        .add(WaterSurfaceMaterial::default());
+    app.world_mut().spawn((
+        Mesh3d(surface_mesh),
+        MeshMaterial3d(surface_material),
+        WaterSurfaceTag,
+        NotShadowCaster,
+    ));
+    let plate_material = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 1.0,
+            reflectance: 0.0,
+            ..default()
+        });
+    app.world_mut().spawn((
+        Mesh3d(plate_mesh),
+        MeshMaterial3d(plate_material),
+        Transform::from_xyz(0.0, -depth, 0.0),
+    ));
+    step(&mut app);
+    set_sinusoid(&mut app);
+    observe_into_capture(&mut app, Readback::texture(target));
+    let pixels: Vec<f32> = capture(&mut app)
+        .chunks_exact(8)
+        .map(|p| half(u16::from_le_bytes([p[0], p[1]])))
+        .collect();
+
+    // Red lane along the middle rows. The view spans four wavelengths, so the mean over all
+    // columns is the mean over whole periods.
+    let column = |c: u32| {
+        (SIZE / 2 - 8..SIZE / 2 + 8)
+            .map(|r| pixels[(r * SIZE + c) as usize])
+            .sum::<f32>()
+            / 16.0
+    };
+    let mean = (0..SIZE).map(column).sum::<f32>() / SIZE as f32;
+    let pixel = VIEW / SIZE as f32;
+    // Pixel columns either side of x = 0, a crest, and of x = 2, a trough. The map texels nearest
+    // them sit at x = 0.125 and x = 2.125, and the map is symmetric about both lines.
+    let crest = 0.5 * (column(SIZE / 2 - 1) + column(SIZE / 2)) / mean;
+    let trough_column = SIZE / 2 + (2.0 / pixel) as u32;
+    let trough = 0.5 * (column(trough_column - 1) + column(trough_column)) / mean;
+    let expected_crest = expected_intensity(0.125, depth);
+    let expected_trough = expected_intensity(2.125, depth);
+    eprintln!(
+        "plate crest {crest} against {expected_crest}, trough {trough} against {expected_trough}"
+    );
+    assert!(mean > 0.0, "plate must be lit");
+    assert!(
+        (crest / expected_crest - 1.0).abs() < 0.03,
+        "crest {crest} against {expected_crest}"
+    );
+    assert!(
+        (trough / expected_trough - 1.0).abs() < 0.03,
+        "trough {trough} against {expected_trough}"
+    );
 }
