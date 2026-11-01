@@ -84,7 +84,9 @@ pub struct WaterLodSlices {
 ///
 /// `foam_state` is not written by solvers. The foam sim in [`super::WaterFoamSettings`] keeps it,
 /// with active foam in its red channel and residual foam in green, carried over from frame to
-/// frame. It uses [`super::WATER_FOAM_STATE_FORMAT`].
+/// frame. It uses [`super::WATER_FOAM_STATE_FORMAT`]. The foam sim also keeps `foam_flow`, the
+/// advected texture coordinates of the foam pattern, with [`WATER_FOAM_FLOW_LAYERS_PER_SLICE`]
+/// layers per slice in [`WATER_FOAM_FLOW_FORMAT`]. `foam_flow.wesl` describes its layout.
 #[derive(Resource, Clone, ExtractResource)]
 #[extract_app(RenderApp)]
 pub struct WaterLodData {
@@ -93,6 +95,7 @@ pub struct WaterLodData {
     pub flow: Handle<Image>,
     pub drift: Handle<Image>,
     pub foam_state: Handle<Image>,
+    pub foam_flow: Handle<Image>,
     pub slices: WaterLodSlices,
 }
 
@@ -120,12 +123,24 @@ pub const WATER_LOD_SURFACE_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 /// can bind as a storage texture.
 pub const WATER_LOD_DRIFT_FORMAT: TextureFormat = TextureFormat::Rg32Float;
 
+/// Format of the `foam_flow` array of [`WaterLodData`]. Texture offsets grow by the drift over a
+/// whole latency, so they stay at full precision.
+pub const WATER_FOAM_FLOW_FORMAT: TextureFormat = TextureFormat::Rgba32Float;
+
+/// Layers of the `foam_flow` array of [`WaterLodData`] per slice. Matches
+/// `FOAM_FLOW_LAYERS_PER_SLICE` in `foam_flow.wesl`.
+pub const WATER_FOAM_FLOW_LAYERS_PER_SLICE: u32 = 3;
+
 fn lod_array_image(settings: &WaterLodSettings, format: TextureFormat) -> Image {
+    lod_layers_image(settings, format, 1)
+}
+
+fn lod_layers_image(settings: &WaterLodSettings, format: TextureFormat, per_slice: u32) -> Image {
     let mut image = Image::new_fill(
         Extent3d {
             width: settings.resolution,
             height: settings.resolution,
-            depth_or_array_layers: settings.clamped_count(),
+            depth_or_array_layers: settings.clamped_count() * per_slice,
         },
         TextureDimension::D2,
         &vec![0; format.block_copy_size(None).unwrap_or(16) as usize],
@@ -160,6 +175,11 @@ pub(super) fn create_water_lod_data(
         flow: images.add(lod_array_image(&settings, TextureFormat::Rgba32Float)),
         drift: images.add(lod_array_image(&settings, WATER_LOD_DRIFT_FORMAT)),
         foam_state: images.add(lod_array_image(&settings, super::WATER_FOAM_STATE_FORMAT)),
+        foam_flow: images.add(lod_layers_image(
+            &settings,
+            WATER_FOAM_FLOW_FORMAT,
+            WATER_FOAM_FLOW_LAYERS_PER_SLICE,
+        )),
         slices,
     });
 }
@@ -246,6 +266,7 @@ mod tests {
             flow: Handle::default(),
             drift: Handle::default(),
             foam_state: Handle::default(),
+            foam_flow: Handle::default(),
             slices,
         };
         assert_eq!(data.finest_slice_containing(Vec2::new(3.0, 0.0)), Some(0));

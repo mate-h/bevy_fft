@@ -202,7 +202,7 @@ impl WaterMediumUniform {
 /// Solvers reach the material only through the LOD data, so one material shows the FFT ocean,
 /// shallow water, and dispersive patches together. The surface samples by world position, so any
 /// mesh layout works and the water stays anchored when the mesh moves. [`super::WaterPlugin`]
-/// keeps `lod`, `lod_displacement`, `lod_foam`, `lod_foam_state`, and `lod_drift` in sync with the
+/// keeps `lod`, `lod_displacement`, `lod_foam`, `lod_foam_state`, and `lod_foam_flow` in sync with the
 /// LOD data each frame, sets `foam_texture`, the time, and the medium, and points `quadtree` at the entity's [`WaterQuadtreeBuffer`] or at
 /// the shared fallback.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
@@ -227,9 +227,9 @@ pub struct WaterSurfaceExtension {
     /// Active and residual foam from the foam sim. Full precision, so the shader blends it with loads.
     #[texture(108, dimension = "2d_array", sample_type = "float", filterable = false)]
     pub lod_foam_state: Handle<Image>,
-    /// Drift of floating matter, which carries the foam texture.
+    /// Texture coordinates of the foam pattern, carried along the drift by the foam sim.
     #[texture(111, dimension = "2d_array", sample_type = "float", filterable = false)]
-    pub lod_drift: Handle<Image>,
+    pub lod_foam_flow: Handle<Image>,
     /// Tiling foam pattern thresholded by coverage, from [`super::WaterFoamTexture`].
     #[texture(109)]
     #[sampler(110)]
@@ -264,7 +264,7 @@ impl Default for WaterSurfaceExtension {
             opaque_depth: None,
             optics: default(),
             lod_foam_state: Handle::default(),
-            lod_drift: Handle::default(),
+            lod_foam_flow: Handle::default(),
             foam_texture: Handle::default(),
             medium: default(),
             caustic_map: Handle::default(),
@@ -360,8 +360,8 @@ pub(super) fn sync_water_surface_lod(
             if mat.extension.lod_foam_state != lod.foam_state {
                 mat.extension.lod_foam_state = lod.foam_state.clone();
             }
-            if mat.extension.lod_drift != lod.drift {
-                mat.extension.lod_drift = lod.drift.clone();
+            if mat.extension.lod_foam_flow != lod.foam_flow {
+                mat.extension.lod_foam_flow = lod.foam_flow.clone();
             }
             if let Some(foam_texture) = &foam_texture
                 && mat.extension.foam_texture != foam_texture.0

@@ -248,3 +248,49 @@ fn rendered_foam_matches_sim_coverage() {
     let s = foam_statistics(&capture(&mut app, 30));
     assert_eq!(s.any, 0.0, "foam without coverage, mean albedo {}", s.mean);
 }
+
+/// Fills the drift with the shear `u = (rate z, 0)`, which leaves the foam state in place but
+/// stretches the advected texture coordinates.
+fn set_shear(app: &mut App, rate: f32) {
+    let handle = app.world().resource::<WaterLodData>().drift.clone();
+    let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+    let mut image = images.get_mut(&handle).unwrap();
+    let res = image.texture_descriptor.size.width as usize;
+    let data = image.data.as_mut().unwrap();
+    for y in 0..res {
+        let z = y as f32 + 0.5 - res as f32 * 0.5;
+        for x in 0..res {
+            let o = (y * res + x) * 8;
+            data[o..o + 4].copy_from_slice(&(rate * z).to_le_bytes());
+            data[o + 4..o + 8].copy_from_slice(&0f32.to_le_bytes());
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn sheared_foam_keeps_its_coverage() {
+    // A shear of 0.3 per second deforms the long layer past the target and keeps the short layer
+    // under it, so the pattern blends both layers, by a weight that changes with the phases.
+    let mut app = foam_app();
+    set_shear(&mut app, 0.3);
+    set_foam_state(&mut app, 0.2, 0.3);
+    for _ in 0..4 {
+        let s = foam_statistics(&capture(&mut app, 5));
+        eprintln!(
+            "sheared, active 0.2, residual 0.3: dense {}, stage A {}, any {}, mean albedo {}",
+            s.dense, s.stage_a, s.any, s.mean
+        );
+        assert!(
+            (s.dense - 0.2).abs() < 0.02,
+            "dense foam must cover the active share, got {}",
+            s.dense
+        );
+        let expected = FOAM_ALBEDO * (0.2 + 0.3 * 0.1 / 0.55);
+        assert!(
+            (s.mean / expected - 1.0).abs() < 0.05,
+            "mean albedo {} against {expected}",
+            s.mean
+        );
+    }
+}

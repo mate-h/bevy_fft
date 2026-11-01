@@ -12,8 +12,17 @@
 // Last frame's foam sits on last frame's slice placement. A lookup that leaves its own slice there
 // falls back to the next coarser slice, as Crest's foam sim does, and returns no foam past the
 // coarsest one.
+//
+// `foam_flow` carries the advected texture coordinates of `foam_flow.wesl` the same way, with a
+// plain semi-Lagrangian step, and restarts each phase when its latency runs out.
 
 import bevy_fft::water::lod::{WaterLodSlices, bilinear_clamp_layer, lod_texel_world};
+import bevy_fft::water::foam_flow::{
+    FOAM_FLOW_LATENCY,
+    FOAM_FLOW_LAYERS_PER_SLICE,
+    foam_flow_age,
+    foam_flow_seed,
+};
 
 struct WaterFoamParams {
     /// Slice placement the previous foam was written on.
@@ -30,8 +39,10 @@ struct WaterFoamParams {
     source_active: f32,
     /// Residual foam gained per unit of breaking intensity held over the step.
     source_residual: f32,
-    _pad0: f32,
-    _pad1: f32,
+    /// Wrapped seconds since startup at the end of the step, the surface material's time.
+    time: f32,
+    /// One on the first step, which gives every phase a fresh offset.
+    restart: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: WaterFoamParams;
@@ -45,6 +56,10 @@ struct WaterFoamParams {
 /// LOD drift lane in meters per second along X and Z.
 @group(0) @binding(5) var lod_drift: texture_2d_array<f32>;
 @group(0) @binding(6) var foam_out: texture_storage_2d_array<rg32float, write>;
+/// Advected texture coordinates and deformation at the end of the previous frame, on
+/// `params.previous`, with `FOAM_FLOW_LAYERS_PER_SLICE` layers per slice.
+@group(0) @binding(7) var previous_flow: texture_2d_array<f32>;
+@group(0) @binding(8) var flow_out: texture_storage_2d_array<rgba32float, write>;
 
 fn slice_uv(slices: WaterLodSlices, xz: vec2<f32>, i: u32) -> vec2<f32> {
     let s = slices.slices[i];
@@ -143,4 +158,77 @@ fn foam_correct(@builtin(global_invocation_id) gid: vec3<u32>) {
         + breaking * params.source_residual;
     let result = saturate(vec2<f32>(fresh, residual));
     textureStore(foam_out, gid.xy, slice, vec4<f32>(result, 0.0, 0.0));
+}
+
+/// The three flow layers of one slice at a lookup, bilinearly blended, or nothing found.
+struct FlowLookup {
+    found: bool,
+    short: vec4<f32>,
+    long: vec4<f32>,
+    deformation: vec4<f32>,
+}
+
+/// Previous flow state at world `xz`, looked up from slice `start` outward.
+fn previous_flow_at(xz: vec2<f32>, start: u32) -> FlowLookup {
+    var out: FlowLookup;
+    let i = slice_holding(params.previous, xz, start);
+    out.found = i >= 0;
+    if !out.found {
+        return out;
+    }
+    let uv = slice_uv(params.previous, xz, u32(i));
+    let base = u32(i) * FOAM_FLOW_LAYERS_PER_SLICE;
+    out.short = bilinear_clamp_layer(previous_flow, uv, base);
+    out.long = bilinear_clamp_layer(previous_flow, uv, base + 1u);
+    out.deformation = bilinear_clamp_layer(previous_flow, uv, base + 2u);
+    return out;
+}
+
+/// Carries each phase's texture offset and accumulated deformation along the drift, Neyret (2003)
+/// §2.1, and starts a phase over with a fresh offset and no deformation when its latency runs out.
+/// A pattern read at `xz + offset` then moves with the drift. The deformation grows by the norm of
+/// the strain rate, the symmetric part of the drift gradient, times the step.
+@compute @workgroup_size(8, 8, 1)
+fn foam_flow(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let slice = gid.z;
+    if gid.x >= lod.resolution || gid.y >= lod.resolution || slice >= lod.count {
+        return;
+    }
+    let texel = vec2<i32>(gid.xy);
+    let xz = lod_texel_world(lod, gid.xy, slice);
+    let u = drift_at(texel, slice);
+    let step = u * params.dt;
+
+    let texel_width = lod.slices[slice].z;
+    let du = (drift_at(texel + vec2(1, 0), slice) - drift_at(texel - vec2(1, 0), slice))
+        / (2.0 * texel_width);
+    let dv = (drift_at(texel + vec2(0, 1), slice) - drift_at(texel - vec2(0, 1), slice))
+        / (2.0 * texel_width);
+    let shear = 0.5 * (du.y + dv.x);
+    let strain = sqrt(du.x * du.x + dv.y * dv.y + 2.0 * shear * shear);
+
+    let previous = previous_flow_at(xz - step, slice);
+    var offsets = array<vec4<f32>, 2>(previous.short - step.xyxy, previous.long - step.xyxy);
+    var deformation = previous.deformation + strain * params.dt;
+    let before = params.time - params.dt;
+    for (var layer = 0u; layer < 2u; layer++) {
+        for (var phase = 0u; phase < 2u; phase++) {
+            let restart = !previous.found || params.restart > 0.5
+                || params.dt >= FOAM_FLOW_LATENCY[layer]
+                || foam_flow_age(params.time, layer, phase) < foam_flow_age(before, layer, phase);
+            if restart {
+                let seed = foam_flow_seed(params.time, layer, phase);
+                if phase == 0u {
+                    offsets[layer] = vec4<f32>(seed, offsets[layer].zw);
+                } else {
+                    offsets[layer] = vec4<f32>(offsets[layer].xy, seed);
+                }
+                deformation[2u * layer + phase] = 0.0;
+            }
+        }
+    }
+    let base = slice * FOAM_FLOW_LAYERS_PER_SLICE;
+    textureStore(flow_out, gid.xy, base, offsets[0]);
+    textureStore(flow_out, gid.xy, base + 1u, offsets[1]);
+    textureStore(flow_out, gid.xy, base + 2u, deformation);
 }

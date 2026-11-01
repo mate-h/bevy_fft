@@ -8,6 +8,10 @@
 //! [`WaterFoamSettings`]. Fading active foam feeds residual foam, as Stage A whitecaps turn into
 //! Stage B patches in Monahan and Woolf's model. Sources and decay use the exact solution over each
 //! step, so foam does not depend on the frame rate.
+//!
+//! The same pass carries the foam texture coordinates in [`WaterLodData::foam_flow`] along the
+//! drift, after Neyret (2003), so the rendered foam pattern moves with the foam instead of standing
+//! still under it. `foam_flow.wesl` describes the layout.
 
 use std::f32::consts::LN_2;
 
@@ -24,7 +28,9 @@ use bevy::{
     },
 };
 
-use super::{WATER_LOD_DRIFT_FORMAT, WaterLodData, WaterLodGpu, WaterLodSlices};
+use super::{
+    WATER_FOAM_FLOW_FORMAT, WATER_LOD_DRIFT_FORMAT, WaterLodData, WaterLodGpu, WaterLodSlices,
+};
 
 /// Format of [`WaterLodData::foam_state`] and the sim's working arrays. Half floats would lose a
 /// little foam to rounding on every store, so the two lanes stay at full precision.
@@ -86,14 +92,18 @@ pub struct WaterFoamParams {
     pub source_active: f32,
     /// Residual foam gained per unit of breaking intensity held over the step.
     pub source_residual: f32,
-    pub _pad0: f32,
-    pub _pad1: f32,
+    /// Wrapped seconds since startup at the end of the step, the surface material's time.
+    pub time: f32,
+    /// One on the first step the sim runs, which gives every advected texture coordinate a fresh
+    /// offset. The render world sets it.
+    pub restart: f32,
 }
 
 impl WaterFoamParams {
     /// Exact solution over `dt` seconds of `da/dt = b / t_f - la a` and `dr/dt = k la a - lr r`,
     /// with breaking intensity `b` held for the step, formation time `t_f`, and each rate
-    /// `ln 2 / half-life`. An infinite half-life keeps that foam forever.
+    /// `ln 2 / half-life`. An infinite half-life keeps that foam forever. The time is left at zero
+    /// for the caller to set.
     pub fn step(settings: &WaterFoamSettings, previous: WaterLodSlices, dt: f32) -> Self {
         let rate = |half_life: f32| {
             if half_life.is_finite() {
@@ -125,8 +135,8 @@ impl WaterFoamParams {
             residual_gain: k * la * overlap,
             source_active: held(la, active_decay) * inv_formation,
             source_residual: k * (held(lr, residual_decay) - overlap) * inv_formation,
-            _pad0: 0.0,
-            _pad1: 0.0,
+            time: 0.0,
+            restart: 0.0,
         }
     }
 }
@@ -150,7 +160,10 @@ pub(super) fn gather_water_foam(
     };
     let previous = last.unwrap_or(lod.slices);
     *last = Some(lod.slices);
-    frame.params = WaterFoamParams::step(&settings, previous, time.delta_secs());
+    frame.params = WaterFoamParams {
+        time: time.elapsed_secs_wrapped(),
+        ..WaterFoamParams::step(&settings, previous, time.delta_secs())
+    };
 }
 
 #[derive(Resource)]
@@ -158,6 +171,7 @@ pub struct WaterFoamPipeline {
     layout: BindGroupLayoutDescriptor,
     forward: CachedComputePipelineId,
     correct: CachedComputePipelineId,
+    flow: CachedComputePipelineId,
 }
 
 impl FromWorld for WaterFoamPipeline {
@@ -175,6 +189,8 @@ impl FromWorld for WaterFoamPipeline {
                 texture_2d_array(unfiltered),
                 texture_2d_array(unfiltered),
                 texture_storage_2d_array(WATER_FOAM_STATE_FORMAT, StorageTextureAccess::WriteOnly),
+                texture_2d_array(unfiltered),
+                texture_storage_2d_array(WATER_FOAM_FLOW_FORMAT, StorageTextureAccess::WriteOnly),
             ),
         );
         let layout = BindGroupLayoutDescriptor::new("water_foam_layout", &entries);
@@ -194,6 +210,7 @@ impl FromWorld for WaterFoamPipeline {
         Self {
             forward: queue("foam_forward"),
             correct: queue("foam_correct"),
+            flow: queue("foam_flow"),
             layout,
         }
     }
@@ -206,23 +223,33 @@ struct FoamArray {
 
 /// Render-world working arrays and bind groups. `forward` holds the semi-Lagrangian step and
 /// `corrected` the finished foam, which is copied into [`WaterLodData::foam_state`] at the end.
+/// `flow` holds the advected texture coordinates, copied into [`WaterLodData::foam_flow`].
 #[derive(Resource, Default)]
 pub struct WaterFoamSim {
     arrays: Option<[FoamArray; 2]>,
+    flow: Option<FoamArray>,
     size: Extent3d,
+    flow_size: Extent3d,
+    /// Whether the flow pass has run on the current flow array.
+    flow_seeded: bool,
     params: UniformBuffer<WaterFoamParams>,
     groups: Option<[BindGroup; 2]>,
     dispatch: UVec3,
 }
 
-fn foam_array(device: &RenderDevice, size: Extent3d, label: &'static str) -> FoamArray {
+fn foam_array(
+    device: &RenderDevice,
+    size: Extent3d,
+    format: TextureFormat,
+    label: &'static str,
+) -> FoamArray {
     let texture = device.create_texture(&TextureDescriptor {
         label: Some(label),
         size,
         mip_level_count: 1,
         sample_count: 1,
         dimension: TextureDimension::D2,
-        format: WATER_FOAM_STATE_FORMAT,
+        format,
         usage: TextureUsages::STORAGE_BINDING
             | TextureUsages::TEXTURE_BINDING
             | TextureUsages::COPY_SRC,
@@ -251,10 +278,11 @@ pub(super) fn prepare_water_foam(
     let Some(lod) = lod else {
         return;
     };
-    let (Some(state), Some(source), Some(drift), Some(slices)) = (
+    let (Some(state), Some(source), Some(drift), Some(flow), Some(slices)) = (
         images.get(&lod.foam_state),
         images.get(&lod.foam),
         images.get(&lod.drift),
+        images.get(&lod.foam_flow),
         lod_gpu.slices.binding(),
     ) else {
         return;
@@ -262,17 +290,41 @@ pub(super) fn prepare_water_foam(
     let size = state.texture_descriptor.size;
     if sim.arrays.is_none() || sim.size != size {
         sim.arrays = Some([
-            foam_array(&device, size, "water_foam_forward"),
-            foam_array(&device, size, "water_foam_corrected"),
+            foam_array(&device, size, WATER_FOAM_STATE_FORMAT, "water_foam_forward"),
+            foam_array(
+                &device,
+                size,
+                WATER_FOAM_STATE_FORMAT,
+                "water_foam_corrected",
+            ),
         ]);
         sim.size = size;
     }
-    sim.params.set(frame.params);
+    let flow_size = flow.texture_descriptor.size;
+    if sim.flow.is_none() || sim.flow_size != flow_size {
+        sim.flow = Some(foam_array(
+            &device,
+            flow_size,
+            WATER_FOAM_FLOW_FORMAT,
+            "water_foam_flow",
+        ));
+        sim.flow_size = flow_size;
+        sim.flow_seeded = false;
+    }
+    let ready = [pipeline.forward, pipeline.correct, pipeline.flow]
+        .iter()
+        .all(|id| pipeline_cache.get_compute_pipeline(*id).is_some());
+    let restart = if sim.flow_seeded { 0.0 } else { 1.0 };
+    sim.params.set(WaterFoamParams {
+        restart,
+        ..frame.params
+    });
+    sim.flow_seeded |= ready;
     sim.params.write_buffer(&device, &queue);
     let Some(params) = sim.params.binding() else {
         return;
     };
-    let Some([forward, corrected]) = &sim.arrays else {
+    let (Some([forward, corrected]), Some(flow_out)) = (&sim.arrays, &sim.flow) else {
         return;
     };
     let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
@@ -290,6 +342,8 @@ pub(super) fn prepare_water_foam(
                 &source.texture_view,
                 &drift.texture_view,
                 out,
+                &flow.texture_view,
+                &flow_out.view,
             )),
         )
     };
@@ -310,16 +364,20 @@ pub(super) fn run_water_foam(
     lod: Option<Res<WaterLodData>>,
     images: Res<RenderAssets<GpuImage>>,
 ) {
-    let (Some(groups), Some(arrays), Some(lod)) = (&sim.groups, &sim.arrays, lod) else {
+    let (Some(groups), Some(arrays), Some(flow_array), Some(lod)) =
+        (&sim.groups, &sim.arrays, &sim.flow, lod)
+    else {
         return;
     };
-    let (Some(forward), Some(correct)) = (
+    let (Some(forward), Some(correct), Some(flow)) = (
         cache.get_compute_pipeline(pipeline.forward),
         cache.get_compute_pipeline(pipeline.correct),
+        cache.get_compute_pipeline(pipeline.flow),
     ) else {
         return;
     };
-    let Some(state) = images.get(&lod.foam_state) else {
+    let (Some(state), Some(flow_state)) = (images.get(&lod.foam_state), images.get(&lod.foam_flow))
+    else {
         return;
     };
     let diagnostics = ctx.diagnostic_recorder();
@@ -338,11 +396,18 @@ pub(super) fn run_water_foam(
         pass.set_pipeline(correct);
         pass.set_bind_group(0, &groups[1], &[]);
         pass.dispatch_workgroups(d.x, d.y, d.z);
+        pass.set_pipeline(flow);
+        pass.dispatch_workgroups(d.x, d.y, d.z);
     }
     encoder.copy_texture_to_texture(
         arrays[1].texture.as_image_copy(),
         state.texture.as_image_copy(),
         sim.size,
+    );
+    encoder.copy_texture_to_texture(
+        flow_array.texture.as_image_copy(),
+        flow_state.texture.as_image_copy(),
+        sim.flow_size,
     );
     time_span.end(encoder);
 }

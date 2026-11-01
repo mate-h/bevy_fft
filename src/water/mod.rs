@@ -43,8 +43,9 @@ pub use foam::{
 };
 pub use foam_texture::{WATER_FOAM_TEXTURE_SIZE, WaterFoamTexture, foam_texture_image};
 pub use lod_data::{
-    WATER_LOD_DRIFT_FORMAT, WATER_LOD_MAX_SLICES, WATER_LOD_SURFACE_FORMAT, WaterLodData,
-    WaterLodGpu, WaterLodSettings, WaterLodSlices, WaterViewer,
+    WATER_FOAM_FLOW_FORMAT, WATER_FOAM_FLOW_LAYERS_PER_SLICE, WATER_LOD_DRIFT_FORMAT,
+    WATER_LOD_MAX_SLICES, WATER_LOD_SURFACE_FORMAT, WaterLodData, WaterLodGpu, WaterLodSettings,
+    WaterLodSlices, WaterViewer,
 };
 pub use medium::{WATER_MEDIUM_SHADER, WaterMedium};
 pub use quadtree::{
@@ -102,6 +103,7 @@ impl Plugin for WaterPlugin {
         bevy::shader::load_shader_library!(app, "optics.wesl");
         bevy::shader::load_shader_library!(app, "breaking.wesl");
         bevy::shader::load_shader_library!(app, "underside.wesl");
+        bevy::shader::load_shader_library!(app, "foam_flow.wesl");
         embedded_asset!(app, "surface.wesl");
         embedded_asset!(app, "quadtree.wesl");
         embedded_asset!(app, "foam.wesl");
