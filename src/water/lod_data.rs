@@ -80,6 +80,10 @@ pub struct WaterLodSlices {
 /// solvers plus the Stokes drift of the ocean waves. `displacement` and `foam` use
 /// [`WATER_LOD_SURFACE_FORMAT`] with a linear clamped sampler, and `drift` uses
 /// [`WATER_LOD_DRIFT_FORMAT`].
+///
+/// `foam_state` is not written by solvers. The foam sim in [`super::WaterFoamSettings`] keeps it,
+/// with active foam in its red channel and residual foam in green, carried over from frame to
+/// frame. It uses [`super::WATER_FOAM_STATE_FORMAT`].
 #[derive(Resource, Clone, ExtractResource)]
 #[extract_app(RenderApp)]
 pub struct WaterLodData {
@@ -87,6 +91,7 @@ pub struct WaterLodData {
     pub foam: Handle<Image>,
     pub flow: Handle<Image>,
     pub drift: Handle<Image>,
+    pub foam_state: Handle<Image>,
     pub slices: WaterLodSlices,
 }
 
@@ -153,6 +158,7 @@ pub(super) fn create_water_lod_data(
         foam: images.add(lod_array_image(&settings, WATER_LOD_SURFACE_FORMAT)),
         flow: images.add(lod_array_image(&settings, TextureFormat::Rgba32Float)),
         drift: images.add(lod_array_image(&settings, WATER_LOD_DRIFT_FORMAT)),
+        foam_state: images.add(lod_array_image(&settings, super::WATER_FOAM_STATE_FORMAT)),
         slices,
     });
 }
@@ -238,6 +244,7 @@ mod tests {
             foam: Handle::default(),
             flow: Handle::default(),
             drift: Handle::default(),
+            foam_state: Handle::default(),
             slices,
         };
         assert_eq!(data.finest_slice_containing(Vec2::new(3.0, 0.0)), Some(0));

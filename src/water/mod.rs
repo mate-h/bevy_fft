@@ -13,11 +13,13 @@
 //!
 //! Writers run in the render graph in the order of [`WaterLodGraphSystems`]. A base writer such
 //! as the ocean covers every texel. Regional solvers such as shallow water then blend over it
-//! through [`WaterLodScratch`], and readers such as height queries run last.
+//! through [`WaterLodScratch`]. The foam sim then carries foam over from the previous frame, and
+//! readers such as height queries run last.
 //!
 //! Sampling helpers for WESL live in `bevy_fft::water::lod`.
 
 mod blend;
+mod foam;
 mod lod_data;
 mod quadtree;
 mod quadtree_gpu;
@@ -25,6 +27,9 @@ mod scene_depth;
 mod surface;
 
 pub use blend::WaterLodScratch;
+pub use foam::{
+    WATER_FOAM_SHADER, WATER_FOAM_STATE_FORMAT, WaterFoamFrame, WaterFoamParams, WaterFoamSettings,
+};
 pub use lod_data::{
     WATER_LOD_DRIFT_FORMAT, WATER_LOD_MAX_SLICES, WATER_LOD_SURFACE_FORMAT, WaterLodData,
     WaterLodGpu, WaterLodSettings, WaterLodSlices, WaterViewer,
@@ -62,6 +67,8 @@ pub enum WaterLodGraphSystems {
     Base,
     /// Regional writers that fade into the base data at their edges.
     Blend,
+    /// Passes that evolve state on the finished data, such as the foam sim.
+    Simulate,
     /// Passes that read the finished data, such as height queries.
     Read,
 }
@@ -76,11 +83,16 @@ impl Plugin for WaterPlugin {
         bevy::shader::load_shader_library!(app, "optics.wesl");
         embedded_asset!(app, "surface.wesl");
         embedded_asset!(app, "quadtree.wesl");
+        embedded_asset!(app, "foam.wesl");
         app.register_type::<WaterLodSettings>()
             .register_type::<WaterViewer>()
             .register_type::<WaterSurfaceUniform>()
             .register_type::<WaterOpticsUniform>()
             .register_type::<JerlovWaterType>()
+            .register_type::<WaterFoamSettings>()
+            .init_resource::<WaterFoamSettings>()
+            .init_resource::<WaterFoamFrame>()
+            .add_plugins(ExtractResourcePlugin::<WaterFoamFrame>::default())
             .register_type::<WaterQuadtree>()
             .register_type::<WaterQuadtreeStats>()
             .init_resource::<WaterLodSettings>()
@@ -106,6 +118,7 @@ impl Plugin for WaterPlugin {
                     quadtree::select_water_quadtrees
                         .after(bevy::camera::visibility::VisibilitySystems::UpdateFrusta),
                     surface::sync_water_surface_lod.after(WaterLodSystems),
+                    foam::gather_water_foam.after(WaterLodSystems),
                 ),
             );
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
@@ -114,6 +127,7 @@ impl Plugin for WaterPlugin {
                 .init_gpu_resource::<quadtree_gpu::QuadtreePipeline>()
                 .init_resource::<WaterLodGpu>()
                 .init_resource::<WaterLodScratch>()
+                .init_resource::<foam::WaterFoamSim>()
                 .add_systems(
                     Render,
                     (
@@ -123,16 +137,25 @@ impl Plugin for WaterPlugin {
                     )
                         .in_set(RenderSystems::PrepareResources),
                 )
+                .add_systems(
+                    Render,
+                    foam::prepare_water_foam.in_set(RenderSystems::PrepareBindGroups),
+                )
                 .configure_sets(
                     RenderGraph,
                     (
                         WaterLodGraphSystems::Base,
                         WaterLodGraphSystems::Blend,
+                        WaterLodGraphSystems::Simulate,
                         WaterLodGraphSystems::Read,
                     )
                         .chain()
                         .in_set(RenderGraphSystems::Render)
                         .before(bevy::core_pipeline::schedule::camera_driver),
+                )
+                .add_systems(
+                    RenderGraph,
+                    foam::run_water_foam.in_set(WaterLodGraphSystems::Simulate),
                 )
                 .add_systems(
                     RenderGraph,
@@ -145,6 +168,9 @@ impl Plugin for WaterPlugin {
     }
 
     fn finish(&self, app: &mut App) {
+        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            render_app.init_resource::<foam::WaterFoamPipeline>();
+        }
         quadtree_gpu::install_draws(app);
     }
 }

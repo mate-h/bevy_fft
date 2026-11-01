@@ -35,8 +35,8 @@ pub use crate::shallow_water::{
 };
 pub use crate::water::{
     JerlovWaterType, WATER_LOD_DRIFT_FORMAT, WATER_LOD_MAX_SLICES, WATER_LOD_SURFACE_FORMAT,
-    WaterLodData, WaterLodGraphSystems, WaterLodScratch, WaterLodSettings, WaterLodSlices,
-    WaterLodSystems, WaterOpticsUniform, WaterPlugin, WaterQuadtree, WaterQuadtreeBuffer,
-    WaterQuadtreeStats, WaterQuadtreeTile, WaterSurfaceExtension, WaterSurfaceMaterial,
-    WaterSurfaceTag, WaterSurfaceUniform, WaterTransmission, WaterViewer,
+    WaterFoamSettings, WaterLodData, WaterLodGraphSystems, WaterLodScratch, WaterLodSettings,
+    WaterLodSlices, WaterLodSystems, WaterOpticsUniform, WaterPlugin, WaterQuadtree,
+    WaterQuadtreeBuffer, WaterQuadtreeStats, WaterQuadtreeTile, WaterSurfaceExtension,
+    WaterSurfaceMaterial, WaterSurfaceTag, WaterSurfaceUniform, WaterTransmission, WaterViewer,
 };

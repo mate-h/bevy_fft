@@ -120,7 +120,7 @@ impl JerlovWaterType {
 /// Solvers reach the material only through the LOD data, so one material shows the FFT ocean,
 /// shallow water, and dispersive patches together. The surface samples by world position, so any
 /// mesh layout works and the water stays anchored when the mesh moves. [`super::WaterPlugin`]
-/// keeps `lod`, `lod_displacement`, and `lod_foam` in sync with the LOD data each frame, and
+/// keeps `lod`, `lod_displacement`, `lod_foam`, and `lod_foam_state` in sync with the LOD data each frame, and
 /// points `quadtree` at the entity's [`WaterQuadtreeBuffer`] or at the shared fallback.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct WaterSurfaceExtension {
@@ -141,6 +141,9 @@ pub struct WaterSurfaceExtension {
     pub opaque_depth: Option<Handle<Image>>,
     #[uniform(107)]
     pub optics: WaterOpticsUniform,
+    /// Active and residual foam from the foam sim. Full precision, so the shader blends it with loads.
+    #[texture(108, dimension = "2d_array", sample_type = "float", filterable = false)]
+    pub lod_foam_state: Handle<Image>,
 }
 
 impl Default for WaterSurfaceExtension {
@@ -158,6 +161,7 @@ impl Default for WaterSurfaceExtension {
             quadtree: Handle::default(),
             opaque_depth: None,
             optics: default(),
+            lod_foam_state: Handle::default(),
         }
     }
 }
@@ -230,6 +234,9 @@ pub(super) fn sync_water_surface_lod(
             }
             if mat.extension.lod_foam != lod.foam {
                 mat.extension.lod_foam = lod.foam.clone();
+            }
+            if mat.extension.lod_foam_state != lod.foam_state {
+                mat.extension.lod_foam_state = lod.foam_state.clone();
             }
         }
     }

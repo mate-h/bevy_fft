@@ -4,7 +4,7 @@ import bevy_pbr::render::mesh_functions::{
     mesh_position_local_to_world,
 };
 import bevy_pbr::render::view_transformations::position_world_to_clip;
-import bevy_fft::water::lod::{WaterLodSlices, lod_coverage, sample_lod_filtered};
+import bevy_fft::water::lod::{WaterLodSlices, lod_coverage, sample_lod, sample_lod_filtered};
 
 @if(PREPASS_PIPELINE)
 import bevy_pbr::prepass::io::{
@@ -70,8 +70,14 @@ struct WaterSurfaceUniform {
 @group(constants::MATERIAL_BIND_GROUP) @binding(101) var<uniform> water_lod: WaterLodSlices;
 @group(constants::MATERIAL_BIND_GROUP) @binding(102) var lod_displacement: texture_2d_array<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(103) var lod_foam: texture_2d_array<f32>;
-/// Linear, clamped to edge. Shared by both LOD arrays.
+/// Linear, clamped to edge. Shared by the filterable LOD arrays.
 @group(constants::MATERIAL_BIND_GROUP) @binding(105) var lod_sampler: sampler;
+/// Active foam in `.r` and residual foam in `.g`, kept by the foam sim.
+@group(constants::MATERIAL_BIND_GROUP) @binding(108) var lod_foam_state: texture_2d_array<f32>;
+
+/// Brightness of residual foam relative to active foam. Koepke (1984) measured thin foam streaks
+/// near 10 percent reflectance against 55 percent for fresh dense foam.
+const RESIDUAL_FOAM_BRIGHTNESS: f32 = 0.1 / 0.55;
 
 struct WaterQuadtreeTile {
     /// Corner X and Z in meters, edge length in meters, level.
@@ -192,12 +198,14 @@ fn water_pixel_normal(xz: vec2<f32>) -> vec3<f32> {
 /// Depth reported past the coarsest slice, deep enough that no bed shows through.
 const OPEN_WATER_DEPTH: f32 = 1000.0;
 
-/// Foam coverage in `.x` and water depth in meters in `.y` at undisplaced position `xz`, from one
-/// fetch of the foam texture.
+/// Foam coverage in `.x` and water depth in meters in `.y` at undisplaced position `xz`. Coverage
+/// weighs residual foam by its lower brightness.
 fn water_foam_and_depth(xz: vec2<f32>) -> vec2<f32> {
     let f = sample_lod_filtered(lod_foam, lod_sampler, water_lod, xz, 0.0);
+    let state = sample_lod(lod_foam_state, water_lod, xz, 0.0);
     let c = lod_coverage(water_lod, xz);
-    return vec2<f32>(f.r * c, mix(OPEN_WATER_DEPTH, f.g, c));
+    let foam = saturate(state.r + state.g * RESIDUAL_FOAM_BRIGHTNESS);
+    return vec2<f32>(foam * c, mix(OPEN_WATER_DEPTH, f.g, c));
 }
 
 fn water_mix_foam_into_base_color(foam: f32, base_color: vec4<f32>) -> vec4<f32> {
