@@ -4,8 +4,8 @@
 // The waterline mask says where the near plane lies under water. The water surface draws its own
 // underside together with the medium below it, so pixels that land on the surface are left alone.
 // Everything else seen from under water fades with the extinction along the ray, gains the
-// multiple-scattered light of Eq. 9, and is lit as if by the downwelling irradiance at its depth,
-// which is the `exp(-K_d y_S)` factor of Eq. 10.
+// multiple-scattered light of Eq. 9 and the single-scattered sunlight of Eq. 5, and is lit as if
+// by the downwelling irradiance at its depth, which is the `exp(-K_d y_S)` factor of Eq. 10.
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 import bevy_pbr::render::mesh_view_bindings::view;
 import bevy_pbr::render::view_transformations::position_ndc_to_world;
@@ -15,6 +15,7 @@ import bevy_fft::water::underside::{
     downwelling_irradiance,
     medium,
     medium_multiple_scattering,
+    single_scattering,
 };
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var source: texture_2d<f32>;
@@ -81,6 +82,7 @@ fn water_medium(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
 
     let sigma_t = max(medium.absorption + medium.scattering, vec3<f32>(0.0));
     let transmittance = exp(-sigma_t * path);
-    let scattered = medium_multiple_scattering(depth_near, descent, path, floor_depth, downwelling_irradiance());
+    let scattered = medium_multiple_scattering(depth_near, descent, path, floor_depth, downwelling_irradiance())
+        + single_scattering(near, direction, path, water_plane.x, in.position.xy);
     return vec4<f32>(color.rgb * lighting * transmittance + scattered * view.exposure, color.a);
 }

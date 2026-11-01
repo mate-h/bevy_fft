@@ -470,7 +470,7 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     var out: FragmentOutput;
     // Back faces are seen from under the water. They draw only when the material leaves them unculled.
     if !is_front {
-        let radiance = shade_underside(in.world_position.xyz, view.world_position, n_world, foam_depth.z);
+        let radiance = shade_underside(in.world_position.xyz, view.world_position, n_world, foam_depth.z, in.position.xy);
         out.color = main_pass_post_lighting_processing(pbr_input, vec4<f32>(radiance, 1.0));
         return out;
     }

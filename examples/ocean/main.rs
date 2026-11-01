@@ -13,7 +13,7 @@ use bevy::{
     core_pipeline::tonemapping::Tonemapping,
     light::{
         Atmosphere, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, GlobalAmbientLight,
-        VolumetricLight, atmosphere::ScatteringMedium, light_consts::lux,
+        NotShadowCaster, VolumetricLight, atmosphere::ScatteringMedium, light_consts::lux,
     },
     material::OpaqueRendererMethod,
     mesh::Meshable,
@@ -316,7 +316,12 @@ fn spawn_ocean_when_ready(
         extension: WaterSurfaceExtension::default(),
     };
 
-    let mut surface = commands.spawn((MeshMaterial3d(materials.add(material)), WaterSurfaceTag));
+    // Light passes through the water, and the underwater medium reads the sun's shadow map.
+    let mut surface = commands.spawn((
+        MeshMaterial3d(materials.add(material)),
+        WaterSurfaceTag,
+        NotShadowCaster,
+    ));
     let mesh = std::env::var("BEVY_FFT_OCEAN_MESH").unwrap_or_default();
     if mesh == "quadtree" || mesh == "cpu_quadtree" {
         surface.insert(WaterQuadtree {

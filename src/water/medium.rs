@@ -8,6 +8,12 @@
 //! underside, so pixels on the surface are left alone. The pass binds the view's mesh bind groups,
 //! as Bevy's deferred lighting does, so it lights the medium with the same sun and sky as the
 //! surface.
+//!
+//! Sunlight scattered once adds Eq. 5 of Monzon et al., with a Henyey-Greenstein phase function and
+//! the sun's shadow map, so objects under water cast light shafts. Monzon et al. gather it in a
+//! froxel volume. This pass marches each pixel's ray instead, the way Bevy's volumetric fog does,
+//! since the shadow maps are bound only to render passes. The water surface itself must not cast
+//! shadows, or every point under it falls in shadow, so give it `NotShadowCaster`.
 
 use bevy::{
     camera::Camera3dDepthTextureUsage,
@@ -141,6 +147,14 @@ impl SpecializedRenderPipeline for WaterMediumLayout {
             if key.contains(flag) {
                 shader_defs.push(def.into());
             }
+        }
+        let shadow_filter = key.intersection(MeshPipelineKey::SHADOW_FILTER_METHOD_RESERVED_BITS);
+        if shadow_filter == MeshPipelineKey::SHADOW_FILTER_METHOD_HARDWARE_2X2 {
+            shader_defs.push("SHADOW_FILTER_METHOD_HARDWARE_2X2".into());
+        } else if shadow_filter == MeshPipelineKey::SHADOW_FILTER_METHOD_GAUSSIAN {
+            shader_defs.push("SHADOW_FILTER_METHOD_GAUSSIAN".into());
+        } else if shadow_filter == MeshPipelineKey::SHADOW_FILTER_METHOD_TEMPORAL {
+            shader_defs.push("SHADOW_FILTER_METHOD_TEMPORAL".into());
         }
         if key.msaa_samples() > 1 {
             shader_defs.push("MULTISAMPLED".into());

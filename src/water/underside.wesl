@@ -5,6 +5,9 @@
 // `E_D(0) exp(-K_d y)` and lets an optional Lambertian bed send part of it back up (Eqs. 6 to 8).
 import bevy_pbr::render::mesh_view_bindings::{view, lights, light_probes};
 @if(ENVIRONMENT_MAP) import bevy_pbr::render::mesh_view_bindings as view_bindings;
+import bevy_pbr::render::mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT;
+import bevy_pbr::render::shadows::fetch_directional_shadow;
+import bevy_pbr::render::utils::interleaved_gradient_noise;
 import bevy_render::maths::{PI, quat_rotate};
 
 struct WaterMediumUniform {
@@ -127,12 +130,89 @@ fn medium_multiple_scattering(
     return medium.scattering / (4.0 * PI) * e0 * (down + up);
 }
 
+/// Mean cosine of the Henyey-Greenstein phase function for single scattering, from Monzon et al.
+/// (2024, §4.1).
+const PHASE_G: f32 = 0.8;
+/// Samples along each ray for single scattering.
+const SINGLE_SCATTERING_STEPS: u32 = 24u;
+/// Optical depths along the ray that single scattering covers, measured in the clearest channel.
+/// Past that the eye receives less than e^-8 of the light scattered there.
+const SINGLE_SCATTERING_REACH: f32 = 8.0;
+/// Longest stretch of a ray single scattering covers, in meters.
+const SINGLE_SCATTERING_MAX_DISTANCE: f32 = 128.0;
+
+fn henyey_greenstein(cos_theta: f32) -> f32 {
+    let g2 = PHASE_G * PHASE_G;
+    return (1.0 - g2) / (4.0 * PI * pow(1.0 + g2 - 2.0 * PHASE_G * cos_theta, 1.5));
+}
+
+/// Sunlight scattered once toward the eye along `distance` meters of the ray from `start` in
+/// `direction`, under a level surface at height `surface_y`, after Monzon et al. (2024) Eq. 5. The
+/// result is not yet exposed. Each directional light enters through the level
+/// surface with its Fresnel transmittance and bends by Snell's law, as Monzon et al. aim a second,
+/// refracted sun into the water. On its way down it fades over the slant path `y / cos(theta)` to
+/// depth `y`. §4.1 prints that path as `y cos(theta)`, which would shorten it as the sun sinks.
+/// The sum over the ray takes evenly spaced samples, jittered per pixel, and reads the sun's
+/// shadow map at each, so geometry under water casts shafts.
+fn single_scattering(
+    start: vec3<f32>,
+    direction: vec3<f32>,
+    distance: f32,
+    surface_y: f32,
+    frag_xy: vec2<f32>,
+) -> vec3<f32> {
+    let sigma_s = max(medium.scattering, vec3<f32>(0.0));
+    if all(sigma_s <= vec3<f32>(0.0)) {
+        return vec3<f32>(0.0);
+    }
+    let sigma_t = max(medium.absorption + medium.scattering, vec3<f32>(0.0));
+    let clearest = max(min(sigma_t.x, min(sigma_t.y, sigma_t.z)), 1e-3);
+    let reach = min(min(distance, SINGLE_SCATTERING_MAX_DISTANCE), SINGLE_SCATTERING_REACH / clearest);
+    let dt = reach / f32(SINGLE_SCATTERING_STEPS);
+    let jitter = interleaved_gradient_noise(frag_xy, 0u);
+    var sum = vec3<f32>(0.0);
+    for (var i = 0u; i < lights.n_directional_lights; i++) {
+        let light = &lights.directional_lights[i];
+        let L = (*light).direction_to_light.xyz;
+        if L.y <= 0.0 {
+            continue;
+        }
+        let eta = 1.0 / medium.ior;
+        let transmitted = 1.0 - fresnel_dielectric(L.y, eta);
+        let beam_direction = refract(-L, vec3<f32>(0.0, 1.0, 0.0), eta);
+        let cos_beam = max(-beam_direction.y, 1e-3);
+        // Irradiance across the refracted beam. The level surface spreads the light of a sun at
+        // `L.y` over a beam that crosses depth at `cos_beam`.
+        let beam = (*light).color.rgb * L.y * transmitted / cos_beam;
+        let phase = henyey_greenstein(dot(beam_direction, -direction));
+        let shadows = ((*light).flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u;
+        for (var step = 0u; step < SINGLE_SCATTERING_STEPS; step++) {
+            let v = (f32(step) + jitter) * dt;
+            let p = start + direction * v;
+            let depth = max(surface_y - p.y, 0.0);
+            var shadow = 1.0;
+            if shadows {
+                let view_z = (view.view_from_world * vec4<f32>(p, 1.0)).z;
+                shadow = fetch_directional_shadow(i, vec4<f32>(p, 1.0), L, view_z, frag_xy);
+            }
+            sum += exp(-sigma_t * (v + depth / cos_beam)) * shadow * beam * phase;
+        }
+    }
+    return sum * sigma_s * dt;
+}
+
 /// Radiance reaching the eye at `eye` from the underside of the surface at `position`, whose
 /// upward normal is `n`. Inside Snell's window the sky refracts through the surface. Outside it,
-/// total internal reflection shows the lit water body (Monzon et al. 2024, Eq. 11). The medium
-/// between the surface and the eye then dims that and adds its own light. `floor_depth` is the
-/// water column below the surface point.
-fn shade_underside(position: vec3<f32>, eye: vec3<f32>, n: vec3<f32>, floor_depth: f32) -> vec3<f32> {
+/// total internal reflection shows the lit water body (Monzon et al. 2024, Eq. 11), with both its
+/// multiple-scattered and single-scattered light. The medium between the surface and the eye then
+/// dims that and adds its own light. `floor_depth` is the water column below the surface point.
+fn shade_underside(
+    position: vec3<f32>,
+    eye: vec3<f32>,
+    n: vec3<f32>,
+    floor_depth: f32,
+    frag_xy: vec2<f32>,
+) -> vec3<f32> {
     let to_eye = eye - position;
     let distance = length(to_eye);
     let V = to_eye / max(distance, 1e-6);
@@ -152,12 +232,14 @@ fn shade_underside(position: vec3<f32>, eye: vec3<f32>, n: vec3<f32>, floor_dept
     let reflected = reflect(-V, N);
     let descent = max(-reflected.y, 1e-3);
     let column = max(floor_depth, 0.0);
-    let body = medium_multiple_scattering(0.0, descent, column / descent, column, e0);
+    let body = medium_multiple_scattering(0.0, descent, column / descent, column, e0)
+        + single_scattering(position, reflected, column / descent, position.y, frag_xy);
     let surface = (1.0 - reflectance) * sky + reflectance * body;
     // The view ray runs from the eye up to the surface point.
     let eye_depth = max(position.y - eye.y, 0.0);
     let sigma_t = max(medium.absorption + medium.scattering, vec3<f32>(0.0));
     let rise = -to_eye.y / max(distance, 1e-6);
-    let path = medium_multiple_scattering(eye_depth, -rise, distance, max(column, eye_depth), e0);
+    let path = medium_multiple_scattering(eye_depth, -rise, distance, max(column, eye_depth), e0)
+        + single_scattering(eye, -V, distance, position.y, frag_xy);
     return (exp(-sigma_t * distance) * surface + path) * view.exposure;
 }
