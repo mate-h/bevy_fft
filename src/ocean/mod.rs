@@ -6,9 +6,9 @@
 //!
 //! Spawn one [`crate::fft::FftSource`] with [`OceanSimSettings`] per cascade, each with its own tile
 //! size, wavenumber band, and [`OceanCascade`] slot. One inverse FFT per cascade writes height in B,
-//! slopes in R and G, and horizontal displacement X in W. [`OceanFoamMask`] keeps a whitecap
-//! history that fades with a half-life in seconds, plus horizontal displacement Z, which the FFT
-//! returns in the imaginary half of the same lane. Each frame the cascades are summed into the shared
+//! slopes in R and G, and horizontal displacement X in W. [`OceanFoamMask`] marks where waves
+//! break this frame, for the water foam sim, plus horizontal displacement Z, which the FFT returns
+//! in the imaginary half of the same lane. Each frame the cascades are summed into the shared
 //! [`crate::water::WaterLodData`] slices, shaped by the [`OceanSurfaceSettings`] resource.
 //! [`crate::water::WaterSurfaceMaterial`] and [`OceanQueries`] read only those slices, so other
 //! solvers that write there show up in the same surface. Put the material on an [`OceanClipmap`]
@@ -140,14 +140,12 @@ pub struct OceanSurfaceSettings {
     /// Multiplier on horizontal displacement, same sense as amplitude on height.
     /// Typical range about 0 to 2.
     pub choppiness: f32,
-    /// Foam ramps up where the smaller eigenvalue of the horizontal displacement Jacobian drops
+    /// Waves break where the smaller eigenvalue of the horizontal displacement Jacobian drops
     /// below this value, which is where the surface compresses toward folding. Typical 0.6 to 1.0.
+    /// How long the foam lasts is set by [`crate::water::WaterFoamSettings`].
     pub foam_cutoff: f32,
     /// Width of the transition in eigenvalue units. Larger values give softer edges.
     pub foam_falloff: f32,
-    /// Seconds of simulated time for foam trails to fade to half, so trail length does not depend
-    /// on frame rate. Typical 0.1 to 2.
-    pub foam_half_life: f32,
 }
 
 impl Default for OceanSurfaceSettings {
@@ -157,7 +155,6 @@ impl Default for OceanSurfaceSettings {
             choppiness: 0.35,
             foam_cutoff: 0.88,
             foam_falloff: 0.22,
-            foam_half_life: 0.2,
         }
     }
 }

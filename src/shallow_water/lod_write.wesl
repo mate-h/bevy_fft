@@ -5,9 +5,11 @@
 // the cells cannot resolve are added back from the FFT, faded out in the last half meter of
 // depth, and stay at full strength through the edge blend. Dry cells contribute the still-water
 // level so the mesh does not follow the bed up onto land. Flow takes the solver's velocity the
-// same way, with the vertical lane from mass conservation. Steep fronts between wet columns
-// write breaking foam. The base data comes from a scratch copy made just before this pass.
+// same way, with the vertical lane from mass conservation. The foam lane gets the breaking
+// intensity of CMF10 fronts between wet columns, of bores running up the beach, and of shear in the
+// current. The base data comes from a scratch copy made just before this pass.
 
+import bevy_fft::water::breaking::{breaking_front, breaking_swash, breaking_turbulence, max_abs};
 import bevy_fft::water::lod::{WaterLodSlices, lod_texel_world};
 
 struct ShallowWaterLodParams {
@@ -33,14 +35,11 @@ const DRY_DEPTH: f32 = 1e-4;
 /// Unresolved FFT detail fades in across this depth range, in meters.
 const DETAIL_FADE_START: f32 = 0.05;
 const DETAIL_FADE_END: f32 = 0.5;
-/// Surface slopes across this range turn a solver front into breaking foam. A bore resolved over
-/// one or two cells is a near-vertical step that the surface normals cannot show.
-const BREAK_SLOPE_START: f32 = 0.12;
-const BREAK_SLOPE_END: f32 = 0.3;
 /// Water this deep on both sides of the front counts as breaking. Shallower columns are the
 /// wet and dry edge, where dry cells render at the still-water level and the slope is not a wave.
 const BREAK_MIN_DEPTH: f32 = 0.03;
-/// Breaking is depth limited. Steep fronts fade out of foam across this depth range, in meters.
+/// The grid resolves depth-limited breaking only. Deep-water whitecaps come from the ocean, so
+/// fronts fade out of foam across this depth range, in meters.
 const BREAK_FADE_START: f32 = 1.5;
 const BREAK_FADE_END: f32 = 3.0;
 
@@ -237,9 +236,21 @@ fn shallow_water_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
         min(bed_water_at(g + dx).y, bed_water_at(g - dx).y),
         min(bed_water_at(g + dz).y, bed_water_at(g - dz).y),
     );
-    let breaking = smoothstep(BREAK_SLOPE_START, BREAK_SLOPE_END, length(slope))
-        * smoothstep(BREAK_MIN_DEPTH, 2.0 * BREAK_MIN_DEPTH, banks)
+    let wet = smoothstep(BREAK_MIN_DEPTH, 2.0 * BREAK_MIN_DEPTH, banks);
+    let h = span * params.cell_size;
+    let e = eta_at(g);
+    let ex = vec2<f32>(eta_at(g + dx), eta_at(g - dx));
+    let ez = vec2<f32>(eta_at(g + dz), eta_at(g - dz));
+    let steepest = length(vec2<f32>(max_abs(ex.x - e, e - ex.y), max_abs(ez.x - e, e - ez.y))) / h;
+    let curvature = (ex.x + ex.y + ez.x + ez.y - 4.0 * e) / (h * h);
+    let front = breaking_front(steepest, rise, curvature) * wet
         * (1.0 - smoothstep(BREAK_FADE_START, BREAK_FADE_END, bw.y));
+    let swash = breaking_swash(rise, bw.y) * smoothstep(DRY_DEPTH, BREAK_MIN_DEPTH, bw.y);
+    let ux = velocity_at(g + dx) - velocity_at(g - dx);
+    let uz = velocity_at(g + dz) - velocity_at(g - dz);
+    let strain = sqrt(2.0 * (ux.x * ux.x + uz.y * uz.y) + (ux.y + uz.x) * (ux.y + uz.x)) * inv;
+    let turbulence = breaking_turbulence(strain) * wet;
+    let breaking = max(max(front, swash), turbulence);
     let foam = vec4<f32>(
         mix(base_f.r, breaking, w),
         mix(base_f.g, bw.y, w),

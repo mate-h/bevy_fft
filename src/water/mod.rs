@@ -81,6 +81,7 @@ impl Plugin for WaterPlugin {
         scene_depth::configure(app);
         bevy::shader::load_shader_library!(app, "lod.wesl");
         bevy::shader::load_shader_library!(app, "optics.wesl");
+        bevy::shader::load_shader_library!(app, "breaking.wesl");
         embedded_asset!(app, "surface.wesl");
         embedded_asset!(app, "quadtree.wesl");
         embedded_asset!(app, "foam.wesl");

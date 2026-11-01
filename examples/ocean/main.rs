@@ -400,6 +400,7 @@ fn ocean_egui_panel(
     mut sun_settings: ResMut<SunLightSettings>,
     mut sun_transform: Query<&mut Transform, With<SunLight>>,
     queries: Res<OceanQueries>,
+    mut foam: ResMut<WaterFoamSettings>,
 ) {
     // The panel edits cascade 0. Shared fields are copied to the other cascades afterwards, while
     // each cascade keeps its own tile size and wavenumber band.
@@ -530,9 +531,14 @@ fn ocean_egui_panel(
         ui.add(egui::Slider::new(&mut shaping.foam_cutoff, 0.2..=1.2).text("Foam cutoff"));
         ui.add(egui::Slider::new(&mut shaping.foam_falloff, 0.02..=0.8).text("Foam falloff"));
         ui.add(
-            egui::Slider::new(&mut shaping.foam_half_life, 0.05..=4.0)
+            egui::Slider::new(&mut foam.active_half_life, 0.05..=4.0)
                 .logarithmic(true)
-                .text("Foam half-life (s)"),
+                .text("Active foam half-life (s)"),
+        );
+        ui.add(
+            egui::Slider::new(&mut foam.residual_half_life, 0.2..=30.0)
+                .logarithmic(true)
+                .text("Residual foam half-life (s)"),
         );
         ui.add(egui::Slider::new(&mut sun_settings.elevation, 0.0..=1.0).text("Sun light height"));
         if ui.button("Regenerate spectrum").clicked() {

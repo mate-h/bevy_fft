@@ -4,10 +4,12 @@
 // through it and a wake rides on them. In replace mode the patch takes over the height and the
 // water depth lane. Flow follows the same mode, with velocity from the solver's flux and the
 // vertical lane from mass conservation. Drift takes the solver's velocity in replace mode. In add
-// mode the patch carries only waves on top of the water below, so drift stays as it was. Both
-// modes fade out along the patch edge over `blend_cells`. The data below comes from a scratch copy
-// made just before this pass.
+// mode the patch carries only waves on top of the water below, so drift stays as it was. The
+// foam lane gets the breaking intensity of CMF10 fronts in the patch and of the water a moving hull
+// pushes aside. Both modes fade out along the patch edge over `blend_cells`. The data below comes
+// from a scratch copy made just before this pass.
 
+import bevy_fft::water::breaking::{breaking_front, max_abs};
 import bevy_fft::water::lod::{WaterLodSlices, lod_texel_world};
 
 const BLEND_REPLACE: u32 = 1u;
@@ -22,6 +24,15 @@ struct DispersiveLodParams {
     blend_cells: f32,
     blend: u32,
     _pad: u32,
+    /// Hull position this frame and last frame, in cells.
+    hull: vec2<f32>,
+    hull_prev: vec2<f32>,
+    /// Hull radius in cells.
+    hull_radius: f32,
+    /// Hull speed in meters per second, zero while no hull is in the water.
+    hull_speed: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: DispersiveLodParams;
@@ -42,6 +53,23 @@ struct DispersiveLodParams {
 /// Depth below which velocity is taken from a floor depth, so flux over nearly dry cells does not
 /// turn into runaway speeds.
 const MIN_FLOW_DEPTH: f32 = 0.05;
+/// Hull speed in m/s across which the water it pushes aside turns white.
+const HULL_FOAM_SPEED_START: f32 = 0.5;
+const HULL_FOAM_SPEED_END: f32 = 3.0;
+
+/// Breaking intensity in the ring of water around the hull's outline, swept from last frame's
+/// position to this one's.
+fn hull_foam(g: vec2<f32>) -> f32 {
+    if params.hull_speed <= 0.0 {
+        return 0.0;
+    }
+    let seg = params.hull - params.hull_prev;
+    let t = saturate(dot(g - params.hull_prev, seg) / max(dot(seg, seg), 1e-6));
+    let d = length(g - (params.hull_prev + seg * t));
+    let r = max(params.hull_radius, 1.0);
+    let ring = smoothstep(0.3 * r, 0.8 * r, d) * (1.0 - smoothstep(0.8 * r, 1.4 * r, d));
+    return ring * smoothstep(HULL_FOAM_SPEED_START, HULL_FOAM_SPEED_END, params.hull_speed);
+}
 
 /// Bilinear bed and depth at grid coordinate `g`, where cell `i` spans `i..i + 1`.
 fn bed_depth_at(g: vec2<f32>) -> vec2<f32> {
@@ -110,10 +138,21 @@ fn dispersive_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let base = textureLoad(base_displacement, gid.xy, slice, 0);
     let base_f = textureLoad(base_foam, gid.xy, slice, 0);
+    let h = span * params.cell_size;
+    let ex = vec2<f32>(eta_at(g + dx), eta_at(g - dx));
+    let ez = vec2<f32>(eta_at(g + dz), eta_at(g - dz));
+    let steepest = length(vec2<f32>(max_abs(ex.x - eta, eta - ex.y), max_abs(ez.x - eta, eta - ez.y))) / h;
+    let curvature = (ex.x + ex.y + ez.x + ez.y - 4.0 * eta) / (h * h);
+    let breaking = max(breaking_front(steepest, rise, curvature), hull_foam(g)) * w;
     if params.blend == BLEND_REPLACE {
         let surface = vec4<f32>(slope, params.datum + eta, 0.0);
         textureStore(displacement_out, gid.xy, slice, mix(base, surface, w));
-        let foam = vec4<f32>(base_f.r * (1.0 - w), mix(base_f.g, bd.y, w), base_f.b * (1.0 - w), base_f.a);
+        let foam = vec4<f32>(
+            base_f.r * (1.0 - w) + breaking,
+            mix(base_f.g, bd.y, w),
+            base_f.b * (1.0 - w),
+            base_f.a,
+        );
         textureStore(foam_out, gid.xy, slice, foam);
         textureStore(flow_out, gid.xy, slice, mix(base_v, flow, w));
         let base_d = textureLoad(base_drift, gid.xy, slice, 0).xy;
@@ -121,7 +160,7 @@ fn dispersive_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         let deviation = vec4<f32>(slope, params.datum + eta, 0.0) * w;
         textureStore(displacement_out, gid.xy, slice, base + deviation);
-        textureStore(foam_out, gid.xy, slice, base_f);
+        textureStore(foam_out, gid.xy, slice, vec4<f32>(max(base_f.r, breaking), base_f.gba));
         textureStore(flow_out, gid.xy, slice, base_v + flow * w);
     }
 }

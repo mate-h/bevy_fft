@@ -1,12 +1,13 @@
 //! Persistent foam on the [`WaterLodData`] slices.
 //!
-//! Writers store this frame's foam coverage in the LOD foam lane, and the foam sim turns it into
-//! foam that lasts. It keeps active foam, which sits over breaking crests, and the residual film it
-//! leaves behind in [`WaterLodData::foam_state`]. Each frame both drift with
+//! Writers store how strongly each texel is breaking this frame in the LOD foam lane, from 0 to 1,
+//! and the foam sim turns it into foam that lasts. Full breaking produces active foam at
+//! `1 / formation_time` coverage per second. The sim keeps active foam, which sits over breaking
+//! crests, and the residual film it leaves behind in [`WaterLodData::foam_state`]. Each frame both drift with
 //! [`WaterLodData::drift`], gather where the drift converges, and fade with the half-lives in
 //! [`WaterFoamSettings`]. Fading active foam feeds residual foam, as Stage A whitecaps turn into
-//! Stage B patches in Monahan and Woolf's model. The decay uses the exact solution over each step,
-//! so foam does not depend on the frame rate.
+//! Stage B patches in Monahan and Woolf's model. Sources and decay use the exact solution over each
+//! step, so foam does not depend on the frame rate.
 
 use std::f32::consts::LN_2;
 
@@ -51,6 +52,10 @@ pub struct WaterFoamSettings {
     /// active ratio is `residual_yield * residual_half_life / active_half_life`, which Monahan and
     /// Woolf put near 15 at a wind of 10 m/s.
     pub residual_yield: f32,
+    /// Seconds of full breaking that produce full active coverage, ignoring decay. Callaghan et al.
+    /// (2012) saw whitecap area peak within about a second of breaking onset, and a single texel
+    /// turns white faster than a whole patch grows.
+    pub formation_time: f32,
 }
 
 impl Default for WaterFoamSettings {
@@ -59,6 +64,7 @@ impl Default for WaterFoamSettings {
             active_half_life: 0.5,
             residual_half_life: 2.4,
             residual_yield: 3.0,
+            formation_time: 0.25,
         }
     }
 }
@@ -76,10 +82,17 @@ pub struct WaterFoamParams {
     pub residual_decay: f32,
     /// Residual foam gained per unit of active foam at the start of the step.
     pub residual_gain: f32,
+    /// Active foam gained per unit of breaking intensity held over the step.
+    pub source_active: f32,
+    /// Residual foam gained per unit of breaking intensity held over the step.
+    pub source_residual: f32,
+    pub _pad0: f32,
+    pub _pad1: f32,
 }
 
 impl WaterFoamParams {
-    /// Exact solution of `da/dt = -la a`, `dr/dt = k la a - lr r` over `dt` seconds, with each rate
+    /// Exact solution over `dt` seconds of `da/dt = b / t_f - la a` and `dr/dt = k la a - lr r`,
+    /// with breaking intensity `b` held for the step, formation time `t_f`, and each rate
     /// `ln 2 / half-life`. An infinite half-life keeps that foam forever.
     pub fn step(settings: &WaterFoamSettings, previous: WaterLodSlices, dt: f32) -> Self {
         let rate = |half_life: f32| {
@@ -93,20 +106,27 @@ impl WaterFoamParams {
         let lr = rate(settings.residual_half_life);
         let active_decay = (-la * dt).exp();
         let residual_decay = (-lr * dt).exp();
+        // (1 - e^(-l dt)) / l, the integral of e^(-l s) over the step, which is dt for l = 0.
+        let held = |l: f32, decay: f32| if l * dt > 1e-6 { (1.0 - decay) / l } else { dt };
+        // (e^(-la dt) - e^(-lr dt)) / (lr - la), with limit dt e^(-la dt) for equal rates.
         let gap = lr - la;
-        // r(dt) = k la a0 (e^(-la dt) - e^(-lr dt)) / (lr - la), whose limit for equal rates is
-        // k la a0 dt e^(-la dt).
-        let residual_gain = if gap.abs() > 1e-5 * la.max(lr) {
-            settings.residual_yield * la * (active_decay - residual_decay) / gap
+        let overlap = if gap.abs() > 1e-5 * la.max(lr) {
+            (active_decay - residual_decay) / gap
         } else {
-            settings.residual_yield * la * dt * active_decay
+            dt * active_decay
         };
+        let k = settings.residual_yield;
+        let inv_formation = settings.formation_time.max(1e-4).recip();
         Self {
             previous,
             dt,
             active_decay,
             residual_decay,
-            residual_gain,
+            residual_gain: k * la * overlap,
+            source_active: held(la, active_decay) * inv_formation,
+            source_residual: k * (held(lr, residual_decay) - overlap) * inv_formation,
+            _pad0: 0.0,
+            _pad1: 0.0,
         }
     }
 }
@@ -331,15 +351,52 @@ pub(super) fn run_water_foam(
 mod tests {
     use super::*;
 
-    fn residual_after(settings: &WaterFoamSettings, dt: f32, steps: u32) -> (f32, f32) {
+    /// Foam after `steps` steps, starting from full active foam, with breaking `source` held.
+    fn foam_after(settings: &WaterFoamSettings, dt: f32, steps: u32, source: f32) -> (f32, f32) {
         let p = WaterFoamParams::step(settings, WaterLodSlices::default(), dt);
         let (mut a, mut r) = (1.0f32, 0.0f32);
         for _ in 0..steps {
-            let next_a = a * p.active_decay;
-            r = r * p.residual_decay + a * p.residual_gain;
+            let next_a = a * p.active_decay + source * p.source_active;
+            r = r * p.residual_decay + a * p.residual_gain + source * p.source_residual;
             a = next_a;
         }
         (a, r)
+    }
+
+    fn residual_after(settings: &WaterFoamSettings, dt: f32, steps: u32) -> (f32, f32) {
+        foam_after(settings, dt, steps, 0.0)
+    }
+
+    #[test]
+    fn sources_do_not_depend_on_step_size() {
+        let s = WaterFoamSettings::default();
+        let coarse = foam_after(&s, 1.0 / 30.0, 60, 0.3);
+        let fine = foam_after(&s, 1.0 / 120.0, 240, 0.3);
+        assert!((coarse.0 - fine.0).abs() < 1e-4, "{coarse:?} {fine:?}");
+        assert!((coarse.1 - fine.1).abs() < 1e-4, "{coarse:?} {fine:?}");
+    }
+
+    #[test]
+    fn held_breaking_settles_at_rate_over_decay() {
+        // da/dt = b / t_f - la a settles at a = b / (t_f la), and r = k la a / lr.
+        let s = WaterFoamSettings::default();
+        let (a, r) = foam_after(&s, 0.05, 2000, 0.1);
+        let la = LN_2 / s.active_half_life;
+        let lr = LN_2 / s.residual_half_life;
+        let a_ss = 0.1 / (s.formation_time * la);
+        assert!((a / a_ss - 1.0).abs() < 1e-3, "{a} {a_ss}");
+        assert!((r / (s.residual_yield * la * a_ss / lr) - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn formation_time_fills_a_texel_without_decay() {
+        let s = WaterFoamSettings {
+            active_half_life: f32::INFINITY,
+            ..default()
+        };
+        let p = WaterFoamParams::step(&s, WaterLodSlices::default(), s.formation_time);
+        assert!((p.source_active - 1.0).abs() < 1e-5);
+        assert_eq!(p.source_residual, 0.0);
     }
 
     #[test]
@@ -375,6 +432,7 @@ mod tests {
             active_half_life: 1.0,
             residual_half_life: 1.0,
             residual_yield: 1.0,
+            ..default()
         };
         let coarse = residual_after(&s, 0.1, 10);
         let fine = residual_after(&s, 0.01, 100);
@@ -388,6 +446,7 @@ mod tests {
             active_half_life: f32::INFINITY,
             residual_half_life: f32::INFINITY,
             residual_yield: 1.0,
+            ..default()
         };
         let p = WaterFoamParams::step(&s, WaterLodSlices::default(), 0.1);
         assert_eq!(

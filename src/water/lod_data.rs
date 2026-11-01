@@ -71,9 +71,10 @@ pub struct WaterLodSlices {
 /// `displacement` stores, per texel, the height slope along X, the slope along Z, the height in
 /// meters above the surface mesh plane, and the horizontal displacement along X in meters. These
 /// are the same lanes as the FFT spatial output, already scaled, so contributions from several
-/// solvers add up linearly. `foam` stores foam coverage in its red channel, the depth of the water
-/// column in meters in its green channel, and the horizontal displacement along Z in meters in its
-/// blue channel. `flow` stores the water velocity at the surface in meters per second: X in red, Z
+/// solvers add up linearly. `foam` stores how strongly each texel is breaking this frame, from 0 to
+/// 1, in its red channel, which the foam sim in [`super::WaterFoamSettings`] turns into lasting
+/// foam. Its green channel holds the depth of the water column in meters and its blue channel the
+/// horizontal displacement along Z in meters. `flow` stores the water velocity at the surface in meters per second: X in red, Z
 /// in green, and vertical in blue. `drift` stores the mean horizontal velocity that carries floating
 /// matter such as foam, in meters per second along X and Z. Unlike `flow` it leaves out the orbital
 /// motion of waves, which the displacement lanes already hold, and keeps the currents of the

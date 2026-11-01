@@ -104,7 +104,8 @@ fn foam_app(dt: f32, settings: WaterFoamSettings) -> App {
     app
 }
 
-/// Writes `source(xz)` into the red lane of the LOD foam array, the coverage writers produce.
+/// Writes `source(xz)` into the red lane of the LOD foam array, the breaking intensity writers
+/// produce.
 fn set_source(app: &mut App, source: impl Fn(Vec2) -> f32) {
     let handle = app.world().resource::<WaterLodData>().foam.clone();
     let mut images = app.world_mut().resource_mut::<Assets<Image>>();
@@ -150,6 +151,7 @@ fn drifting_foam_keeps_its_total_and_moves_with_the_drift() {
             active_half_life: f32::INFINITY,
             residual_half_life: f32::INFINITY,
             residual_yield: 0.0,
+            ..default()
         },
     );
     set_drift(&mut app, drift);
@@ -202,7 +204,7 @@ fn drifting_foam_keeps_its_total_and_moves_with_the_drift() {
 fn check_decay(dt: f32) {
     let settings = WaterFoamSettings::default();
     let mut app = foam_app(dt, settings);
-    // Weak enough that residual foam stays below its cap of full coverage.
+    // Weak and short enough that residual foam stays below its cap of full coverage.
     set_source(&mut app, |xz| {
         if xz.abs().max_element() < 8.0 {
             0.1

@@ -4,9 +4,10 @@
 // it leaves behind in `.g`. Each frame `foam_forward` moves last frame's foam along the drift with
 // a semi-Lagrangian lookup, and `foam_correct` applies the MacCormack correction, limits it to the
 // values the lookup could see, and scales by the local area change exp(-dt div u), so foam piles up
-// where the drift converges. It then decays both quantities with the exact solution of
-// da/dt = -la a, dr/dt = k la a - lr r, which makes the result independent of the frame rate, and
-// raises active foam to the coverage the writers stored in the LOD foam lane this frame.
+// where the drift converges. It then adds foam and decays both quantities with the exact solution
+// of da/dt = b / t_f - la a, dr/dt = k la a - lr r over the step, which makes the result
+// independent of the frame rate. The breaking intensity `b` is what the writers stored in the LOD
+// foam lane this frame, from 0 to 1.
 //
 // Last frame's foam sits on last frame's slice placement. A lookup that leaves its own slice there
 // falls back to the next coarser slice, as Crest's foam sim does, and returns no foam past the
@@ -25,6 +26,12 @@ struct WaterFoamParams {
     residual_decay: f32,
     /// Residual foam gained per unit of active foam at the start of the step.
     residual_gain: f32,
+    /// Active foam gained per unit of breaking intensity held over the step.
+    source_active: f32,
+    /// Residual foam gained per unit of breaking intensity held over the step.
+    source_residual: f32,
+    _pad0: f32,
+    _pad1: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: WaterFoamParams;
@@ -33,7 +40,7 @@ struct WaterFoamParams {
 @group(0) @binding(2) var previous_foam: texture_2d_array<f32>;
 /// Result of `foam_forward`, on `lod`. Read by `foam_correct` only.
 @group(0) @binding(3) var forward_foam: texture_2d_array<f32>;
-/// LOD foam lane, whose `.r` holds the coverage the writers produced this frame.
+/// LOD foam lane, whose `.r` holds the breaking intensity the writers produced this frame.
 @group(0) @binding(4) var lod_foam: texture_2d_array<f32>;
 /// LOD drift lane in meters per second along X and Z.
 @group(0) @binding(5) var lod_drift: texture_2d_array<f32>;
@@ -130,9 +137,10 @@ fn foam_correct(@builtin(global_invocation_id) gid: vec3<u32>) {
     let divergence = (du.x + dv.y) / (2.0 * texel_width);
     foam *= exp(-params.dt * divergence);
 
-    let fresh = foam.x * params.active_decay;
-    let residual = foam.y * params.residual_decay + foam.x * params.residual_gain;
-    let source = textureLoad(lod_foam, texel, slice, 0).r;
-    let result = saturate(vec2<f32>(max(fresh, source), residual));
+    let breaking = saturate(textureLoad(lod_foam, texel, slice, 0).r);
+    let fresh = foam.x * params.active_decay + breaking * params.source_active;
+    let residual = foam.y * params.residual_decay + foam.x * params.residual_gain
+        + breaking * params.source_residual;
+    let result = saturate(vec2<f32>(fresh, residual));
     textureStore(foam_out, gid.xy, slice, vec4<f32>(result, 0.0, 0.0));
 }

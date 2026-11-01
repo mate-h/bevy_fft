@@ -26,6 +26,15 @@ pub struct DispersiveLodParams {
     pub blend_cells: f32,
     pub blend: u32,
     pub _pad: u32,
+    /// Hull position this frame and last frame, in cells.
+    pub hull: Vec2,
+    pub hull_prev: Vec2,
+    /// Hull radius in cells.
+    pub hull_radius: f32,
+    /// Hull speed in meters per second, zero while the brush is inactive.
+    pub hull_speed: f32,
+    pub _pad1: f32,
+    pub _pad2: f32,
 }
 
 #[derive(Resource)]
@@ -93,6 +102,7 @@ pub(super) fn prepare_dispersive_lod_write(
     lod_gpu: Res<WaterLodGpu>,
     scratch: Res<WaterLodScratch>,
     images: Res<RenderAssets<GpuImage>>,
+    time: Res<Time>,
     mut state: ResMut<DispersiveLodBindGroup>,
 ) {
     state.group = None;
@@ -129,6 +139,12 @@ pub(super) fn prepare_dispersive_lod_write(
     ) else {
         return;
     };
+    let dt = time.delta_secs();
+    let hull_speed = if controller.brush_active && dt > 0.0 {
+        controller.pointer.distance(controller.pointer_prev) * controller.cell_size() / dt
+    } else {
+        0.0
+    };
     state.params.set(DispersiveLodParams {
         center: placement.center,
         cell_size: controller.cell_size(),
@@ -140,6 +156,12 @@ pub(super) fn prepare_dispersive_lod_write(
             DispersiveLodBlend::Replace => 1,
         },
         _pad: 0,
+        hull: controller.pointer,
+        hull_prev: controller.pointer_prev,
+        hull_radius: controller.brush_radius,
+        hull_speed: hull_speed,
+        _pad1: 0.0,
+        _pad2: 0.0,
     });
     state.params.write_buffer(&device, &queue);
     let Some(params) = state.params.binding() else {
