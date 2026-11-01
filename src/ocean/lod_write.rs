@@ -4,6 +4,8 @@
 //! wave theory a surface particle moves with the time derivative of its displacement, so the
 //! difference of two frames gives the orbital velocity without extra FFT lanes. The writer keeps a
 //! copy of every cascade's output for the next frame.
+//!
+//! Drift is the summed Stokes drift of the cascades, the same in every texel.
 
 use bevy::{
     prelude::*,
@@ -22,9 +24,11 @@ use crate::{
     fft::FftTextures,
     ocean::{
         OCEAN_MAX_CASCADES, OceanCascade, OceanFoamMask, OceanFoamPhase, OceanSimSettings,
-        OceanSurfaceSettings,
+        OceanStokesDrift, OceanSurfaceSettings,
     },
-    water::{WATER_LOD_SURFACE_FORMAT, WaterLodData, WaterLodGpu, WaterLodSlices},
+    water::{
+        WATER_LOD_DRIFT_FORMAT, WATER_LOD_SURFACE_FORMAT, WaterLodData, WaterLodGpu, WaterLodSlices,
+    },
 };
 
 /// Uniform for `lod_write.wesl`.
@@ -40,8 +44,8 @@ pub struct OceanLodWriteParams {
     /// frame to difference against.
     pub inv_dt: f32,
     pub _pad0: f32,
-    pub _pad1: f32,
-    pub _pad2: f32,
+    /// Surface Stokes drift of all cascades in meters per second, after amplitude shaping.
+    pub stokes_drift: Vec2,
 }
 
 /// What the writer needs from the main world this frame.
@@ -62,6 +66,7 @@ pub(super) fn gather_ocean_lod_write(
         &OceanFoamMask,
         &OceanFoamPhase,
         Option<&OceanCascade>,
+        Option<&OceanStokesDrift>,
     )>,
     settings: Res<OceanSurfaceSettings>,
     time: Res<Time>,
@@ -72,7 +77,7 @@ pub(super) fn gather_ocean_lod_write(
 
     let mut slots: Vec<_> = cascades
         .iter()
-        .filter_map(|(sim, tex, mask, phase, cascade)| {
+        .filter_map(|(sim, tex, mask, phase, cascade, drift)| {
             let slot = cascade.map_or(0, |c| c.index as usize);
             // Same half that `sync_ocean_foam_display` treats as most recent.
             let latest = if phase.0 % 2 == 0 {
@@ -88,6 +93,7 @@ pub(super) fn gather_ocean_lod_write(
                     latest.clone(),
                     sim.depth,
                     sim.time_scale,
+                    drift.map_or(Vec2::ZERO, |d| d.0),
                 )
             })
         })
@@ -98,8 +104,10 @@ pub(super) fn gather_ocean_lod_write(
     };
 
     let mut tiles = Vec4::ONE;
-    for (i, (_, tile, disp, foam, _, _)) in slots.iter().enumerate() {
+    let mut drift = Vec2::ZERO;
+    for (i, (_, tile, disp, foam, _, _, cascade_drift)) in slots.iter().enumerate() {
         tiles[i] = *tile;
+        drift += *cascade_drift;
         frame.displacement.push(disp.clone());
         frame.foam.push(foam.clone());
     }
@@ -116,6 +124,8 @@ pub(super) fn gather_ocean_lod_write(
         choppiness: settings.choppiness,
         depth: first.4,
         inv_dt: if dt > 0.0 { dt.recip() } else { 0.0 },
+        // Drift goes with the square of wave height, so it takes the height gain twice.
+        stokes_drift: drift * settings.amplitude * settings.amplitude,
         ..default()
     };
 }
@@ -140,6 +150,7 @@ impl FromWorld for OceanLodWritePipeline {
                 out(WATER_LOD_SURFACE_FORMAT),
                 out(WATER_LOD_SURFACE_FORMAT),
                 out(TextureFormat::Rgba32Float),
+                out(WATER_LOD_DRIFT_FORMAT),
                 tex(),
                 tex(),
                 tex(),
@@ -206,10 +217,11 @@ pub(super) fn prepare_ocean_lod_write(
     if frame.params.cascade_count == 0 || frame.displacement.len() < OCEAN_MAX_CASCADES {
         return;
     }
-    let (Some(disp_out), Some(foam_out), Some(flow_out)) = (
+    let (Some(disp_out), Some(foam_out), Some(flow_out), Some(drift_out)) = (
         images.get(&lod.displacement),
         images.get(&lod.foam),
         images.get(&lod.flow),
+        images.get(&lod.drift),
     ) else {
         return;
     };
@@ -288,6 +300,7 @@ pub(super) fn prepare_ocean_lod_write(
             &disp_out.texture_view,
             &foam_out.texture_view,
             &flow_out.texture_view,
+            &drift_out.texture_view,
             &disp[0].texture_view,
             &disp[1].texture_view,
             &disp[2].texture_view,

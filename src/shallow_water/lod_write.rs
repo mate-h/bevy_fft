@@ -14,7 +14,10 @@ use bevy::{
 use super::ShallowWaterController;
 use crate::{
     ocean::{OCEAN_MAX_CASCADES, OceanLodWriteFrame},
-    water::{WATER_LOD_SURFACE_FORMAT, WaterLodData, WaterLodGpu, WaterLodScratch, WaterLodSlices},
+    water::{
+        WATER_LOD_DRIFT_FORMAT, WATER_LOD_SURFACE_FORMAT, WaterLodData, WaterLodGpu,
+        WaterLodScratch, WaterLodSlices,
+    },
 };
 
 /// Uniform for `lod_write.wesl`.
@@ -68,6 +71,8 @@ impl FromWorld for ShallowWaterLodPipeline {
                 texture_2d(unfiltered),
                 texture_2d(unfiltered),
                 texture_2d(unfiltered),
+                texture_storage_2d_array(WATER_LOD_DRIFT_FORMAT, StorageTextureAccess::WriteOnly),
+                texture_2d_array(unfiltered),
             ),
         );
         let layout = BindGroupLayoutDescriptor::new("shallow_water_lod_write_layout", &entries);
@@ -113,19 +118,29 @@ pub(super) fn prepare_shallow_water_lod_write(
     let Some(placement) = controller.placement else {
         return;
     };
-    let (Some(disp_out), Some(foam_out), Some(flow_out), Some(bed_water), Some(velocity)) = (
+    let (
+        Some(disp_out),
+        Some(foam_out),
+        Some(flow_out),
+        Some(drift_out),
+        Some(bed_water),
+        Some(velocity),
+    ) = (
         images.get(&lod.displacement),
         images.get(&lod.foam),
         images.get(&lod.flow),
+        images.get(&lod.drift),
         images.get(&controller.bed_water),
         images.get(&controller.velocity),
-    ) else {
+    )
+    else {
         return;
     };
-    let (Some(disp_in), Some(foam_in), Some(flow_in), Some(slices)) = (
+    let (Some(disp_in), Some(foam_in), Some(flow_in), Some(drift_in), Some(slices)) = (
         scratch.displacement(),
         scratch.foam(),
         scratch.flow(),
+        scratch.drift(),
         lod_gpu.slices.binding(),
     ) else {
         return;
@@ -205,6 +220,8 @@ pub(super) fn prepare_shallow_water_lod_write(
             foam[1],
             foam[2],
             foam[3],
+            &drift_out.texture_view,
+            drift_in,
         )),
     ));
     let res = lod.slices.resolution;

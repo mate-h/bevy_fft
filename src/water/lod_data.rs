@@ -74,14 +74,19 @@ pub struct WaterLodSlices {
 /// solvers add up linearly. `foam` stores foam coverage in its red channel, the depth of the water
 /// column in meters in its green channel, and the horizontal displacement along Z in meters in its
 /// blue channel. `flow` stores the water velocity at the surface in meters per second: X in red, Z
-/// in green, and vertical in blue. `displacement` and `foam` use [`WATER_LOD_SURFACE_FORMAT`] with
-/// a linear clamped sampler.
+/// in green, and vertical in blue. `drift` stores the mean horizontal velocity that carries floating
+/// matter such as foam, in meters per second along X and Z. Unlike `flow` it leaves out the orbital
+/// motion of waves, which the displacement lanes already hold, and keeps the currents of the
+/// solvers plus the Stokes drift of the ocean waves. `displacement` and `foam` use
+/// [`WATER_LOD_SURFACE_FORMAT`] with a linear clamped sampler, and `drift` uses
+/// [`WATER_LOD_DRIFT_FORMAT`].
 #[derive(Resource, Clone, ExtractResource)]
 #[extract_app(RenderApp)]
 pub struct WaterLodData {
     pub displacement: Handle<Image>,
     pub foam: Handle<Image>,
     pub flow: Handle<Image>,
+    pub drift: Handle<Image>,
     pub slices: WaterLodSlices,
 }
 
@@ -104,6 +109,10 @@ pub struct WaterViewer;
 /// Format of the `displacement` and `foam` arrays of [`WaterLodData`]. Half floats keep the
 /// surface reads cheap and filterable on every backend. `flow` stays at full precision.
 pub const WATER_LOD_SURFACE_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+
+/// Format of the `drift` array of [`WaterLodData`]. Two full-precision lanes, which every backend
+/// can bind as a storage texture.
+pub const WATER_LOD_DRIFT_FORMAT: TextureFormat = TextureFormat::Rg32Float;
 
 fn lod_array_image(settings: &WaterLodSettings, format: TextureFormat) -> Image {
     let mut image = Image::new_fill(
@@ -143,6 +152,7 @@ pub(super) fn create_water_lod_data(
         displacement: images.add(lod_array_image(&settings, WATER_LOD_SURFACE_FORMAT)),
         foam: images.add(lod_array_image(&settings, WATER_LOD_SURFACE_FORMAT)),
         flow: images.add(lod_array_image(&settings, TextureFormat::Rgba32Float)),
+        drift: images.add(lod_array_image(&settings, WATER_LOD_DRIFT_FORMAT)),
         slices,
     });
 }
@@ -227,6 +237,7 @@ mod tests {
             displacement: Handle::default(),
             foam: Handle::default(),
             flow: Handle::default(),
+            drift: Handle::default(),
             slices,
         };
         assert_eq!(data.finest_slice_containing(Vec2::new(3.0, 0.0)), Some(0));

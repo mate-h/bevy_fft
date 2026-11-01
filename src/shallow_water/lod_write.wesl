@@ -65,6 +65,8 @@ const BREAK_FADE_END: f32 = 3.0;
 @group(0) @binding(15) var foam_1: texture_2d<f32>;
 @group(0) @binding(16) var foam_2: texture_2d<f32>;
 @group(0) @binding(17) var foam_3: texture_2d<f32>;
+@group(0) @binding(18) var drift_out: texture_storage_2d_array<rg32float, write>;
+@group(0) @binding(19) var base_drift: texture_2d_array<f32>;
 
 fn wrap_texel(p: vec2<i32>, dims: vec2<i32>) -> vec2<i32> {
     return ((p % dims) + dims) % dims;
@@ -207,6 +209,7 @@ fn shallow_water_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
         textureStore(displacement_out, gid.xy, slice, textureLoad(base_displacement, gid.xy, slice, 0));
         textureStore(foam_out, gid.xy, slice, textureLoad(base_foam, gid.xy, slice, 0));
         textureStore(flow_out, gid.xy, slice, textureLoad(base_flow, gid.xy, slice, 0));
+        textureStore(drift_out, gid.xy, slice, textureLoad(base_drift, gid.xy, slice, 0));
         return;
     }
 
@@ -245,6 +248,9 @@ fn shallow_water_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
     textureStore(foam_out, gid.xy, slice, foam);
     let base_v = textureLoad(base_flow, gid.xy, slice, 0);
-    let flow = vec4<f32>(velocity_at(g), rise, 0.0);
+    let current = velocity_at(g);
+    let flow = vec4<f32>(current, rise, 0.0);
     textureStore(flow_out, gid.xy, slice, mix(base_v, flow, w));
+    let base_d = textureLoad(base_drift, gid.xy, slice, 0).xy;
+    textureStore(drift_out, gid.xy, slice, vec4<f32>(mix(base_d, current, w), 0.0, 0.0));
 }

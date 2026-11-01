@@ -25,11 +25,11 @@ struct ScratchArray {
     view: TextureView,
 }
 
-/// Render-world copies of [`WaterLodData::displacement`], [`WaterLodData::foam`], and
-/// [`WaterLodData::flow`], sized to match them. Bind the views as sampled `texture_2d_array`s.
+/// Render-world copies of [`WaterLodData::displacement`], [`WaterLodData::foam`],
+/// [`WaterLodData::flow`], and [`WaterLodData::drift`], sized to match them. Bind the views as sampled `texture_2d_array`s.
 #[derive(Resource, Default)]
 pub struct WaterLodScratch {
-    arrays: Option<[ScratchArray; 3]>,
+    arrays: Option<[ScratchArray; 4]>,
     size: Extent3d,
 }
 
@@ -46,6 +46,10 @@ impl WaterLodScratch {
         self.arrays.as_ref().map(|a| &a[2].view)
     }
 
+    pub fn drift(&self) -> Option<&TextureView> {
+        self.arrays.as_ref().map(|a| &a[3].view)
+    }
+
     /// Copies the current LOD data into the scratch arrays. Returns false when either side is not
     /// ready, in which case the caller should skip its blend pass this frame.
     pub fn copy_from_lod(
@@ -57,7 +61,7 @@ impl WaterLodScratch {
         let Some(arrays) = &self.arrays else {
             return false;
         };
-        let sources = [&lod.displacement, &lod.foam, &lod.flow].map(|h| images.get(h));
+        let sources = [&lod.displacement, &lod.foam, &lod.flow, &lod.drift].map(|h| images.get(h));
         if sources
             .iter()
             .any(|s| s.is_none_or(|s| s.texture_descriptor.size != self.size))
@@ -103,10 +107,11 @@ pub(super) fn prepare_water_lod_scratch(
     let Some(data) = data else {
         return;
     };
-    let (Some(disp), Some(foam), Some(flow)) = (
+    let (Some(disp), Some(foam), Some(flow), Some(drift)) = (
         images.get(&data.displacement),
         images.get(&data.foam),
         images.get(&data.flow),
+        images.get(&data.drift),
     ) else {
         return;
     };
@@ -118,6 +123,7 @@ pub(super) fn prepare_water_lod_scratch(
         scratch_array(&device, disp, "water_lod_scratch_displacement"),
         scratch_array(&device, foam, "water_lod_scratch_foam"),
         scratch_array(&device, flow, "water_lod_scratch_flow"),
+        scratch_array(&device, drift, "water_lod_scratch_drift"),
     ]);
     scratch.size = size;
 }

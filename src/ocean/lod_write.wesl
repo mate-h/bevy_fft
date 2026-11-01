@@ -8,6 +8,7 @@
 // which also keeps last frame's Z. Flow is the change in displacement since the previous frame.
 // Linear waves move each surface particle with the time derivative of its displacement, so this is
 // the orbital velocity. It uses the physical displacement, without the artistic choppiness factor.
+// Drift is the cascades' summed Stokes drift, which the CPU integrates from the spectrum.
 
 import bevy_fft::ocean::sampling::{WrapTaps, bilinear_taps, wrap_taps};
 import bevy_fft::water::lod::{WaterLodSlices, lod_texel_world};
@@ -23,8 +24,8 @@ struct OceanLodWriteParams {
     /// One over the simulated time since the previous frame, or zero without a previous frame.
     inv_dt: f32,
     _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    /// Surface Stokes drift of all cascades in meters per second.
+    stokes_drift: vec2<f32>,
 }
 
 @group(0) @binding(0) var<uniform> params: OceanLodWriteParams;
@@ -32,18 +33,19 @@ struct OceanLodWriteParams {
 @group(0) @binding(2) var displacement_out: texture_storage_2d_array<rgba16float, write>;
 @group(0) @binding(3) var foam_out: texture_storage_2d_array<rgba16float, write>;
 @group(0) @binding(4) var flow_out: texture_storage_2d_array<rgba32float, write>;
-@group(0) @binding(5) var displacement_0: texture_2d<f32>;
-@group(0) @binding(6) var displacement_1: texture_2d<f32>;
-@group(0) @binding(7) var displacement_2: texture_2d<f32>;
-@group(0) @binding(8) var displacement_3: texture_2d<f32>;
-@group(0) @binding(9) var foam_0: texture_2d<f32>;
-@group(0) @binding(10) var foam_1: texture_2d<f32>;
-@group(0) @binding(11) var foam_2: texture_2d<f32>;
-@group(0) @binding(12) var foam_3: texture_2d<f32>;
-@group(0) @binding(13) var previous_0: texture_2d<f32>;
-@group(0) @binding(14) var previous_1: texture_2d<f32>;
-@group(0) @binding(15) var previous_2: texture_2d<f32>;
-@group(0) @binding(16) var previous_3: texture_2d<f32>;
+@group(0) @binding(5) var drift_out: texture_storage_2d_array<rg32float, write>;
+@group(0) @binding(6) var displacement_0: texture_2d<f32>;
+@group(0) @binding(7) var displacement_1: texture_2d<f32>;
+@group(0) @binding(8) var displacement_2: texture_2d<f32>;
+@group(0) @binding(9) var displacement_3: texture_2d<f32>;
+@group(0) @binding(10) var foam_0: texture_2d<f32>;
+@group(0) @binding(11) var foam_1: texture_2d<f32>;
+@group(0) @binding(12) var foam_2: texture_2d<f32>;
+@group(0) @binding(13) var foam_3: texture_2d<f32>;
+@group(0) @binding(14) var previous_0: texture_2d<f32>;
+@group(0) @binding(15) var previous_1: texture_2d<f32>;
+@group(0) @binding(16) var previous_2: texture_2d<f32>;
+@group(0) @binding(17) var previous_3: texture_2d<f32>;
 
 fn displacement_cascade(i: u32, t: WrapTaps) -> vec4<f32> {
     if i == 0u {
@@ -136,4 +138,5 @@ fn ocean_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     let rate = amp * params.inv_dt;
     let velocity = vec3<f32>(change.a, dz_change, change.b) * rate;
     textureStore(flow_out, gid.xy, slice, vec4<f32>(velocity, 0.0));
+    textureStore(drift_out, gid.xy, slice, vec4<f32>(params.stokes_drift, 0.0, 0.0));
 }

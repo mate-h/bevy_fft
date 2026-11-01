@@ -34,8 +34,10 @@ pub(crate) use lod_write::OceanLodWriteFrame;
 mod query;
 mod render;
 mod shallow_water_forcing;
+mod spectrum;
 
 pub use clipmap::OceanClipmap;
+pub use spectrum::{OceanStokesDrift, stokes_drift};
 
 pub use query::{
     OCEAN_QUERY_MAX_POINTS, OceanQueries, OceanQueryReadback, OceanQueryResults, OceanSample,
@@ -195,6 +197,7 @@ impl Plugin for OceanPlugin {
             .register_type::<OceanSurfaceSettings>()
             .init_resource::<OceanSurfaceSettings>()
             .register_type::<OceanCascade>()
+            .register_type::<OceanStokesDrift>()
             .register_type::<OceanClipmap>()
             .add_systems(Update, clipmap::build_ocean_clipmaps)
             .add_systems(
@@ -242,7 +245,10 @@ impl Plugin for OceanPlugin {
             .add_systems(
                 PostUpdate,
                 (
-                    lod_write::gather_ocean_lod_write.after(sync_ocean_foam_display),
+                    spectrum::update_ocean_stokes_drift,
+                    lod_write::gather_ocean_lod_write
+                        .after(sync_ocean_foam_display)
+                        .after(spectrum::update_ocean_stokes_drift),
                     publish_ocean_wind_direction.before(crate::water::WaterLodSystems),
                 ),
             )
