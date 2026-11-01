@@ -24,7 +24,9 @@ pub struct WaterSurfaceUniform {
     /// Water depth in meters below which pixels are discarded, so a terrain under a shallow water
     /// grid shows through on dry ground. Zero disables this solver-depth cutoff.
     pub dry_depth: f32,
-    pub _pad1: f32,
+    /// Seconds that drive the foam texture's flow phases. [`super::WaterPlugin`] sets it each
+    /// frame.
+    pub time: f32,
 }
 
 /// Optical settings for a transmissive water material. Distances are in meters.
@@ -120,8 +122,8 @@ impl JerlovWaterType {
 /// Solvers reach the material only through the LOD data, so one material shows the FFT ocean,
 /// shallow water, and dispersive patches together. The surface samples by world position, so any
 /// mesh layout works and the water stays anchored when the mesh moves. [`super::WaterPlugin`]
-/// keeps `lod`, `lod_displacement`, `lod_foam`, and `lod_foam_state` in sync with the LOD data each
-/// frame, sets `foam_texture`, and points `quadtree` at the entity's [`WaterQuadtreeBuffer`] or at
+/// keeps `lod`, `lod_displacement`, `lod_foam`, `lod_foam_state`, and `lod_drift` in sync with the
+/// LOD data each frame, sets `foam_texture` and the time, and points `quadtree` at the entity's [`WaterQuadtreeBuffer`] or at
 /// the shared fallback.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct WaterSurfaceExtension {
@@ -145,6 +147,9 @@ pub struct WaterSurfaceExtension {
     /// Active and residual foam from the foam sim. Full precision, so the shader blends it with loads.
     #[texture(108, dimension = "2d_array", sample_type = "float", filterable = false)]
     pub lod_foam_state: Handle<Image>,
+    /// Drift of floating matter, which carries the foam texture.
+    #[texture(111, dimension = "2d_array", sample_type = "float", filterable = false)]
+    pub lod_drift: Handle<Image>,
     /// Tiling foam pattern thresholded by coverage, from [`super::WaterFoamTexture`].
     #[texture(109)]
     #[sampler(110)]
@@ -158,7 +163,7 @@ impl Default for WaterSurfaceExtension {
                 foam_intensity: 1.0,
                 vertex_lod_bias: 1.0,
                 dry_depth: 0.0,
-                _pad1: 0.0,
+                time: 0.0,
             },
             lod: WaterLodSlices::default(),
             lod_displacement: Handle::default(),
@@ -167,6 +172,7 @@ impl Default for WaterSurfaceExtension {
             opaque_depth: None,
             optics: default(),
             lod_foam_state: Handle::default(),
+            lod_drift: Handle::default(),
             foam_texture: Handle::default(),
         }
     }
@@ -212,6 +218,7 @@ pub(super) fn sync_water_surface_lod(
     fallback: Option<Res<WaterQuadtreeFallback>>,
     scene_depth: Option<Res<super::scene_depth::WaterSceneDepth>>,
     foam_texture: Option<Res<super::WaterFoamTexture>>,
+    time: Res<Time>,
     surface: Query<
         (
             &MeshMaterial3d<WaterSurfaceMaterial>,
@@ -231,6 +238,7 @@ pub(super) fn sync_water_surface_lod(
                 mat.extension.quadtree = tiles.clone();
             }
             mat.extension.lod = lod.slices;
+            mat.extension.settings.time = time.elapsed_secs_wrapped();
             if let Some(scene_depth) = &scene_depth
                 && mat.extension.opaque_depth.as_ref() != Some(&scene_depth.image)
             {
@@ -244,6 +252,9 @@ pub(super) fn sync_water_surface_lod(
             }
             if mat.extension.lod_foam_state != lod.foam_state {
                 mat.extension.lod_foam_state = lod.foam_state.clone();
+            }
+            if mat.extension.lod_drift != lod.drift {
+                mat.extension.lod_drift = lod.drift.clone();
             }
             if let Some(foam_texture) = &foam_texture
                 && mat.extension.foam_texture != foam_texture.0

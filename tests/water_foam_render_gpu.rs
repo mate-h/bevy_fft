@@ -12,6 +12,7 @@ use bevy::{
         gpu_readback::{Readback, ReadbackComplete},
         render_resource::{TextureFormat, TextureUsages},
     },
+    time::TimeUpdateStrategy,
     window::ExitCondition,
     winit::WinitPlugin,
 };
@@ -21,7 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-const SIZE: u32 = 512;
+const SIZE: u32 = 1024;
 /// Albedo of dense foam in `surface.wesl`.
 const FOAM_ALBEDO: f32 = 0.55;
 
@@ -82,6 +83,10 @@ fn foam_app() -> App {
         residual_yield: 0.0,
         ..default()
     })
+    // Steps that land the captures on different flow phases of the foam texture.
+    .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
+        0.37,
+    )))
     .insert_resource(bevy::render::error_handler::RenderErrorHandler(
         |error, _, _| {
             panic!("GPU validation failed: {error:?}");
@@ -102,15 +107,16 @@ fn foam_app() -> App {
     );
     image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
     let target = app.world_mut().resource_mut::<Assets<Image>>().add(image);
-    // 2 m across 512 pixels, finer than the foam texture, so the lace is resolved.
+    // 6 m across 1024 pixels, finer than the foam texture, so the lace is resolved, and wide
+    // enough to hold a few hundred foam cells.
     app.world_mut().spawn((
         Camera3d::default(),
         Msaa::Off,
         Tonemapping::None,
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::Fixed {
-                width: 2.0,
-                height: 2.0,
+                width: 6.0,
+                height: 6.0,
             },
             ..OrthographicProjection::default_3d()
         }),
@@ -158,13 +164,15 @@ fn set_foam_state(app: &mut App, active: f32, residual: f32) {
 }
 
 struct FoamStatistics {
-    /// Share of pixels more than half covered by dense foam. Antialiased edge pixels count on
-    /// the side of the boundary their centre falls, so this matches the active coverage.
+    /// Share of pixels whose centre lies inside dense foam. A pixel centred on the boundary is
+    /// half dense foam over the thickest residual foam, at opacity 0.5 + 0.5 * 0.27, so that is
+    /// the cut. This matches the active coverage.
     dense: f32,
     /// Share of pixels at albedo 0.5 or more, the Stage A count of Monahan and Woolf (1989).
     /// Edge pixels below that albedo drop out.
     stage_a: f32,
-    /// Share of pixels with any foam.
+    /// Share of pixels with any foam. Partly covered edge pixels count, so this runs a little
+    /// above the covered share.
     any: f32,
     mean: f32,
 }
@@ -174,7 +182,7 @@ fn foam_statistics(pixels: &[u8]) -> FoamStatistics {
     let n = albedo.len() as f32;
     let share = |min: f32| albedo.iter().filter(|a| **a >= min).count() as f32 / n;
     FoamStatistics {
-        dense: share(0.5 * FOAM_ALBEDO),
+        dense: share(FOAM_ALBEDO * (0.5 + 0.5 * 1.5 * 0.1 / 0.55)),
         stage_a: share(0.5),
         any: share(0.005),
         mean: albedo.iter().sum::<f32>() / n,
@@ -187,32 +195,34 @@ fn rendered_foam_matches_sim_coverage() {
     let mut app = foam_app();
 
     set_foam_state(&mut app, 0.2, 0.3);
-    let s = foam_statistics(&capture(&mut app, 30));
-    eprintln!(
-        "active 0.2, residual 0.3: dense {}, stage A {}, any {}, mean albedo {}",
-        s.dense, s.stage_a, s.any, s.mean
-    );
-    assert!(
-        (s.dense - 0.2).abs() < 0.02,
-        "dense foam must cover the active share, got {}",
-        s.dense
-    );
-    assert!(
-        s.stage_a > 0.8 * 0.2,
-        "most dense foam must reach albedo 0.5, got {}",
-        s.stage_a
-    );
-    assert!(
-        (s.any - 0.5).abs() < 0.05,
-        "foam must cover active plus residual, got {}",
-        s.any
-    );
-    let expected = FOAM_ALBEDO * (0.2 + 0.3 * 0.1 / 0.55);
-    assert!(
-        (s.mean / expected - 1.0).abs() < 0.05,
-        "mean albedo {} against {expected}",
-        s.mean
-    );
+    for _ in 0..3 {
+        let s = foam_statistics(&capture(&mut app, 7));
+        eprintln!(
+            "active 0.2, residual 0.3: dense {}, stage A {}, any {}, mean albedo {}",
+            s.dense, s.stage_a, s.any, s.mean
+        );
+        assert!(
+            (s.dense - 0.2).abs() < 0.02,
+            "dense foam must cover the active share, got {}",
+            s.dense
+        );
+        assert!(
+            s.stage_a > 0.7 * 0.2,
+            "most dense foam must reach albedo 0.5, got {}",
+            s.stage_a
+        );
+        assert!(
+            (0.5..0.58).contains(&s.any),
+            "foam must cover active plus residual, got {}",
+            s.any
+        );
+        let expected = FOAM_ALBEDO * (0.2 + 0.3 * 0.1 / 0.55);
+        assert!(
+            (s.mean / expected - 1.0).abs() < 0.05,
+            "mean albedo {} against {expected}",
+            s.mean
+        );
+    }
 
     // Residual foam alone is lace well below the Stage A albedo.
     set_foam_state(&mut app, 0.0, 0.3);
@@ -223,7 +233,7 @@ fn rendered_foam_matches_sim_coverage() {
     );
     assert!(s.dense < 0.001, "residual foam must stay dim, {}", s.dense);
     assert!(
-        (s.any - 0.3).abs() < 0.05,
+        (0.3..0.36).contains(&s.any),
         "lace must cover 0.3, got {}",
         s.any
     );

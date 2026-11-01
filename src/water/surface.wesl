@@ -63,7 +63,7 @@ struct WaterSurfaceUniform {
     foam_intensity: f32,
     vertex_lod_bias: f32,
     dry_depth: f32,
-    _pad1: f32,
+    time: f32,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> surface: WaterSurfaceUniform;
@@ -79,6 +79,8 @@ struct WaterSurfaceUniform {
 @group(constants::MATERIAL_BIND_GROUP) @binding(109) var foam_texture: texture_2d<f32>;
 /// Linear and repeating.
 @group(constants::MATERIAL_BIND_GROUP) @binding(110) var foam_sampler: sampler;
+/// Drift of floating matter in meters per second along X and Z.
+@group(constants::MATERIAL_BIND_GROUP) @binding(111) var lod_drift: texture_2d_array<f32>;
 
 /// Reflectance of dense foam. Koepke (1984, §III) takes about 55 percent from Whitlock et al.'s
 /// laboratory foam of more than 25 bubble layers. Matches `FOAM_ALBEDO` in `optics.wesl`.
@@ -94,6 +96,9 @@ const FOAM_DETAIL_SCALE: f32 = 0.37;
 const FOAM_TEXTURE_SIZE: f32 = 256.0;
 /// Height in meters given to opaque foam when it bends the normal. An appearance choice.
 const FOAM_RELIEF: f32 = 0.01;
+/// Seconds each flow phase carries the foam texture before it starts over. Divides the hour
+/// after which the time wraps.
+const FOAM_FLOW_PERIOD: f32 = 4.0;
 
 struct WaterQuadtreeTile {
     /// Corner X and Z in meters, edge length in meters, level.
@@ -262,6 +267,45 @@ struct WaterFoamSurface {
     slope: vec2<f32>,
 }
 
+/// Even [0, 1] value from the weighted sum `w a + (1 - w) b` of two independent even values. The
+/// sum has a trapezoidal histogram, and this is its distribution function.
+fn water_flatten_blend(a: f32, b: f32, w: f32) -> f32 {
+    let p = max(w, 1.0 - w);
+    let q = max(min(w, 1.0 - w), 1e-4);
+    let x = w * a + (1.0 - w) * b;
+    if x < q {
+        return x * x / (2.0 * p * q);
+    }
+    if x > p {
+        return 1.0 - (1.0 - x) * (1.0 - x) / (2.0 * p * q);
+    }
+    return (x - 0.5 * q) / p;
+}
+
+/// Where flow phase `phase` reads the foam pattern for undisplaced `xz`. The phase moves the
+/// pattern with the drift and starts over at a fresh random offset each period, while its weight
+/// is zero. The two phases draw their offsets from separate sequences, so they never coincide.
+fn water_foam_flow_uv(xz: vec2<f32>, drift: vec2<f32>, phase_time: f32, phase: f32) -> vec2<f32> {
+    let cycle = floor(phase_time / FOAM_FLOW_PERIOD);
+    let age = phase_time - cycle * FOAM_FLOW_PERIOD;
+    let n = 2.0 * cycle + phase;
+    let seed = vec2<f32>(fract(sin(n * 12.9898) * 43758.547), fract(sin(n * 78.233) * 43758.547));
+    return xz - drift * age + seed * FOAM_TILE;
+}
+
+/// Pattern value at `xz` from two flow phases half a period apart, after Neyret (2003). Each phase
+/// carries the texture with the drift and restarts when its weight reaches zero, so the pattern
+/// follows the foam the sim advects instead of standing still under it. The blend keeps the
+/// histogram flat, so contrast and coverage do not pulse.
+fn water_foam_flow_pattern(xz: vec2<f32>, drift: vec2<f32>, detail_fade: f32) -> f32 {
+    let t0 = surface.time;
+    let t1 = surface.time + 0.5 * FOAM_FLOW_PERIOD;
+    let w = 1.0 - abs(2.0 * fract(t0 / FOAM_FLOW_PERIOD) - 1.0);
+    let a = water_foam_pattern(water_foam_flow_uv(xz, drift, t0, 0.0), detail_fade);
+    let b = water_foam_pattern(water_foam_flow_uv(xz, drift, t1, 1.0), detail_fade);
+    return water_flatten_blend(a, b, w);
+}
+
 /// Foam at undisplaced position `xz` from the sim's active and residual coverage. Foam edges are
 /// one pixel wide. Where a pixel spans several texels of a pattern sample, that sample would
 /// alias, so the finer sample drops out first and the foam then fades to its mean opacity.
@@ -275,13 +319,15 @@ fn water_foam_surface(xz: vec2<f32>, foam: vec2<f32>) -> WaterFoamSurface {
     let detail_fade = smoothstep(1.0, 4.0, footprint / detail_texel);
     let fade = smoothstep(1.0, 4.0, footprint / texel);
     let step = mix(detail_texel, texel, detail_fade);
-    let t = water_foam_pattern(xz, detail_fade);
+    let drift = sample_lod(lod_drift, water_lod, xz, 0.0).xy * lod_coverage(water_lod, xz);
+    let t = water_foam_flow_pattern(xz, drift, detail_fade);
     let width = max(fwidth(t), 1e-4);
     let here = water_foam_layers(t, foam, width);
-    let along_x = water_foam_layers(water_foam_pattern(xz + vec2<f32>(step, 0.0), detail_fade), foam, width);
-    let along_z = water_foam_layers(water_foam_pattern(xz + vec2<f32>(0.0, step), detail_fade), foam, width);
+    let x = water_foam_flow_pattern(xz + vec2<f32>(step, 0.0), drift, detail_fade);
+    let z = water_foam_flow_pattern(xz + vec2<f32>(0.0, step), drift, detail_fade);
+    let along = vec2<f32>(water_foam_layers(x, foam, width), water_foam_layers(z, foam, width));
     let mean = foam.x + foam.y * RESIDUAL_FOAM_OPACITY;
-    out.slope = FOAM_RELIEF * (vec2<f32>(along_x, along_z) - here) / step * (1.0 - fade);
+    out.slope = FOAM_RELIEF * (along - here) / step * (1.0 - fade);
     out.opacity = saturate(mix(here, mean, fade) * surface.foam_intensity);
     return out;
 }
