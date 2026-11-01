@@ -46,8 +46,8 @@ pub use quadtree::{
 };
 pub use scene_depth::WaterTransmission;
 pub use surface::{
-    JerlovWaterType, WATER_SURFACE_SHADER, WaterOpticsUniform, WaterSurfaceExtension,
-    WaterSurfaceMaterial, WaterSurfaceTag, WaterSurfaceUniform,
+    JerlovWaterType, WATER_SURFACE_SHADER, WaterMediumUniform, WaterOpticsUniform,
+    WaterSurfaceExtension, WaterSurfaceMaterial, WaterSurfaceTag, WaterSurfaceUniform,
 };
 pub use underwater::{
     WATER_WATERLINE_FORMAT, WATER_WATERLINE_SHADER, WaterUnderwater, WaterWaterline,
@@ -92,6 +92,7 @@ impl Plugin for WaterPlugin {
         bevy::shader::load_shader_library!(app, "lod.wesl");
         bevy::shader::load_shader_library!(app, "optics.wesl");
         bevy::shader::load_shader_library!(app, "breaking.wesl");
+        bevy::shader::load_shader_library!(app, "underside.wesl");
         embedded_asset!(app, "surface.wesl");
         embedded_asset!(app, "quadtree.wesl");
         embedded_asset!(app, "foam.wesl");
@@ -99,6 +100,7 @@ impl Plugin for WaterPlugin {
             .register_type::<WaterViewer>()
             .register_type::<WaterSurfaceUniform>()
             .register_type::<WaterOpticsUniform>()
+            .register_type::<WaterMediumUniform>()
             .register_type::<JerlovWaterType>()
             .register_type::<WaterFoamSettings>()
             .init_resource::<WaterFoamSettings>()

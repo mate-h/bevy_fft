@@ -1,7 +1,6 @@
 // Terrain-aware optical composition over the opaque scene, in exposed linear HDR.
-import bevy_pbr::render::mesh_view_bindings::{view, view_transmission_texture, view_transmission_sampler, light_probes};
-@if(ENVIRONMENT_MAP) import bevy_pbr::render::mesh_view_bindings as view_bindings;
-import bevy_render::maths::quat_rotate;
+import bevy_pbr::render::mesh_view_bindings::{view, view_transmission_texture, view_transmission_sampler};
+import bevy_fft::water::underside::environment_radiance;
 import bevy_pbr::render::pbr_types::PbrInput;
 import bevy_pbr::render::pbr_functions::apply_pbr_lighting;
 import bevy_pbr::render::view_transformations::position_ndc_to_world;
@@ -107,29 +106,6 @@ fn trace_scene(origin: vec3<f32>, direction: vec3<f32>, limit: f32, reflection: 
 
 fn scene_color(uv: vec2<f32>) -> vec3<f32> {
     return textureSampleLevel(view_transmission_texture, view_transmission_sampler, uv, 0.0).rgb;
-}
-
-/// Specular radiance of the view environment map along `R`, as Bevy's lighting samples it.
-fn environment_radiance(N: vec3<f32>, R: vec3<f32>, perceptual_roughness: f32) -> vec3<f32> {
-    var radiance = vec3<f32>(0.0);
-    @if(ENVIRONMENT_MAP) {
-        if light_probes.view_cubemap_index >= 0 {
-            let roughness = perceptual_roughness * perceptual_roughness;
-            let smoothness = saturate(1.0 - roughness);
-            var direction = quat_rotate(light_probes.view_rotation, mix(N, R, smoothness * (sqrt(smoothness) + roughness)));
-            // Cube maps are left-handed.
-            direction.z = -direction.z;
-            let level = perceptual_roughness * f32(light_probes.smallest_specular_mip_level_for_view);
-            @if(MULTIPLE_LIGHT_PROBES_IN_ARRAY) {
-                radiance = textureSampleLevel(view_bindings::specular_environment_maps[light_probes.view_cubemap_index], view_bindings::environment_map_sampler, direction, level).rgb;
-            }
-            @if(!MULTIPLE_LIGHT_PROBES_IN_ARRAY) {
-                radiance = textureSampleLevel(view_bindings::specular_environment_map, view_bindings::environment_map_sampler, direction, level).rgb;
-            }
-            radiance *= light_probes.intensity_for_view;
-        }
-    }
-    return radiance;
 }
 
 /// Water over the opaque scene. `foam` is the opacity of the foam layer on top and `bubbles` the

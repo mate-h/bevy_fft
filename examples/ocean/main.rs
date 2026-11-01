@@ -63,13 +63,44 @@ fn main() {
             Update,
             spawn_ocean_when_ready.after(FftSystemSet::PrepareTextures),
         )
-        .add_systems(Update, float_buoys)
+        .add_systems(Update, (float_buoys, shade_underside_when_submerged))
         .add_systems(EguiPrimaryContextPass, (ocean_egui_panel, water_mesh_panel))
         .add_systems(
             PostUpdate,
             sync_free_camera_with_egui_focus.after(write_egui_wants_input_system),
         )
         .run();
+}
+
+/// Eye height in meters below which the water draws in the forward pass, so its underside can
+/// show. The margin covers the readback latency and the near plane cutting the waves.
+const UNDERSIDE_MARGIN: f32 = 1.0;
+
+/// The deferred G-buffer pass has no lights or sky to shade the underside with, so the water
+/// switches to forward rendering while the camera is in or near it.
+fn shade_underside_when_submerged(
+    waterline: Res<WaterWaterline>,
+    surface: Query<&MeshMaterial3d<WaterSurfaceMaterial>, With<WaterSurfaceTag>>,
+    mut materials: ResMut<Assets<WaterSurfaceMaterial>>,
+) {
+    let near = waterline.eye_height.is_some_and(|h| h < UNDERSIDE_MARGIN);
+    let method = if near {
+        OpaqueRendererMethod::Forward
+    } else {
+        OpaqueRendererMethod::Auto
+    };
+    for handle in &surface {
+        if materials
+            .get(&handle.0)
+            .is_some_and(|m| m.base.opaque_render_method != method)
+        {
+            materials
+                .get_mut(&handle.0)
+                .unwrap()
+                .base
+                .opaque_render_method = method;
+        }
+    }
 }
 
 /// A marker that rides the surface through [`OceanQueries`].
@@ -278,6 +309,8 @@ fn spawn_ocean_when_ready(
             perceptual_roughness: 0.08,
             metallic: 0.0,
             opaque_render_method: OpaqueRendererMethod::Auto,
+            // Back faces show the surface from under the water.
+            cull_mode: None,
             ..default()
         },
         extension: WaterSurfaceExtension::default(),

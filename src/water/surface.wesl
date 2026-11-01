@@ -58,6 +58,10 @@ import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT;
 
 @if(!PREPASS_PIPELINE && VIEW_TRANSMISSION_TEXTURE)
 import bevy_fft::water::optics::{optics, shade_water};
+@if(!PREPASS_PIPELINE)
+import bevy_fft::water::underside::shade_underside;
+@if(!PREPASS_PIPELINE)
+import bevy_pbr::render::mesh_view_bindings::view;
 
 struct WaterSurfaceUniform {
     foam_intensity: f32,
@@ -464,6 +468,12 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = water_mix_foam_into_material(foam.opacity, pbr_input.material.base_color);
     var out: FragmentOutput;
+    // Back faces are seen from under the water. They draw only when the material leaves them unculled.
+    if !is_front {
+        let radiance = shade_underside(in.world_position.xyz, view.world_position, n_world, foam_depth.z);
+        out.color = main_pass_post_lighting_processing(pbr_input, vec4<f32>(radiance, 1.0));
+        return out;
+    }
 @if(VIEW_TRANSMISSION_TEXTURE) {
     if optics.enabled != 0u {
         out.color = shade_water(pbr_input, foam_depth.z, foam.opacity, foam_depth.x);

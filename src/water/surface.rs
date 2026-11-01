@@ -114,6 +114,86 @@ impl JerlovWaterType {
             Self::Coastal9 => Vec3::new(0.64, 0.52, 1.1),
         }
     }
+
+    /// Absorption coefficient σ_a in inverse meters at 625, 550, and 450 nm. Solonenko and Mobley
+    /// (2015) fitted these inherent optical properties to the Jerlov types with Hydrolight. The
+    /// values are read from the vector curves of Monzon et al. (2024, Fig. 2), which plot them.
+    pub fn absorption(self) -> Vec3 {
+        match self {
+            Self::OceanI => Vec3::new(0.295, 0.0620, 0.0180),
+            Self::OceanIA => Vec3::new(0.295, 0.0622, 0.0221),
+            Self::OceanIB => Vec3::new(0.296, 0.0623, 0.0235),
+            Self::OceanII => Vec3::new(0.296, 0.0622, 0.0241),
+            Self::OceanIII => Vec3::new(0.297, 0.0646, 0.0388),
+            Self::Coastal1 => Vec3::new(0.304, 0.0760, 0.105),
+            Self::Coastal3 => Vec3::new(0.307, 0.0820, 0.154),
+            Self::Coastal5 => Vec3::new(0.327, 0.117, 0.297),
+            Self::Coastal7 => Vec3::new(0.367, 0.195, 0.542),
+            Self::Coastal9 => Vec3::new(0.436, 0.348, 0.943),
+        }
+    }
+
+    /// Scattering coefficient σ_s in inverse meters at 625, 550, and 450 nm, from the same source
+    /// as [`Self::absorption`].
+    pub fn scattering(self) -> Vec3 {
+        match self {
+            Self::OceanI => Vec3::new(0.00100, 0.00170, 0.00380),
+            Self::OceanIA => Vec3::new(0.00260, 0.00350, 0.00630),
+            Self::OceanIB => Vec3::new(0.0468, 0.0536, 0.0680),
+            Self::OceanII => Vec3::new(0.288, 0.358, 0.504),
+            Self::OceanIII => Vec3::new(0.788, 0.980, 1.38),
+            Self::Coastal1 => Vec3::new(0.293, 0.365, 0.514),
+            Self::Coastal3 => Vec3::new(0.856, 1.06, 1.50),
+            Self::Coastal5 => Vec3::new(1.07, 1.33, 1.87),
+            Self::Coastal7 => Vec3::new(1.89, 2.35, 3.30),
+            Self::Coastal9 => Vec3::new(2.51, 3.12, 4.39),
+        }
+    }
+}
+
+/// The water body as a participating medium, seen when the camera looks out from under the
+/// surface. RGB lanes hold 625, 550, and 450 nm. Monzon et al. (2024, §4.2) light the medium with
+/// a closed-form multiple-scattering term that takes the downwelling irradiance to fall as
+/// `exp(-K_d y)` with depth `y`.
+#[derive(Clone, Copy, Debug, ShaderType, Reflect)]
+pub struct WaterMediumUniform {
+    /// Absorption coefficient σ_a in inverse meters.
+    pub absorption: Vec3,
+    /// Lambertian reflectance of the bed under the water, from 0 to 1. Zero leaves out the light
+    /// the bed sends back up.
+    pub floor_albedo: f32,
+    /// Scattering coefficient σ_s in inverse meters.
+    pub scattering: Vec3,
+    /// Index of refraction of the water.
+    pub ior: f32,
+    /// Diffuse downwelling attenuation K_d in inverse meters.
+    pub diffuse_attenuation: Vec3,
+    pub _pad: f32,
+}
+
+impl Default for WaterMediumUniform {
+    fn default() -> Self {
+        Self::jerlov(JerlovWaterType::OceanIB)
+    }
+}
+
+impl WaterMediumUniform {
+    /// The medium of a Jerlov water type, with no light from the bed.
+    pub fn jerlov(water: JerlovWaterType) -> Self {
+        Self {
+            absorption: water.absorption(),
+            floor_albedo: 0.0,
+            scattering: water.scattering(),
+            ior: 1.333,
+            diffuse_attenuation: water.extinction(),
+            _pad: 0.0,
+        }
+    }
+
+    /// Extinction coefficient σ_t = σ_a + σ_s in inverse meters.
+    pub fn extinction(&self) -> Vec3 {
+        self.absorption + self.scattering
+    }
 }
 
 /// Water surface that reads the shared [`WaterLodData`]. Bindings start at 100 so they stack with
@@ -154,6 +234,11 @@ pub struct WaterSurfaceExtension {
     #[texture(109)]
     #[sampler(110)]
     pub foam_texture: Handle<Image>,
+    /// The water body seen from below the surface. The underside draws only when the material
+    /// leaves back faces unculled and renders in the forward pass, since the deferred G-buffer
+    /// pass has no lights or sky to shade it with.
+    #[uniform(112)]
+    pub medium: WaterMediumUniform,
 }
 
 impl Default for WaterSurfaceExtension {
@@ -174,6 +259,7 @@ impl Default for WaterSurfaceExtension {
             lod_foam_state: Handle::default(),
             lod_drift: Handle::default(),
             foam_texture: Handle::default(),
+            medium: default(),
         }
     }
 }
@@ -262,5 +348,32 @@ pub(super) fn sync_water_surface_lod(
                 mat.extension.foam_texture = foam_texture.0.clone();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_ocean_scattering_grows_from_type_i_to_iii() {
+        let types = [
+            JerlovWaterType::OceanI,
+            JerlovWaterType::OceanIA,
+            JerlovWaterType::OceanIB,
+            JerlovWaterType::OceanII,
+            JerlovWaterType::OceanIII,
+        ];
+        for pair in types.windows(2) {
+            let (a, b) = (pair[0].scattering(), pair[1].scattering());
+            assert!(b.cmpgt(a).all(), "{:?} against {:?}", pair[0], pair[1]);
+        }
+    }
+
+    #[test]
+    fn medium_extinction_sums_absorption_and_scattering() {
+        let m = WaterMediumUniform::jerlov(JerlovWaterType::Coastal5);
+        let expected = Vec3::new(1.397, 1.447, 2.167);
+        assert!((m.extinction() - expected).abs().max_element() < 1e-6);
     }
 }
