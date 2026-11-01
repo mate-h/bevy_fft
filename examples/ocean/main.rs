@@ -208,6 +208,7 @@ fn setup(
         Camera3d::default(),
         Transform::from_xyz(0.0, 8.0, 24.0).looking_at(Vec3::ZERO, Vec3::Y),
         FreeCamera::default(),
+        WaterUnderwater,
         AtmosphereSettings::default(),
         Exposure { ev100: 12.0 },
         Tonemapping::AcesFitted,
@@ -400,6 +401,7 @@ fn ocean_egui_panel(
     mut sun_settings: ResMut<SunLightSettings>,
     mut sun_transform: Query<&mut Transform, With<SunLight>>,
     queries: Res<OceanQueries>,
+    waterline: Res<WaterWaterline>,
     mut foam: ResMut<WaterFoamSettings>,
 ) {
     // The panel edits cascade 0. Shared fields are copied to the other cascades afterwards, while
@@ -465,6 +467,10 @@ fn ocean_egui_panel(
                 ))
                 .weak(),
             );
+        }
+        if let Some(h) = waterline.eye_height {
+            let side = if h < 0.0 { "below" } else { "above" };
+            ui.label(egui::RichText::new(format!("Camera {:.2} m {side} water", h.abs())).weak());
         }
         ui.add_space(2.0);
         ui.label("FFT resolution");

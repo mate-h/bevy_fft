@@ -38,5 +38,6 @@ pub use crate::water::{
     WaterFoamSettings, WaterLodData, WaterLodGraphSystems, WaterLodScratch, WaterLodSettings,
     WaterLodSlices, WaterLodSystems, WaterOpticsUniform, WaterPlugin, WaterQuadtree,
     WaterQuadtreeBuffer, WaterQuadtreeStats, WaterQuadtreeTile, WaterSurfaceExtension,
-    WaterSurfaceMaterial, WaterSurfaceTag, WaterSurfaceUniform, WaterTransmission, WaterViewer,
+    WaterSurfaceMaterial, WaterSurfaceTag, WaterSurfaceUniform, WaterTransmission, WaterUnderwater,
+    WaterViewer, WaterWaterline,
 };

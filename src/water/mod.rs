@@ -16,6 +16,9 @@
 //! through [`WaterLodScratch`]. The foam sim then carries foam over from the previous frame, and
 //! readers such as height queries run last.
 //!
+//! [`WaterUnderwater`] on the viewer adds a waterline mask, [`WaterWaterline`], that tells which
+//! pixels look out from under the water.
+//!
 //! Sampling helpers for WESL live in `bevy_fft::water::lod`.
 
 mod blend;
@@ -26,6 +29,7 @@ mod quadtree;
 mod quadtree_gpu;
 mod scene_depth;
 mod surface;
+mod underwater;
 
 pub use blend::WaterLodScratch;
 pub use foam::{
@@ -44,6 +48,9 @@ pub use scene_depth::WaterTransmission;
 pub use surface::{
     JerlovWaterType, WATER_SURFACE_SHADER, WaterOpticsUniform, WaterSurfaceExtension,
     WaterSurfaceMaterial, WaterSurfaceTag, WaterSurfaceUniform,
+};
+pub use underwater::{
+    WATER_WATERLINE_FORMAT, WATER_WATERLINE_SHADER, WaterUnderwater, WaterWaterline,
 };
 
 use bevy::{
@@ -81,6 +88,7 @@ pub struct WaterPlugin;
 impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
         scene_depth::configure(app);
+        underwater::configure(app);
         bevy::shader::load_shader_library!(app, "lod.wesl");
         bevy::shader::load_shader_library!(app, "optics.wesl");
         bevy::shader::load_shader_library!(app, "breaking.wesl");
@@ -175,6 +183,7 @@ impl Plugin for WaterPlugin {
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app.init_resource::<foam::WaterFoamPipeline>();
         }
+        underwater::finish(app);
         quadtree_gpu::install_draws(app);
     }
 }
