@@ -242,10 +242,12 @@ fn water_foam_pattern(xz: vec2<f32>, detail_fade: f32) -> f32 {
     return mix(both, a, detail_fade);
 }
 
-/// One where pattern value `t` is above `1 - coverage`, with an edge `width` wide in pattern units
-/// that antialiases the boundary without moving it.
+/// One where pattern value `t` is above `1 - coverage`, with an edge up to `width` wide in pattern
+/// units that antialiases the boundary without moving it. The edge narrows near zero and full
+/// coverage so it stays inside the pattern's range, and no coverage gives no foam.
 fn water_foam_mask(t: f32, coverage: f32, width: f32) -> f32 {
-    return saturate((t - (1.0 - coverage)) / width + 0.5);
+    let edge = max(min(width, 2.0 * min(coverage, 1.0 - coverage)), 1e-6);
+    return select(saturate((t - (1.0 - coverage)) / edge + 0.5), 0.0, coverage <= 0.0);
 }
 
 /// Foam opacity for pattern value `t`. Active foam takes

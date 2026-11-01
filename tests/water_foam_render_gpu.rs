@@ -242,4 +242,9 @@ fn rendered_foam_matches_sim_coverage() {
         "residual foam reflects about 10 percent, mean {}",
         s.mean
     );
+
+    // No coverage leaves no foam, also on the brightest pattern values.
+    set_foam_state(&mut app, 0.0, 0.0);
+    let s = foam_statistics(&capture(&mut app, 30));
+    assert_eq!(s.any, 0.0, "foam without coverage, mean albedo {}", s.mean);
 }
