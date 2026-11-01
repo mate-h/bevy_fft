@@ -364,3 +364,103 @@ fn caustics_light_a_plate_on_the_receiver() {
         "trough {trough} against {expected_trough}"
     );
 }
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn light_shafts_follow_the_caustics() {
+    const SIZE: u32 = 256;
+    const VIEW: f32 = 16.0;
+    let depth = 0.5 * focal_depth();
+    let mut app = caustics_app();
+    // Clear enough that sunlight still scatters at the receiver depth.
+    app.insert_resource(WaterMedium(WaterMediumUniform::jerlov(
+        JerlovWaterType::OceanIB,
+    )));
+    let mut image = Image::new_target_texture(SIZE, SIZE, TextureFormat::Rgba16Float, None);
+    image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+    let target = app.world_mut().resource_mut::<Assets<Image>>().add(image);
+    // Level view along the crests from the receiver depth. Each pixel column holds one X, so its
+    // single-scattered light follows the caustic intensity of that X.
+    app.world_mut().spawn((
+        Camera3d::default(),
+        WaterUnderwater,
+        Hdr,
+        Msaa::Off,
+        Tonemapping::None,
+        DebandDither::Disabled,
+        Exposure { ev100: 0.0 },
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: ScalingMode::Fixed {
+                width: VIEW,
+                height: VIEW,
+            },
+            ..OrthographicProjection::default_3d()
+        }),
+        Transform::from_xyz(0.0, -depth, 0.0),
+        RenderTarget::Image(ImageRenderTarget {
+            handle: target.clone(),
+            scale_factor: 1.0,
+        }),
+    ));
+    let mesh = app
+        .world_mut()
+        .resource_mut::<Assets<Mesh>>()
+        .add(Plane3d::default().mesh().size(32.0, 32.0));
+    let material = app
+        .world_mut()
+        .resource_mut::<Assets<WaterSurfaceMaterial>>()
+        .add(WaterSurfaceMaterial::default());
+    app.world_mut().spawn((
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        WaterSurfaceTag,
+        NotShadowCaster,
+    ));
+    step(&mut app);
+    set_sinusoid(&mut app);
+    // Deep water, so the view runs on past the receiver.
+    let foam = app.world().resource::<WaterLodData>().foam.clone();
+    {
+        let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+        let mut image = images.get_mut(&foam).unwrap();
+        for texel in image.data.as_mut().unwrap().chunks_exact_mut(8) {
+            texel[2..4].copy_from_slice(&half_bits(1000.0).to_le_bytes());
+        }
+    }
+    observe_into_capture(&mut app, Readback::texture(target));
+    let green = |data: Vec<u8>| -> Vec<f32> {
+        data.chunks_exact(8)
+            .map(|p| half(u16::from_le_bytes([p[2], p[3]])))
+            .collect()
+    };
+    let with = green(capture(&mut app));
+    app.world_mut()
+        .resource_mut::<WaterCausticsSettings>()
+        .enabled = false;
+    let without = green(capture(&mut app));
+
+    let pixel = VIEW / SIZE as f32;
+    let difference = |c: u32| {
+        (SIZE / 2 - 8..SIZE / 2 + 8)
+            .map(|r| {
+                let i = (r * SIZE + c) as usize;
+                with[i] - without[i]
+            })
+            .sum::<f32>()
+    };
+    let pair = |c: u32| difference(c - 1) + difference(c);
+    let crest = pair(SIZE / 2);
+    let trough = pair(SIZE / 2 + (2.0 / pixel) as u32);
+    let measured = crest / trough;
+    let expected =
+        (expected_intensity(0.125, depth) - 1.0) / (expected_intensity(2.125, depth) - 1.0);
+    eprintln!("shaft contrast {measured} against {expected}");
+    assert!(
+        crest > 0.0 && trough < 0.0,
+        "crest {crest}, trough {trough}"
+    );
+    assert!(
+        (measured / expected - 1.0).abs() < 0.05,
+        "shaft contrast {measured} against {expected}"
+    );
+}

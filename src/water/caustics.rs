@@ -58,7 +58,8 @@ impl Default for WaterCausticsSettings {
 
 /// Caustic intensity on the receiver, one texel per texel of the chosen LOD slice and placed like
 /// it. Rewritten every frame before the cameras draw. The underwater medium pass of
-/// [`super::WaterUnderwater`] projects it onto the scene.
+/// [`super::WaterUnderwater`] projects it onto the scene, and the single-scattered sunlight under
+/// water follows it, which draws the light shafts below focusing waves.
 #[derive(Resource, Clone)]
 pub struct WaterCaustics {
     pub map: Handle<Image>,
@@ -80,18 +81,22 @@ pub struct CausticsUniform {
 pub struct WaterCausticsFrame {
     enabled: bool,
     uniform: CausticsUniform,
+    lookup: CausticsLookup,
     map: Handle<Image>,
 }
 
+/// Where readers find the caustic map. Layout matches `CausticsLookup` in `underside.wesl`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, ShaderType)]
+pub struct CausticsLookup {
+    /// The covered slice: centre X, centre Z, texel width, and width in meters.
+    pub rect: Vec4,
+    /// One when the map was traced this frame, then the receiver depth in meters.
+    pub params: Vec4,
+}
+
 impl WaterCausticsFrame {
-    /// Whether the map was traced this frame, the receiver depth, and the slice it covers.
-    pub(super) fn params(&self) -> Vec4 {
-        Vec4::new(
-            if self.enabled { 1.0 } else { 0.0 },
-            self.uniform.receiver_depth,
-            self.uniform.slice as f32,
-            0.0,
-        )
+    pub(super) fn lookup(&self) -> CausticsLookup {
+        self.lookup
     }
 
     pub(super) fn map(&self) -> &Handle<Image> {
@@ -130,6 +135,7 @@ pub(super) fn gather_water_caustics(
     mut frame: ResMut<WaterCausticsFrame>,
 ) {
     frame.enabled = false;
+    frame.lookup = CausticsLookup::default();
     let Some(caustics) = caustics else {
         return;
     };
@@ -142,13 +148,18 @@ pub(super) fn gather_water_caustics(
         return;
     }
     frame.enabled = true;
+    let slice = settings.slice.min(lod.slices.count.saturating_sub(1));
     frame.uniform = CausticsUniform {
         direction_to_light,
         receiver_depth: settings.receiver_depth,
-        slice: settings.slice.min(lod.slices.count.saturating_sub(1)),
+        slice,
         rays: settings.rays_per_texel.max(1),
         ior: settings.ior,
         _pad: 0.0,
+    };
+    frame.lookup = CausticsLookup {
+        rect: lod.slices.slices[slice as usize],
+        params: Vec4::new(1.0, settings.receiver_depth, 0.0, 0.0),
     };
 }
 

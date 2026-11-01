@@ -13,6 +13,7 @@ import bevy_fft::water::lod::{WaterLodSlices, displaced_height, lod_coverage, sa
 import bevy_fft::water::underside::{
     MEDIUM_MAX_PATH,
     downwelling_irradiance,
+    caustic_scale,
     fresnel_dielectric,
     medium,
     medium_multiple_scattering,
@@ -30,10 +31,6 @@ import bevy_fft::water::underside::{
 @group(constants::MATERIAL_BIND_GROUP) @binding(6) var lod_sampler: sampler;
 /// Height of the water mesh plane in `x`.
 @group(constants::MATERIAL_BIND_GROUP) @binding(7) var<uniform> water_plane: vec4<f32>;
-/// Caustic intensity on the receiver plane, laid out like one LOD slice.
-@group(constants::MATERIAL_BIND_GROUP) @binding(8) var caustic_map: texture_2d<f32>;
-/// One in `x` when the map was traced this frame, the receiver depth in `y`, the slice in `z`.
-@group(constants::MATERIAL_BIND_GROUP) @binding(9) var<uniform> caustic_params: vec4<f32>;
 
 /// Meters a scene point may sit below the displaced surface and still count as the surface, which
 /// covers the difference between the mesh and the per-pixel height.
@@ -51,30 +48,11 @@ fn water_column(xz: vec2<f32>) -> f32 {
     return mix(OPEN_WATER_DEPTH, sample_lod_filtered(lod_foam, lod_sampler, lod, xz, 0.0).g, c);
 }
 
-/// Bilinear caustic intensity at world `xz` on the receiver, one outside the map.
-fn caustic_at_receiver(xz: vec2<f32>) -> f32 {
-    let s = lod.slices[u32(caustic_params.z)];
-    let n = vec2<f32>(textureDimensions(caustic_map));
-    let x = ((xz - s.xy) / s.w + 0.5) * n - 0.5;
-    let i0 = vec2<i32>(floor(x));
-    if any(i0 < vec2<i32>(0)) || any(i0 + 1 >= vec2<i32>(n)) {
-        return 1.0;
-    }
-    let f = x - floor(x);
-    let a = textureLoad(caustic_map, i0, 0).r;
-    let b = textureLoad(caustic_map, i0 + vec2<i32>(1, 0), 0).r;
-    let c = textureLoad(caustic_map, i0 + vec2<i32>(0, 1), 0).r;
-    let d = textureLoad(caustic_map, i0 + vec2<i32>(1, 1), 0).r;
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-
-/// Scale on the light reaching scene point `p` from the caustic map. The first directional light
-/// refracts at a level surface, and the map is read where that beam through `p` crosses the
-/// receiver plane. The map holds the pattern at the receiver depth only, so points far above or
-/// below it see that pattern rather than their own focus. Only the sun's share of the downwelling
-/// irradiance `e0` follows the map.
+/// Scale on the light reaching scene point `p` from the caustic map, along the first directional
+/// light's beam refracted at a level surface. Only the sun's share of the downwelling irradiance
+/// `e0` follows the map.
 fn caustic_lighting(p: vec3<f32>, e0: vec3<f32>) -> vec3<f32> {
-    if caustic_params.x == 0.0 || lights.n_directional_lights == 0u {
+    if lights.n_directional_lights == 0u {
         return vec3<f32>(1.0);
     }
     let light = &lights.directional_lights[0];
@@ -84,9 +62,7 @@ fn caustic_lighting(p: vec3<f32>, e0: vec3<f32>) -> vec3<f32> {
     }
     let eta = 1.0 / medium.ior;
     let beam = refract(-L, vec3<f32>(0.0, 1.0, 0.0), eta);
-    let depth = water_plane.x - p.y;
-    let back = (depth - caustic_params.y) / max(-beam.y, 1e-3);
-    let intensity = caustic_at_receiver(p.xz - beam.xz * back);
+    let intensity = caustic_scale(p, beam, water_plane.x);
     let sun = (*light).color.rgb * L.y * (1.0 - fresnel_dielectric(L.y, eta));
     let share = select(sun / e0, vec3<f32>(0.0), e0 <= vec3<f32>(0.0));
     return 1.0 + (intensity - 1.0) * saturate(share);

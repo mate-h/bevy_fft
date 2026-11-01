@@ -35,7 +35,8 @@ mod underwater;
 
 pub use blend::WaterLodScratch;
 pub use caustics::{
-    WATER_CAUSTICS_FORMAT, WATER_CAUSTICS_SHADER, WaterCaustics, WaterCausticsSettings,
+    CausticsLookup, WATER_CAUSTICS_FORMAT, WATER_CAUSTICS_SHADER, WaterCaustics,
+    WaterCausticsSettings,
 };
 pub use foam::{
     WATER_FOAM_SHADER, WATER_FOAM_STATE_FORMAT, WaterFoamFrame, WaterFoamParams, WaterFoamSettings,
@@ -139,7 +140,9 @@ impl Plugin for WaterPlugin {
                         .after(bevy::transform::TransformSystems::Propagate),
                     quadtree::select_water_quadtrees
                         .after(bevy::camera::visibility::VisibilitySystems::UpdateFrusta),
-                    surface::sync_water_surface_lod.after(WaterLodSystems),
+                    surface::sync_water_surface_lod
+                        .after(WaterLodSystems)
+                        .after(caustics::gather_water_caustics),
                     foam::gather_water_foam.after(WaterLodSystems),
                 ),
             );

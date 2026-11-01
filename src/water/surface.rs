@@ -240,6 +240,12 @@ pub struct WaterSurfaceExtension {
     /// lights or sky to shade it with.
     #[uniform(112)]
     pub medium: WaterMediumUniform,
+    /// Caustic map from [`super::WaterCaustics`], which the single-scattered sunlight under the
+    /// underside follows. The plugin keeps it and its placement current.
+    #[texture(113, sample_type = "float", filterable = false)]
+    pub caustic_map: Handle<Image>,
+    #[uniform(114)]
+    pub caustics: super::caustics::CausticsLookup,
 }
 
 impl Default for WaterSurfaceExtension {
@@ -261,6 +267,8 @@ impl Default for WaterSurfaceExtension {
             lod_drift: Handle::default(),
             foam_texture: Handle::default(),
             medium: default(),
+            caustic_map: Handle::default(),
+            caustics: default(),
         }
     }
 }
@@ -307,6 +315,7 @@ pub(super) fn sync_water_surface_lod(
     scene_depth: Option<Res<super::scene_depth::WaterSceneDepth>>,
     foam_texture: Option<Res<super::WaterFoamTexture>>,
     medium: Option<Res<super::WaterMedium>>,
+    caustics: Option<Res<super::caustics::WaterCausticsFrame>>,
     time: Res<Time>,
     surface: Query<
         (
@@ -330,6 +339,12 @@ pub(super) fn sync_water_surface_lod(
             mat.extension.settings.time = time.elapsed_secs_wrapped();
             if let Some(medium) = &medium {
                 mat.extension.medium = medium.0;
+            }
+            if let Some(caustics) = &caustics {
+                mat.extension.caustics = caustics.lookup();
+                if mat.extension.caustic_map != *caustics.map() {
+                    mat.extension.caustic_map = caustics.map().clone();
+                }
             }
             if let Some(scene_depth) = &scene_depth
                 && mat.extension.opaque_depth.as_ref() != Some(&scene_depth.image)

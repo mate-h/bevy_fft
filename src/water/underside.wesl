@@ -21,6 +21,17 @@ struct WaterMediumUniform {
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(112) var<uniform> medium: WaterMediumUniform;
 
+struct CausticsLookup {
+    /// The covered slice: centre X, centre Z, texel width, and width in meters.
+    rect: vec4<f32>,
+    /// One when the map was traced this frame, then the receiver depth in meters.
+    params: vec4<f32>,
+}
+
+/// Caustic intensity on a level receiver, from the caustics pass.
+@group(constants::MATERIAL_BIND_GROUP) @binding(113) var caustic_map: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(114) var<uniform> caustics: CausticsLookup;
+
 /// Longest path in meters the medium terms integrate over.
 const MEDIUM_MAX_PATH: f32 = 10000.0;
 
@@ -130,6 +141,34 @@ fn medium_multiple_scattering(
     return medium.scattering / (4.0 * PI) * e0 * (down + up);
 }
 
+/// Bilinear caustic intensity at world `xz` on the receiver, one outside the map.
+fn caustic_at_receiver(xz: vec2<f32>) -> f32 {
+    let n = vec2<f32>(textureDimensions(caustic_map));
+    let x = ((xz - caustics.rect.xy) / caustics.rect.w + 0.5) * n - 0.5;
+    let i0 = vec2<i32>(floor(x));
+    if any(i0 < vec2<i32>(0)) || any(i0 + 1 >= vec2<i32>(n)) {
+        return 1.0;
+    }
+    let f = x - floor(x);
+    let a = textureLoad(caustic_map, i0, 0).r;
+    let b = textureLoad(caustic_map, i0 + vec2<i32>(1, 0), 0).r;
+    let c = textureLoad(caustic_map, i0 + vec2<i32>(0, 1), 0).r;
+    let d = textureLoad(caustic_map, i0 + vec2<i32>(1, 1), 0).r;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+/// Caustic intensity of the refracted beam `beam` at point `p` under a level surface at height
+/// `surface_y`. The map holds the pattern at the receiver depth only, so it is read where the beam
+/// through `p` crosses the receiver, and points far above or below it see that pattern rather than
+/// their own focus.
+fn caustic_scale(p: vec3<f32>, beam: vec3<f32>, surface_y: f32) -> f32 {
+    if caustics.params.x == 0.0 {
+        return 1.0;
+    }
+    let back = (surface_y - p.y - caustics.params.y) / max(-beam.y, 1e-3);
+    return caustic_at_receiver(p.xz - beam.xz * back);
+}
+
 /// Mean cosine of the Henyey-Greenstein phase function for single scattering, from Monzon et al.
 /// (2024, §4.1).
 const PHASE_G: f32 = 0.8;
@@ -153,7 +192,9 @@ fn henyey_greenstein(cos_theta: f32) -> f32 {
 /// refracted sun into the water. On its way down it fades over the slant path `y / cos(theta)` to
 /// depth `y`. §4.1 prints that path as `y cos(theta)`, which would shorten it as the sun sinks.
 /// The sum over the ray takes evenly spaced samples, jittered per pixel, and reads the sun's
-/// shadow map at each, so geometry under water casts shafts.
+/// shadow map at each, so geometry under water casts shafts. The first light also follows the
+/// caustic map, which draws the shafts below focusing waves, the god rays Papadopoulos and
+/// Papaioannou (2009, §3.4) build from the same refracted rays.
 fn single_scattering(
     start: vec3<f32>,
     direction: vec3<f32>,
@@ -194,6 +235,9 @@ fn single_scattering(
             if shadows {
                 let view_z = (view.view_from_world * vec4<f32>(p, 1.0)).z;
                 shadow = fetch_directional_shadow(i, vec4<f32>(p, 1.0), L, view_z, frag_xy);
+            }
+            if i == 0u {
+                shadow *= caustic_scale(p, beam_direction, surface_y);
             }
             sum += exp(-sigma_t * (v + depth / cos_beam)) * shadow * beam * phase;
         }

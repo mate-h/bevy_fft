@@ -43,7 +43,8 @@ use bevy::{
 
 use super::{
     WaterLodData, WaterLodGpu, WaterLodSlices, WaterMediumUniform, WaterUnderwater,
-    caustics::WaterCausticsFrame, underwater::WaterWaterlineFrame,
+    caustics::{CausticsLookup, WaterCausticsFrame},
+    underwater::WaterWaterlineFrame,
 };
 
 pub const WATER_MEDIUM_SHADER: &str = "embedded://bevy_fft/water/medium.wesl";
@@ -100,9 +101,9 @@ pub(super) fn init_water_medium_layout(
                 ),
                 (6, sampler(SamplerBindingType::Filtering)),
                 (7, uniform_buffer::<Vec4>(false)),
-                (8, texture_2d(unfiltered)),
-                (9, uniform_buffer::<Vec4>(false)),
                 (112, uniform_buffer::<WaterMediumUniform>(false)),
+                (113, texture_2d(unfiltered)),
+                (114, uniform_buffer::<CausticsLookup>(false)),
             ),
         ),
     );
@@ -226,7 +227,7 @@ pub(super) fn prepare_water_medium_pipelines(
 pub struct WaterMediumGpu {
     medium: UniformBuffer<WaterMediumUniform>,
     plane: UniformBuffer<Vec4>,
-    caustics: UniformBuffer<Vec4>,
+    caustics: UniformBuffer<CausticsLookup>,
 }
 
 pub(super) fn prepare_water_medium(
@@ -241,7 +242,7 @@ pub(super) fn prepare_water_medium(
     gpu.medium.write_buffer(&device, &queue);
     gpu.plane.set(Vec4::new(frame.plane(), 0.0, 0.0, 0.0));
     gpu.plane.write_buffer(&device, &queue);
-    gpu.caustics.set(caustics.params());
+    gpu.caustics.set(caustics.lookup());
     gpu.caustics.write_buffer(&device, &queue);
 }
 
@@ -321,9 +322,9 @@ pub(super) fn water_medium(
             (5, &foam.texture_view),
             (6, &displacement.sampler),
             (7, plane),
-            (8, &caustic_map.texture_view),
-            (9, caustic_params),
             (112, medium),
+            (113, &caustic_map.texture_view),
+            (114, caustic_params),
         )),
     );
     let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
