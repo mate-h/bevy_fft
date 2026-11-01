@@ -39,7 +39,9 @@ const OUTPUT_HEADER_BYTES: usize = 16;
 /// Byte size of one output sample in `query.wesl` (`QuerySample`).
 const OUTPUT_SAMPLE_BYTES: usize = 32;
 /// Submitted frames kept for pairing results with their positions. Covers the readback latency.
-const PENDING_FRAMES: usize = 8;
+/// Readbacks return every frame in order, but without a presented window to pace it the CPU can
+/// run a few dozen frames ahead of the GPU, and results older than this window are dropped.
+const PENDING_FRAMES: usize = 64;
 
 /// The water surface at one query point.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -123,6 +125,14 @@ impl OceanQueries {
             points: &self.results_points,
             samples: &self.results,
         })
+    }
+
+    /// Keeps the points submitted with `frame` for pairing with its readback.
+    fn push_pending(&mut self, frame: u32, time: f32, points: Vec<Vec2>) {
+        self.pending.push_back((frame, time, points));
+        while self.pending.len() > PENDING_FRAMES {
+            self.pending.pop_front();
+        }
     }
 
     fn accept_readback(&mut self, data: &[u8]) {
@@ -262,12 +272,7 @@ pub(super) fn submit_ocean_queries(
     }
 
     let points = queries.points.clone();
-    queries
-        .pending
-        .push_back((frame, time.elapsed_secs(), points));
-    while queries.pending.len() > PENDING_FRAMES {
-        queries.pending.pop_front();
-    }
+    queries.push_pending(frame, time.elapsed_secs(), points);
 
     frame_out.count = count;
     frame_out.input = queries.input.clone();
@@ -458,6 +463,23 @@ mod tests {
             &[[5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
         ));
         assert_eq!(q.results().unwrap().samples[0].height, 2.0);
+    }
+
+    #[test]
+    fn readback_pairs_when_the_gpu_runs_dozens_of_frames_behind() {
+        let mut q = queries_with_pending(1, vec![Vec2::ZERO]);
+        for frame in 2..=40 {
+            q.push_pending(frame, frame as f32, vec![Vec2::splat(frame as f32)]);
+        }
+        q.accept_readback(&readback_bytes(
+            10,
+            &[[3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+        ));
+        let r = q
+            .results()
+            .expect("a readback 30 frames late must still pair");
+        assert_eq!(r.frame, 10);
+        assert_eq!(r.points, &[Vec2::splat(10.0)]);
     }
 
     #[test]
