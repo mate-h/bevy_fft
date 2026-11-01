@@ -22,6 +22,7 @@
 //! Sampling helpers for WESL live in `bevy_fft::water::lod`.
 
 mod blend;
+mod caustics;
 mod foam;
 mod foam_texture;
 mod lod_data;
@@ -33,6 +34,9 @@ mod surface;
 mod underwater;
 
 pub use blend::WaterLodScratch;
+pub use caustics::{
+    WATER_CAUSTICS_FORMAT, WATER_CAUSTICS_SHADER, WaterCaustics, WaterCausticsSettings,
+};
 pub use foam::{
     WATER_FOAM_SHADER, WATER_FOAM_STATE_FORMAT, WaterFoamFrame, WaterFoamParams, WaterFoamSettings,
 };
@@ -92,6 +96,7 @@ impl Plugin for WaterPlugin {
         scene_depth::configure(app);
         underwater::configure(app);
         medium::configure(app);
+        caustics::configure(app);
         bevy::shader::load_shader_library!(app, "lod.wesl");
         bevy::shader::load_shader_library!(app, "optics.wesl");
         bevy::shader::load_shader_library!(app, "breaking.wesl");
@@ -189,6 +194,7 @@ impl Plugin for WaterPlugin {
             render_app.init_resource::<foam::WaterFoamPipeline>();
         }
         underwater::finish(app);
+        caustics::finish(app);
         quadtree_gpu::install_draws(app);
     }
 }
