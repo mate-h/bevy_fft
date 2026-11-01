@@ -20,6 +20,7 @@
 
 mod blend;
 mod foam;
+mod foam_texture;
 mod lod_data;
 mod quadtree;
 mod quadtree_gpu;
@@ -30,6 +31,7 @@ pub use blend::WaterLodScratch;
 pub use foam::{
     WATER_FOAM_SHADER, WATER_FOAM_STATE_FORMAT, WaterFoamFrame, WaterFoamParams, WaterFoamSettings,
 };
+pub use foam_texture::{WATER_FOAM_TEXTURE_SIZE, WaterFoamTexture, foam_texture_image};
 pub use lod_data::{
     WATER_LOD_DRIFT_FORMAT, WATER_LOD_MAX_SLICES, WATER_LOD_SURFACE_FORMAT, WaterLodData,
     WaterLodGpu, WaterLodSettings, WaterLodSlices, WaterViewer,
@@ -107,6 +109,7 @@ impl Plugin for WaterPlugin {
                 (
                     lod_data::create_water_lod_data,
                     quadtree::create_water_quadtree_fallback,
+                    foam_texture::create_water_foam_texture,
                 ),
             )
             .add_systems(Update, quadtree::build_water_quadtrees)

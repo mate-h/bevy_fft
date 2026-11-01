@@ -19,6 +19,15 @@ struct WaterOpticsUniform {
 @group(constants::MATERIAL_BIND_GROUP) @binding(106) var opaque_depth: texture_depth_2d;
 @group(constants::MATERIAL_BIND_GROUP) @binding(107) var<uniform> optics: WaterOpticsUniform;
 
+/// Reflectance of dense foam. Matches `FOAM_ALBEDO` in `surface.wesl`.
+const FOAM_ALBEDO: f32 = 0.55;
+/// Reflectance of the bubble cloud that breaking drives under active foam, before the water above
+/// it absorbs. An appearance choice, since the sources here give no measured value.
+const BUBBLE_REFLECTANCE: f32 = 0.2;
+/// Depth in meters of the bubble cloud, which sets how much the water tints its light on the way
+/// down and back up.
+const BUBBLE_DEPTH: f32 = 0.5;
+
 struct Receiver { position: vec3<f32>, valid: bool }
 struct RayHit { uv: vec2<f32>, distance: f32, confidence: f32 }
 
@@ -123,7 +132,9 @@ fn environment_radiance(N: vec3<f32>, R: vec3<f32>, perceptual_roughness: f32) -
     return radiance;
 }
 
-fn shade_water(input: PbrInput, solver_depth: f32, foam: f32) -> vec4<f32> {
+/// Water over the opaque scene. `foam` is the opacity of the foam layer on top and `bubbles` the
+/// coverage of active foam, whose bubble cloud brightens the water below it.
+fn shade_water(input: PbrInput, solver_depth: f32, foam: f32, bubbles: f32) -> vec4<f32> {
     if any(textureDimensions(opaque_depth) != textureDimensions(view_transmission_texture)) {
         return apply_pbr_lighting(input);
     }
@@ -160,11 +171,13 @@ fn shade_water(input: PbrInput, solver_depth: f32, foam: f32) -> vec4<f32> {
     var reflection_input = input;
     reflection_input.material.specular_transmission = 0.0;
     reflection_input.material.base_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-    reflection_input.material.perceptual_roughness = mix(input.material.perceptual_roughness, 0.65, foam);
     // Lighting the scattering body also yields the environment reflection as its specular part.
     // A screen-space hit replaces that reflection, estimated from one environment map sample.
     var body_input = reflection_input;
-    body_input.material.base_color = vec4<f32>(mix(optics.scattering * (1.0 - transmittance), vec3<f32>(0.85), foam), 1.0);
+    let extinction = max(optics.extinction, vec3<f32>(0.0));
+    let bubble = saturate(bubbles) * BUBBLE_REFLECTANCE * exp(-2.0 * extinction * BUBBLE_DEPTH);
+    let body = optics.scattering * (1.0 - transmittance) + bubble;
+    body_input.material.base_color = vec4<f32>(mix(body, vec3<f32>(FOAM_ALBEDO), foam), 1.0);
     var lit = apply_pbr_lighting(body_input).rgb;
     if optics.ssr_strength > 0.0 && foam < 0.95 {
         let R = reflect(-input.V, input.N);

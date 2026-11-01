@@ -75,9 +75,25 @@ struct WaterSurfaceUniform {
 /// Active foam in `.r` and residual foam in `.g`, kept by the foam sim.
 @group(constants::MATERIAL_BIND_GROUP) @binding(108) var lod_foam_state: texture_2d_array<f32>;
 
-/// Brightness of residual foam relative to active foam. Koepke (1984) measured thin foam streaks
-/// near 10 percent reflectance against 55 percent for fresh dense foam.
-const RESIDUAL_FOAM_BRIGHTNESS: f32 = 0.1 / 0.55;
+/// Tiling foam pattern whose values are evenly spread over [0, 1].
+@group(constants::MATERIAL_BIND_GROUP) @binding(109) var foam_texture: texture_2d<f32>;
+/// Linear and repeating.
+@group(constants::MATERIAL_BIND_GROUP) @binding(110) var foam_sampler: sampler;
+
+/// Reflectance of dense foam. Koepke (1984, §III) takes about 55 percent from Whitlock et al.'s
+/// laboratory foam of more than 25 bubble layers. Matches `FOAM_ALBEDO` in `optics.wesl`.
+const FOAM_ALBEDO: f32 = 0.55;
+/// Mean opacity of residual foam. Koepke (1984, §IV) measured foam streaks near 10 percent
+/// reflectance, a single bubble layer, against 55 percent for dense foam.
+const RESIDUAL_FOAM_OPACITY: f32 = 0.1 / 0.55;
+/// Meters of water covered by one repeat of the foam texture.
+const FOAM_TILE: f32 = 6.0;
+/// Scale of the second, finer foam texture sample relative to the first.
+const FOAM_DETAIL_SCALE: f32 = 0.37;
+/// Texels along each edge of the foam texture. Matches `WATER_FOAM_TEXTURE_SIZE`.
+const FOAM_TEXTURE_SIZE: f32 = 256.0;
+/// Height in meters given to opaque foam when it bends the normal. An appearance choice.
+const FOAM_RELIEF: f32 = 0.01;
 
 struct WaterQuadtreeTile {
     /// Corner X and Z in meters, edge length in meters, level.
@@ -198,19 +214,87 @@ fn water_pixel_normal(xz: vec2<f32>) -> vec3<f32> {
 /// Depth reported past the coarsest slice, deep enough that no bed shows through.
 const OPEN_WATER_DEPTH: f32 = 1000.0;
 
-/// Foam coverage in `.x` and water depth in meters in `.y` at undisplaced position `xz`. Coverage
-/// weighs residual foam by its lower brightness.
-fn water_foam_and_depth(xz: vec2<f32>) -> vec2<f32> {
+/// Active foam in `.x`, residual foam in `.y` and water depth in meters in `.z` at undisplaced
+/// position `xz`. Foam fades out past the coarsest slice.
+fn water_foam_and_depth(xz: vec2<f32>) -> vec3<f32> {
     let f = sample_lod_filtered(lod_foam, lod_sampler, water_lod, xz, 0.0);
     let state = sample_lod(lod_foam_state, water_lod, xz, 0.0);
     let c = lod_coverage(water_lod, xz);
-    let foam = saturate(state.r + state.g * RESIDUAL_FOAM_BRIGHTNESS);
-    return vec2<f32>(foam * c, mix(OPEN_WATER_DEPTH, f.g, c));
+    return vec3<f32>(state.rg * c, mix(OPEN_WATER_DEPTH, f.g, c));
 }
 
-fn water_mix_foam_into_base_color(foam: f32, base_color: vec4<f32>) -> vec4<f32> {
-    let foam_mix = saturate(foam * surface.foam_intensity);
-    return vec4<f32>(mix(base_color.rgb, vec3<f32>(1.0), foam_mix), base_color.a);
+/// Foam pattern at world `xz`, evenly spread over [0, 1]. Two samples at unrelated scales and
+/// angles hide the repeat. The sum of two even values has a triangular histogram, and its
+/// distribution function flattens it again. Where the finer sample is too small to resolve,
+/// `detail_fade` hands over to the coarse sample alone, which is even by itself.
+fn water_foam_pattern(xz: vec2<f32>, detail_fade: f32) -> f32 {
+    let a = textureSampleLevel(foam_texture, foam_sampler, xz / FOAM_TILE, 0.0).r;
+    let turn = mat2x2<f32>(0.8, 0.6, -0.6, 0.8);
+    let detail_uv = turn * xz / (FOAM_TILE * FOAM_DETAIL_SCALE) + vec2<f32>(0.31, 0.17);
+    let b = textureSampleLevel(foam_texture, foam_sampler, detail_uv, 0.0).r;
+    let s = a + b;
+    let both = select(1.0 - 0.5 * (2.0 - s) * (2.0 - s), 0.5 * s * s, s < 1.0);
+    return mix(both, a, detail_fade);
+}
+
+/// One where pattern value `t` is above `1 - coverage`, with an edge `width` wide in pattern units
+/// that antialiases the boundary without moving it.
+fn water_foam_mask(t: f32, coverage: f32, width: f32) -> f32 {
+    return saturate((t - (1.0 - coverage)) / width + 0.5);
+}
+
+/// Foam opacity for pattern value `t`. Active foam takes
+/// the highest pattern values and is opaque. Residual foam takes the band below it, so it turns
+/// to lace around the active cores as it thins. Its opacity grows with depth into the band, as a
+/// thicker film holds more bubble layers.
+fn water_foam_layers(t: f32, foam: vec2<f32>, width: f32) -> f32 {
+    let total = min(foam.x + foam.y, 1.0);
+    let dense = water_foam_mask(t, foam.x, width);
+    let residual = max(water_foam_mask(t, total, width) - dense, 0.0);
+    let depth = saturate((t - (1.0 - total)) / max(foam.y, 1e-4));
+    return dense + residual * RESIDUAL_FOAM_OPACITY * (0.5 + depth);
+}
+
+struct WaterFoamSurface {
+    /// Opacity of the foam layer over the water.
+    opacity: f32,
+    /// Slope of the foam relief along X and Z.
+    slope: vec2<f32>,
+}
+
+/// Foam at undisplaced position `xz` from the sim's active and residual coverage. Foam edges are
+/// one pixel wide. Where a pixel spans several texels of a pattern sample, that sample would
+/// alias, so the finer sample drops out first and the foam then fades to its mean opacity.
+fn water_foam_surface(xz: vec2<f32>, foam: vec2<f32>) -> WaterFoamSurface {
+    var out: WaterFoamSurface;
+    let texel = FOAM_TILE / FOAM_TEXTURE_SIZE;
+    let detail_texel = texel * FOAM_DETAIL_SCALE;
+    // Geometric mean of the pixel's extent along both screen axes, so grazing views keep the lace
+    // across the view direction.
+    let footprint = sqrt(max(length(dpdx(xz)) * length(dpdy(xz)), 1e-12));
+    let detail_fade = smoothstep(1.0, 4.0, footprint / detail_texel);
+    let fade = smoothstep(1.0, 4.0, footprint / texel);
+    let step = mix(detail_texel, texel, detail_fade);
+    let t = water_foam_pattern(xz, detail_fade);
+    let width = max(fwidth(t), 1e-4);
+    let here = water_foam_layers(t, foam, width);
+    let along_x = water_foam_layers(water_foam_pattern(xz + vec2<f32>(step, 0.0), detail_fade), foam, width);
+    let along_z = water_foam_layers(water_foam_pattern(xz + vec2<f32>(0.0, step), detail_fade), foam, width);
+    let mean = foam.x + foam.y * RESIDUAL_FOAM_OPACITY;
+    out.slope = FOAM_RELIEF * (vec2<f32>(along_x, along_z) - here) / step * (1.0 - fade);
+    out.opacity = saturate(mix(here, mean, fade) * surface.foam_intensity);
+    return out;
+}
+
+/// Bends `n` by the foam relief.
+fn water_foam_normal(n: vec3<f32>, foam: WaterFoamSurface) -> vec3<f32> {
+    return normalize(n - vec3<f32>(foam.slope.x, 0.0, foam.slope.y));
+}
+
+/// Foam adds diffuse reflection over the water, as Koepke (1984, §III) treats whitecaps as
+/// isotropic reflectors. The water between the bubbles keeps its specular reflection.
+fn water_mix_foam_into_material(foam: f32, base_color: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(mix(base_color.rgb, vec3<f32>(FOAM_ALBEDO), foam), base_color.a);
 }
 
 /// True where `dry_depth` is set and the water is shallower, so the terrain below is drawn instead.
@@ -315,7 +399,8 @@ fn water_flat_xz(in: FragVertexOutput) -> vec2<f32> {
 fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     let xz = water_flat_xz(in);
     let foam_depth = water_foam_and_depth(xz);
-    if water_is_dry(foam_depth.y) {
+    let foam = water_foam_surface(xz, foam_depth.xy);
+    if water_is_dry(foam_depth.z) {
         discard;
     }
     var pbr_input = pbr_input_from_standard_material(in, is_front);
@@ -326,14 +411,14 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     );
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
-    let n_world = water_pixel_normal(xz);
+    let n_world = water_foam_normal(water_pixel_normal(xz), foam);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
-    pbr_input.material.base_color = water_mix_foam_into_base_color(foam_depth.x, pbr_input.material.base_color);
+    pbr_input.material.base_color = water_mix_foam_into_material(foam.opacity, pbr_input.material.base_color);
     var out: FragmentOutput;
 @if(VIEW_TRANSMISSION_TEXTURE) {
     if optics.enabled != 0u {
-        out.color = shade_water(pbr_input, foam_depth.y, clamp(foam_depth.x * surface.foam_intensity, 0.0, 1.0));
+        out.color = shade_water(pbr_input, foam_depth.z, foam.opacity, foam_depth.x);
         out.color = main_pass_post_lighting_processing(pbr_input, out.color);
         return out;
     }
@@ -352,7 +437,7 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
 fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     let xz = water_flat_xz(in);
     let foam_depth = water_foam_and_depth(xz);
-    if water_is_dry(foam_depth.y) {
+    if water_is_dry(foam_depth.z) {
         discard;
     }
 @if(!NORMAL_PREPASS_OR_DEFERRED_PREPASS) {
@@ -369,10 +454,11 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     );
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
-    let n_world = water_pixel_normal(xz);
+    let foam = water_foam_surface(xz, foam_depth.xy);
+    let n_world = water_foam_normal(water_pixel_normal(xz), foam);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
-    pbr_input.material.base_color = water_mix_foam_into_base_color(foam_depth.x, pbr_input.material.base_color);
+    pbr_input.material.base_color = water_mix_foam_into_material(foam.opacity, pbr_input.material.base_color);
     return deferred_output(in, pbr_input);
 }
 }
