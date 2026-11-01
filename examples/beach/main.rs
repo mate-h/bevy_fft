@@ -122,6 +122,13 @@ fn main() {
             slice_count: 12,
             ..default()
         })
+        // Caustics on the shallow bed around the viewer, focused at a typical depth of the surf.
+        .insert_resource(WaterCausticsSettings {
+            enabled: true,
+            slice: 3,
+            receiver_depth: 1.5,
+            ..default()
+        })
         .add_plugins((
             screenshot::default_plugins(),
             FreeCameraPlugin,
@@ -496,6 +503,7 @@ fn pointer_to_sim_space(
 fn beach_panel(
     mut contexts: EguiContexts,
     mut controller: ResMut<ShallowWaterController>,
+    mut caustics: ResMut<WaterCausticsSettings>,
     mut ground_materials: ResMut<Assets<KauaiGroundMaterial>>,
     mut water_materials: ResMut<Assets<WaterSurfaceMaterial>>,
 ) {
@@ -562,6 +570,10 @@ fn beach_panel(
                 water_materials.get_mut(id).unwrap().extension.optics = optics;
             }
         }
+        ui.checkbox(&mut caustics.enabled, "Caustics");
+        ui.add(
+            egui::Slider::new(&mut caustics.receiver_depth, 0.25..=8.0).text("Caustic depth (m)"),
+        );
         if ui.button("Reset").clicked() {
             controller.sim_apply_serial = controller.sim_apply_serial.wrapping_add(1);
         }

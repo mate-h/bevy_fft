@@ -1,6 +1,6 @@
 // Terrain-aware optical composition over the opaque scene, in exposed linear HDR.
 import bevy_pbr::render::mesh_view_bindings::{view, view_transmission_texture, view_transmission_sampler};
-import bevy_fft::water::underside::environment_radiance;
+import bevy_fft::water::underside::{caustic_lighting, downwelling_irradiance, environment_radiance};
 import bevy_pbr::render::pbr_types::PbrInput;
 import bevy_pbr::render::pbr_functions::apply_pbr_lighting;
 import bevy_pbr::render::view_transformations::position_ndc_to_world;
@@ -28,7 +28,7 @@ const BUBBLE_REFLECTANCE: f32 = 0.2;
 const BUBBLE_DEPTH: f32 = 0.5;
 
 struct Receiver { position: vec3<f32>, valid: bool }
-struct RayHit { uv: vec2<f32>, distance: f32, confidence: f32 }
+struct RayHit { uv: vec2<f32>, distance: f32, confidence: f32, position: vec3<f32> }
 
 fn receiver_at(uv: vec2<f32>) -> Receiver {
     var result: Receiver;
@@ -95,6 +95,7 @@ fn trace_scene(origin: vec3<f32>, direction: vec3<f32>, limit: f32, reflection: 
             if !reflection && hit.position.y > origin.y - 0.001 { return result; }
             let edge = min(min(hit_uv.x, 1.0 - hit_uv.x), min(hit_uv.y, 1.0 - hit_uv.y));
             result.uv = hit_uv;
+            result.position = hit.position;
             result.distance = length(hit.position - origin);
             result.confidence = smoothstep(0.0, 0.04, edge);
             return result;
@@ -109,8 +110,9 @@ fn scene_color(uv: vec2<f32>) -> vec3<f32> {
 }
 
 /// Water over the opaque scene. `foam` is the opacity of the foam layer on top and `bubbles` the
-/// coverage of active foam, whose bubble cloud brightens the water below it.
-fn shade_water(input: PbrInput, solver_depth: f32, foam: f32, bubbles: f32) -> vec4<f32> {
+/// coverage of active foam, whose bubble cloud brightens the water below it. `surface_y` is the
+/// height of the undisplaced surface, under which the caustic map lights the bed.
+fn shade_water(input: PbrInput, solver_depth: f32, foam: f32, bubbles: f32, surface_y: f32) -> vec4<f32> {
     if any(textureDimensions(opaque_depth) != textureDimensions(view_transmission_texture)) {
         return apply_pbr_lighting(input);
     }
@@ -128,7 +130,14 @@ fn shade_water(input: PbrInput, solver_depth: f32, foam: f32, bubbles: f32) -> v
     let wet_width = max(fwidth(solver_depth), 0.0001);
     let coverage = smoothstep(0.0, contact_width, path) * smoothstep(0.0, wet_width, solver_depth);
     if solver_depth <= 0.0 || coverage <= 0.0 { discard; }
+    // The scene was lit by the sun as if no water were above it, so the bed takes the caustic
+    // pattern of the sun's refracted beam on its share of the light.
+    let e0 = downwelling_irradiance();
     var bottom = background;
+    if receiver.valid {
+        bottom *= caustic_lighting(receiver.position, e0, surface_y);
+    }
+    let direct = bottom;
     var refraction_confidence = 0.0;
     let thin_fade = smoothstep(0.0, 0.3, min(column, solver_depth));
     if receiver.valid && optics.refraction_strength > 0.0 && thin_fade > 0.0 {
@@ -137,7 +146,8 @@ fn shade_water(input: PbrInput, solver_depth: f32, foam: f32, bubbles: f32) -> v
         refraction_confidence = hit.confidence;
         let weight = clamp(optics.refraction_strength, 0.0, 1.0) * thin_fade * hit.confidence;
         if weight > 0.0 {
-            bottom = mix(background, scene_color(hit.uv), weight);
+            let refracted = scene_color(hit.uv) * caustic_lighting(hit.position, e0, surface_y);
+            bottom = mix(direct, refracted, weight);
             path = mix(path, hit.distance, weight);
         }
     }

@@ -464,3 +464,139 @@ fn light_shafts_follow_the_caustics() {
         "shaft contrast {measured} against {expected}"
     );
 }
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn caustics_light_a_bed_seen_from_above() {
+    const SIZE: u32 = 256;
+    const VIEW: f32 = 16.0;
+    let depth = 0.5 * focal_depth();
+    let mut app = caustics_app();
+    let mut image = Image::new_target_texture(SIZE, SIZE, TextureFormat::Rgba16Float, None);
+    image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
+    let target = app.world_mut().resource_mut::<Assets<Image>>().add(image);
+    app.world_mut().spawn((
+        Camera3d::default(),
+        WaterTransmission,
+        Hdr,
+        Msaa::Off,
+        Tonemapping::None,
+        DebandDither::Disabled,
+        Exposure { ev100: 0.0 },
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: ScalingMode::Fixed {
+                width: VIEW,
+                height: VIEW,
+            },
+            ..OrthographicProjection::default_3d()
+        }),
+        Transform::from_xyz(0.0, 10.0, 0.0).looking_to(Vec3::NEG_Y, Vec3::Z),
+        RenderTarget::Image(ImageRenderTarget {
+            handle: target.clone(),
+            scale_factor: 1.0,
+        }),
+    ));
+    let (surface_mesh, plate_mesh) = {
+        let mut assets = app.world_mut().resource_mut::<Assets<Mesh>>();
+        (
+            assets.add(Plane3d::default().mesh().size(32.0, 32.0)),
+            assets.add(Plane3d::default().mesh().size(40.0, 40.0)),
+        )
+    };
+    // Clear water with no reflectance and no refraction, so each pixel shows the plate straight
+    // below it, lit by the sun alone.
+    let surface_material = app
+        .world_mut()
+        .resource_mut::<Assets<WaterSurfaceMaterial>>()
+        .add(WaterSurfaceMaterial {
+            base: StandardMaterial {
+                base_color: Color::WHITE,
+                specular_transmission: 1.0,
+                reflectance: 0.0,
+                ior: 1.0,
+                opaque_render_method: bevy::material::OpaqueRendererMethod::Forward,
+                ..default()
+            },
+            extension: WaterSurfaceExtension {
+                optics: WaterOpticsUniform {
+                    enabled: 1,
+                    extinction: Vec3::ZERO,
+                    scattering: Vec3::ZERO,
+                    refraction_strength: 0.0,
+                    ssr_strength: 0.0,
+                    contact_fade: 0.001,
+                    ..default()
+                },
+                ..default()
+            },
+        });
+    app.world_mut().spawn((
+        Mesh3d(surface_mesh),
+        MeshMaterial3d(surface_material),
+        WaterSurfaceTag,
+        NotShadowCaster,
+    ));
+    let plate_material = app
+        .world_mut()
+        .resource_mut::<Assets<StandardMaterial>>()
+        .add(StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 1.0,
+            reflectance: 0.0,
+            ..default()
+        });
+    app.world_mut().spawn((
+        Mesh3d(plate_mesh),
+        MeshMaterial3d(plate_material),
+        Transform::from_xyz(0.0, -depth, 0.0),
+    ));
+    step(&mut app);
+    set_sinusoid(&mut app);
+    // The water column reaches past the plate.
+    let foam = app.world().resource::<WaterLodData>().foam.clone();
+    {
+        let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+        let mut image = images.get_mut(&foam).unwrap();
+        for texel in image.data.as_mut().unwrap().chunks_exact_mut(8) {
+            texel[2..4].copy_from_slice(&half_bits(1000.0).to_le_bytes());
+        }
+    }
+    observe_into_capture(&mut app, Readback::texture(target));
+    let red = |data: Vec<u8>| -> Vec<f32> {
+        data.chunks_exact(8)
+            .map(|p| half(u16::from_le_bytes([p[0], p[1]])))
+            .collect()
+    };
+    let with = red(capture(&mut app));
+    app.world_mut()
+        .resource_mut::<WaterCausticsSettings>()
+        .enabled = false;
+    let without = red(capture(&mut app));
+
+    let pixel = VIEW / SIZE as f32;
+    let sum = |image: &[f32], c: u32| {
+        (SIZE / 2 - 8..SIZE / 2 + 8)
+            .map(|r| image[(r * SIZE + c) as usize])
+            .sum::<f32>()
+    };
+    // The sun is the only light, so the plate's brightness scales by the caustic intensity.
+    let ratio =
+        |c: u32| (sum(&with, c - 1) + sum(&with, c)) / (sum(&without, c - 1) + sum(&without, c));
+    let crest = ratio(SIZE / 2);
+    let trough = ratio(SIZE / 2 + (2.0 / pixel) as u32);
+    let expected_crest = expected_intensity(0.125, depth);
+    let expected_trough = expected_intensity(2.125, depth);
+    eprintln!(
+        "bed from above: crest {crest} against {expected_crest}, trough {trough} against {expected_trough}, plain {}",
+        sum(&without, SIZE / 2) / 16.0
+    );
+    assert!(sum(&without, SIZE / 2) > 0.0, "plate must be lit");
+    assert!(
+        (crest / expected_crest - 1.0).abs() < 0.03,
+        "crest {crest} against {expected_crest}"
+    );
+    assert!(
+        (trough / expected_trough - 1.0).abs() < 0.03,
+        "trough {trough} against {expected_trough}"
+    );
+}

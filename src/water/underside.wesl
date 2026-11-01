@@ -169,6 +169,26 @@ fn caustic_scale(p: vec3<f32>, beam: vec3<f32>, surface_y: f32) -> f32 {
     return caustic_at_receiver(p.xz - beam.xz * back);
 }
 
+/// Scale on the light reaching scene point `p` under a level surface at height `surface_y` from
+/// the caustic map, along the first directional light's refracted beam. Only the sun's share of the
+/// downwelling irradiance `e0` follows the map, and points above the surface keep their light.
+fn caustic_lighting(p: vec3<f32>, e0: vec3<f32>, surface_y: f32) -> vec3<f32> {
+    if lights.n_directional_lights == 0u || caustics.params.x == 0.0 || p.y >= surface_y {
+        return vec3<f32>(1.0);
+    }
+    let light = &lights.directional_lights[0];
+    let L = (*light).direction_to_light.xyz;
+    if L.y <= 0.0 {
+        return vec3<f32>(1.0);
+    }
+    let eta = 1.0 / medium.ior;
+    let beam = refract(-L, vec3<f32>(0.0, 1.0, 0.0), eta);
+    let intensity = caustic_scale(p, beam, surface_y);
+    let sun = (*light).color.rgb * L.y * (1.0 - fresnel_dielectric(L.y, eta));
+    let share = select(sun / e0, vec3<f32>(0.0), e0 <= vec3<f32>(0.0));
+    return 1.0 + (intensity - 1.0) * saturate(share);
+}
+
 /// Mean cosine of the Henyey-Greenstein phase function for single scattering, from Monzon et al.
 /// (2024, §4.1).
 const PHASE_G: f32 = 0.8;

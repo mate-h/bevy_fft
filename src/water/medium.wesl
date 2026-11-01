@@ -13,8 +13,7 @@ import bevy_fft::water::lod::{WaterLodSlices, displaced_height, lod_coverage, sa
 import bevy_fft::water::underside::{
     MEDIUM_MAX_PATH,
     downwelling_irradiance,
-    caustic_scale,
-    fresnel_dielectric,
+    caustic_lighting,
     medium,
     medium_multiple_scattering,
     single_scattering,
@@ -48,26 +47,6 @@ fn water_column(xz: vec2<f32>) -> f32 {
     return mix(OPEN_WATER_DEPTH, sample_lod_filtered(lod_foam, lod_sampler, lod, xz, 0.0).g, c);
 }
 
-/// Scale on the light reaching scene point `p` from the caustic map, along the first directional
-/// light's beam refracted at a level surface. Only the sun's share of the downwelling irradiance
-/// `e0` follows the map.
-fn caustic_lighting(p: vec3<f32>, e0: vec3<f32>) -> vec3<f32> {
-    if lights.n_directional_lights == 0u {
-        return vec3<f32>(1.0);
-    }
-    let light = &lights.directional_lights[0];
-    let L = (*light).direction_to_light.xyz;
-    if L.y <= 0.0 {
-        return vec3<f32>(1.0);
-    }
-    let eta = 1.0 / medium.ior;
-    let beam = refract(-L, vec3<f32>(0.0, 1.0, 0.0), eta);
-    let intensity = caustic_scale(p, beam, water_plane.x);
-    let sun = (*light).color.rgb * L.y * (1.0 - fresnel_dielectric(L.y, eta));
-    let share = select(sun / e0, vec3<f32>(0.0), e0 <= vec3<f32>(0.0));
-    return 1.0 + (intensity - 1.0) * saturate(share);
-}
-
 @fragment
 fn water_medium(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(in.position.xy);
@@ -96,7 +75,7 @@ fn water_medium(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         }
         path = distance(near, far);
         lighting = exp(-max(medium.diffuse_attenuation, vec3<f32>(0.0)) * (h - far.y))
-            * caustic_lighting(far, e0);
+            * caustic_lighting(far, e0, water_plane.x);
     } else if descent < 0.0 {
         // A ray that rises without meeting the surface mesh stops at the surface.
         path = depth_near / max(-descent, 1e-3);

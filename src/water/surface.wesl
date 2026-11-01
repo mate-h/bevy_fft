@@ -530,7 +530,8 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     }
 @if(VIEW_TRANSMISSION_TEXTURE) {
     if optics.enabled != 0u {
-        out.color = shade_water(pbr_input, foam_depth.z, foam.opacity, foam_depth.x);
+        let surface_y = in.world_position.y - water_sample(xz, 0.0).b;
+        out.color = shade_water(pbr_input, foam_depth.z, foam.opacity, foam_depth.x, surface_y);
         out.color = main_pass_post_lighting_processing(pbr_input, out.color);
         return out;
     }
