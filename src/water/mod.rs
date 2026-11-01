@@ -17,7 +17,7 @@
 //! readers such as height queries run last.
 //!
 //! [`WaterUnderwater`] on the viewer adds a waterline mask, [`WaterWaterline`], that tells which
-//! pixels look out from under the water.
+//! pixels look out from under the water, and fills them with the medium of [`WaterMedium`].
 //!
 //! Sampling helpers for WESL live in `bevy_fft::water::lod`.
 
@@ -25,6 +25,7 @@ mod blend;
 mod foam;
 mod foam_texture;
 mod lod_data;
+mod medium;
 mod quadtree;
 mod quadtree_gpu;
 mod scene_depth;
@@ -40,6 +41,7 @@ pub use lod_data::{
     WATER_LOD_DRIFT_FORMAT, WATER_LOD_MAX_SLICES, WATER_LOD_SURFACE_FORMAT, WaterLodData,
     WaterLodGpu, WaterLodSettings, WaterLodSlices, WaterViewer,
 };
+pub use medium::{WATER_MEDIUM_SHADER, WaterMedium};
 pub use quadtree::{
     WaterQuadtree, WaterQuadtreeBuffer, WaterQuadtreeFallback, WaterQuadtreeStats,
     WaterQuadtreeTile,
@@ -89,6 +91,7 @@ impl Plugin for WaterPlugin {
     fn build(&self, app: &mut App) {
         scene_depth::configure(app);
         underwater::configure(app);
+        medium::configure(app);
         bevy::shader::load_shader_library!(app, "lod.wesl");
         bevy::shader::load_shader_library!(app, "optics.wesl");
         bevy::shader::load_shader_library!(app, "breaking.wesl");

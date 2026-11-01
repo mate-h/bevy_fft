@@ -81,6 +81,7 @@ fn underside_app(medium: WaterMediumUniform) -> App {
         slice_count: 4,
         base_texel_size: 1.0,
     })
+    .insert_resource(WaterMedium(medium))
     .insert_resource(bevy::render::error_handler::RenderErrorHandler(
         |error, _, _| {
             panic!("GPU validation failed: {error:?}");
@@ -142,10 +143,7 @@ fn underside_app(medium: WaterMediumUniform) -> App {
                 cull_mode: None::<Face>,
                 ..default()
             },
-            extension: WaterSurfaceExtension {
-                medium,
-                ..default()
-            },
+            extension: WaterSurfaceExtension::default(),
         });
     app.world_mut()
         .spawn((Mesh3d(mesh), MeshMaterial3d(material), WaterSurfaceTag));

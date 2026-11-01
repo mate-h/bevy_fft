@@ -5,10 +5,7 @@
 // plane cuts the surface. One extra invocation measures the same height at the eye and writes it
 // to a small buffer the main world reads back.
 
-import bevy_fft::water::lod::{WaterLodSlices, lod_coverage, sample_lod_filtered};
-
-/// Fixed-point steps that undo horizontal displacement, as in the ocean height queries.
-const INVERT_STEPS: u32 = 4u;
+import bevy_fft::water::lod::{WaterLodSlices, displaced_height};
 
 struct WaterlineUniform {
     /// Maps clip space of the viewer to world space.
@@ -32,16 +29,8 @@ struct WaterlineUniform {
 
 /// Height of the displaced water surface above world `xz`, matching what pixels of the water
 /// surface material draw.
-fn surface_height(target_xz: vec2<f32>) -> f32 {
-    var xz = target_xz;
-    for (var step = 0u; step < INVERT_STEPS; step++) {
-        let c = lod_coverage(lod, xz);
-        let dx = sample_lod_filtered(lod_displacement, lod_sampler, lod, xz, 0.0).a;
-        let dz = sample_lod_filtered(lod_foam, lod_sampler, lod, xz, 0.0).b;
-        xz = target_xz - vec2<f32>(dx, dz) * c;
-    }
-    let h = sample_lod_filtered(lod_displacement, lod_sampler, lod, xz, 0.0).b * lod_coverage(lod, xz);
-    return waterline.eye.w + h;
+fn surface_height(xz: vec2<f32>) -> f32 {
+    return waterline.eye.w + displaced_height(lod_displacement, lod_foam, lod_sampler, lod, xz);
 }
 
 @compute @workgroup_size(8, 8, 1)

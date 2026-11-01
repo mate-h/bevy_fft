@@ -117,3 +117,25 @@ fn sample_lod_finest(tex: texture_2d_array<f32>, lod: WaterLodSlices, xz: vec2<f
     }
     return bilinear_clamp_layer(tex, lod_uv(lod, xz, count - 1u), count - 1u);
 }
+
+/// Fixed-point steps that undo horizontal displacement in `displaced_height`.
+const DISPLACED_HEIGHT_STEPS: u32 = 4u;
+
+/// Height of the displaced surface above world `xz`, relative to the mesh plane, as the water
+/// surface material's pixels draw it. `foam` holds horizontal displacement Z in its blue lane, and
+/// `samp` must be linear and clamp to edge.
+fn displaced_height(
+    displacement: texture_2d_array<f32>,
+    foam: texture_2d_array<f32>,
+    samp: sampler,
+    lod: WaterLodSlices,
+    target_xz: vec2<f32>,
+) -> f32 {
+    var xz = target_xz;
+    for (var step = 0u; step < DISPLACED_HEIGHT_STEPS; step++) {
+        let dx = sample_lod_filtered(displacement, samp, lod, xz, 0.0).a;
+        let dz = sample_lod_filtered(foam, samp, lod, xz, 0.0).b;
+        xz = target_xz - vec2<f32>(dx, dz) * lod_coverage(lod, xz);
+    }
+    return sample_lod_filtered(displacement, samp, lod, xz, 0.0).b * lod_coverage(lod, xz);
+}

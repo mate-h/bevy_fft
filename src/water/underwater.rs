@@ -14,12 +14,14 @@ use bevy::{
     prelude::*,
     render::{
         RenderApp,
+        extract_component::{ExtractComponent, ExtractComponentPlugin},
         extract_resource::ExtractResource,
         gpu_readback::{Readback, ReadbackComplete},
         render_asset::RenderAssets,
         render_resource::{binding_types::*, *},
         renderer::{RenderContext, RenderDevice, RenderQueue},
         storage::{GpuShaderBuffer, ShaderBuffer},
+        sync_world::MainEntity,
         texture::GpuImage,
     },
 };
@@ -31,8 +33,10 @@ pub const WATER_WATERLINE_SHADER: &str = "embedded://bevy_fft/water/waterline.we
 /// Format of [`WaterWaterline::mask`].
 pub const WATER_WATERLINE_FORMAT: TextureFormat = TextureFormat::R32Float;
 
-/// Enables the waterline mask on the water viewer. Only one active camera is measured.
-#[derive(Component, Clone, Copy, Debug, Default, Reflect)]
+/// Enables the waterline mask and the underwater medium on the water viewer. Only one active
+/// camera is measured. The medium pass samples the camera's depth buffer, so it needs `Msaa::Off`.
+#[derive(Component, Clone, Copy, Debug, Default, Reflect, ExtractComponent)]
+#[extract_app(RenderApp)]
 #[require(super::WaterViewer)]
 pub struct WaterUnderwater;
 
@@ -76,9 +80,26 @@ pub struct WaterlineUniform {
 #[extract_app(RenderApp)]
 pub struct WaterWaterlineFrame {
     enabled: bool,
+    camera: Option<MainEntity>,
     uniform: WaterlineUniform,
     mask: Handle<Image>,
     eye: Handle<ShaderBuffer>,
+}
+
+impl WaterWaterlineFrame {
+    /// The camera measured this frame.
+    pub fn camera(&self) -> Option<MainEntity> {
+        self.camera.filter(|_| self.enabled)
+    }
+
+    /// Height of the water mesh plane.
+    pub fn plane(&self) -> f32 {
+        self.uniform.eye.w
+    }
+
+    pub fn mask(&self) -> &Handle<Image> {
+        &self.mask
+    }
 }
 
 /// Marks the entity that carries the eye height [`Readback`].
@@ -129,7 +150,7 @@ pub(super) fn create_waterline(
 #[allow(clippy::type_complexity)]
 pub(super) fn update_waterline(
     mut commands: Commands,
-    cameras: Query<(&Camera, &GlobalTransform), With<WaterUnderwater>>,
+    cameras: Query<(Entity, &Camera, &GlobalTransform), With<WaterUnderwater>>,
     surfaces: Query<(&GlobalTransform, Has<WaterQuadtreeBuffer>), With<WaterSurfaceTag>>,
     readback: Query<(Entity, Has<Readback>), With<WaterlineReadback>>,
     mut waterline: ResMut<WaterWaterline>,
@@ -137,12 +158,12 @@ pub(super) fn update_waterline(
     mut images: ResMut<Assets<Image>>,
 ) {
     frame.enabled = false;
-    let camera = cameras.iter().find(|(camera, _)| camera.is_active);
-    let size = camera.and_then(|(camera, _)| camera.physical_target_size());
+    let camera = cameras.iter().find(|(_, camera, _)| camera.is_active);
+    let size = camera.and_then(|(_, camera, _)| camera.physical_target_size());
     let Ok((readback_entity, has_readback)) = readback.single() else {
         return;
     };
-    let (Some((camera, transform)), Some(size)) = (camera, size) else {
+    let (Some((entity, camera, transform)), Some(size)) = (camera, size) else {
         if has_readback {
             commands.entity(readback_entity).remove::<Readback>();
         }
@@ -169,6 +190,7 @@ pub(super) fn update_waterline(
     );
     let eye = transform.translation();
     frame.enabled = true;
+    frame.camera = Some(entity.into());
     frame.uniform = WaterlineUniform {
         world_from_clip: transform.to_matrix() * camera.clip_from_view().inverse(),
         eye: eye.extend(plane),
@@ -305,6 +327,7 @@ pub(super) fn run_waterline(
 pub(super) fn configure(app: &mut App) {
     bevy::asset::embedded_asset!(app, "waterline.wesl");
     app.register_type::<WaterUnderwater>()
+        .add_plugins(ExtractComponentPlugin::<WaterUnderwater>::default())
         .init_resource::<WaterWaterlineFrame>()
         .add_plugins(bevy::render::extract_resource::ExtractResourcePlugin::<
             WaterWaterlineFrame,

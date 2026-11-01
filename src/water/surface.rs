@@ -155,7 +155,7 @@ impl JerlovWaterType {
 /// surface. RGB lanes hold 625, 550, and 450 nm. Monzon et al. (2024, §4.2) light the medium with
 /// a closed-form multiple-scattering term that takes the downwelling irradiance to fall as
 /// `exp(-K_d y)` with depth `y`.
-#[derive(Clone, Copy, Debug, ShaderType, Reflect)]
+#[derive(Clone, Copy, Debug, PartialEq, ShaderType, Reflect)]
 pub struct WaterMediumUniform {
     /// Absorption coefficient σ_a in inverse meters.
     pub absorption: Vec3,
@@ -203,7 +203,7 @@ impl WaterMediumUniform {
 /// shallow water, and dispersive patches together. The surface samples by world position, so any
 /// mesh layout works and the water stays anchored when the mesh moves. [`super::WaterPlugin`]
 /// keeps `lod`, `lod_displacement`, `lod_foam`, `lod_foam_state`, and `lod_drift` in sync with the
-/// LOD data each frame, sets `foam_texture` and the time, and points `quadtree` at the entity's [`WaterQuadtreeBuffer`] or at
+/// LOD data each frame, sets `foam_texture`, the time, and the medium, and points `quadtree` at the entity's [`WaterQuadtreeBuffer`] or at
 /// the shared fallback.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
 pub struct WaterSurfaceExtension {
@@ -234,9 +234,10 @@ pub struct WaterSurfaceExtension {
     #[texture(109)]
     #[sampler(110)]
     pub foam_texture: Handle<Image>,
-    /// The water body seen from below the surface. The underside draws only when the material
-    /// leaves back faces unculled and renders in the forward pass, since the deferred G-buffer
-    /// pass has no lights or sky to shade it with.
+    /// The water body seen from below the surface. [`super::WaterPlugin`] copies it from
+    /// [`super::WaterMedium`] each frame. The underside draws only when the material leaves back
+    /// faces unculled and renders in the forward pass, since the deferred G-buffer pass has no
+    /// lights or sky to shade it with.
     #[uniform(112)]
     pub medium: WaterMediumUniform,
 }
@@ -299,11 +300,13 @@ pub struct WaterSurfaceTag;
 
 /// Copies the current slice placement and texture handles from the [`WaterLodData`] into every
 /// water surface material, along with the tile list it draws.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn sync_water_surface_lod(
     lod: Option<Res<WaterLodData>>,
     fallback: Option<Res<WaterQuadtreeFallback>>,
     scene_depth: Option<Res<super::scene_depth::WaterSceneDepth>>,
     foam_texture: Option<Res<super::WaterFoamTexture>>,
+    medium: Option<Res<super::WaterMedium>>,
     time: Res<Time>,
     surface: Query<
         (
@@ -325,6 +328,9 @@ pub(super) fn sync_water_surface_lod(
             }
             mat.extension.lod = lod.slices;
             mat.extension.settings.time = time.elapsed_secs_wrapped();
+            if let Some(medium) = &medium {
+                mat.extension.medium = medium.0;
+            }
             if let Some(scene_depth) = &scene_depth
                 && mat.extension.opaque_depth.as_ref() != Some(&scene_depth.image)
             {
