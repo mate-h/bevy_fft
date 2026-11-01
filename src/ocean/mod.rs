@@ -6,10 +6,11 @@
 //!
 //! Spawn one [`crate::fft::FftSource`] with [`OceanSimSettings`] per cascade, each with its own tile
 //! size, wavenumber band, and [`OceanCascade`] slot. One inverse FFT per cascade writes height in B,
-//! slopes in R and G, and horizontal displacement X in W. [`OceanFoamMask`] marks where waves
-//! break this frame, for the water foam sim, plus horizontal displacement Z, which the FFT returns
-//! in the imaginary half of the same lane. Each frame the cascades are summed into the shared
-//! [`crate::water::WaterLodData`] slices, shaped by the [`OceanSurfaceSettings`] resource.
+//! slopes in R and G, and horizontal displacement X in W. [`OceanFoamMask`] holds horizontal
+//! displacement Z, which the FFT returns in the imaginary half of the same lane. Each frame the
+//! cascades are summed into the shared [`crate::water::WaterLodData`] slices, shaped by the
+//! [`OceanSurfaceSettings`] resource. The writer also marks where the summed waves break, for the
+//! water foam sim.
 //! [`crate::water::WaterSurfaceMaterial`] and [`OceanQueries`] read only those slices, so other
 //! solvers that write there show up in the same surface. Put the material on an [`OceanClipmap`]
 //! for a camera-following mesh, on a [`crate::water::WaterQuadtree`] for a frustum-culled mesh
@@ -141,11 +142,18 @@ pub struct OceanSurfaceSettings {
     /// Typical range about 0 to 2.
     pub choppiness: f32,
     /// Waves break where the smaller eigenvalue of the horizontal displacement Jacobian drops
-    /// below this value, which is where the surface compresses toward folding. Typical 0.6 to 1.0.
-    /// How long the foam lasts is set by [`crate::water::WaterFoamSettings`].
+    /// below this value, which is where the surface compresses toward folding. The default and
+    /// [`Self::foam_falloff`] put mean whitecap coverage within a factor of two of Monahan and
+    /// Woolf's (1989) fits at 5, 10 and 15 m/s with the default choppiness and
+    /// [`crate::water::WaterFoamSettings`]. Coverage is steep in this value, about tenfold per
+    /// 0.01, and changing the choppiness moves the calibrated value.
     pub foam_cutoff: f32,
     /// Width of the transition in eigenvalue units. Larger values give softer edges.
     pub foam_falloff: f32,
+    /// Only cascades whose band reaches waves longer than this many meters count toward breaking.
+    /// The Jacobian of the short end of the spectrum hardly changes with the wind, so including it
+    /// makes whitecap coverage nearly independent of wind speed.
+    pub breaking_wavelength: f32,
 }
 
 impl Default for OceanSurfaceSettings {
@@ -153,8 +161,9 @@ impl Default for OceanSurfaceSettings {
         Self {
             amplitude: 1.0,
             choppiness: 0.35,
-            foam_cutoff: 0.88,
-            foam_falloff: 0.22,
+            foam_cutoff: 0.925,
+            foam_falloff: 0.02,
+            breaking_wavelength: 2.0,
         }
     }
 }

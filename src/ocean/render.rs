@@ -161,14 +161,6 @@ pub struct OceanFoamUniform {
     pub tile_size: f32,
     /// [`FftSource::spatial_display_gain`], which the resolve applies to the real lanes only.
     pub normalization: f32,
-    pub amplitude: f32,
-    pub choppiness: f32,
-    pub foam_cutoff: f32,
-    pub foam_falloff: f32,
-    pub _foam_uniform_pad1: f32,
-    pub _foam_uniform_pad2: f32,
-    pub _foam_uniform_pad3: f32,
-    pub _foam_uniform_pad4: f32,
 }
 
 impl SyncComponent<RenderApp> for OceanFoamUniform {
@@ -187,8 +179,8 @@ impl ExtractComponent<RenderApp> for OceanFoamUniform {
     }
 }
 
-/// Ping-pong targets written after [`crate::fft::FftNode::ResolveOutputs`]: breaking intensity in
-/// R, horizontal displacement Z in G, and last frame's Z in B.
+/// Ping-pong targets written after [`crate::fft::FftNode::ResolveOutputs`]: horizontal
+/// displacement Z in G and last frame's Z in B. R and A are unused.
 ///
 /// The material samples whichever half was written last; see [`sync_ocean_foam_display`] and [`OceanFoamPhase`].
 #[derive(Component, Clone, Reflect)]
@@ -471,16 +463,11 @@ pub(super) fn sync_ocean_foam_uniform(
         &FftSource,
         &mut OceanFoamUniform,
     )>,
-    settings: Res<crate::ocean::OceanSurfaceSettings>,
 ) {
     for (s, source, mut u) in &mut q {
         u.texture_size = s.texture_size;
         u.tile_size = s.tile_size;
         u.normalization = source.spatial_display_gain;
-        u.amplitude = settings.amplitude;
-        u.choppiness = settings.choppiness;
-        u.foam_cutoff = settings.foam_cutoff;
-        u.foam_falloff = settings.foam_falloff;
     }
 }
 

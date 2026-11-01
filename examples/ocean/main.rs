@@ -531,6 +531,11 @@ fn ocean_egui_panel(
         ui.add(egui::Slider::new(&mut shaping.foam_cutoff, 0.2..=1.2).text("Foam cutoff"));
         ui.add(egui::Slider::new(&mut shaping.foam_falloff, 0.02..=0.8).text("Foam falloff"));
         ui.add(
+            egui::Slider::new(&mut shaping.breaking_wavelength, 0.1..=50.0)
+                .logarithmic(true)
+                .text("Shortest breaking wave (m)"),
+        );
+        ui.add(
             egui::Slider::new(&mut foam.active_half_life, 0.05..=4.0)
                 .logarithmic(true)
                 .text("Active foam half-life (s)"),

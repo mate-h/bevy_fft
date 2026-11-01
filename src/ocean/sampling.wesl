@@ -29,6 +29,26 @@ fn bilinear_taps(tex: texture_2d<f32>, t: WrapTaps) -> vec4<f32> {
     return mix(mix(a, b, t.f.x), mix(c, d, t.f.x), t.f.y);
 }
 
+/// Bilinear fetch with the interpolant's derivatives along texture X and Y, in units per texel.
+struct BilinearSample {
+    value: vec4<f32>,
+    d_dx: vec4<f32>,
+    d_dy: vec4<f32>,
+}
+
+/// Bilinear fetch at precomputed taps, with derivatives from the same four texels.
+fn bilinear_taps_with_gradient(tex: texture_2d<f32>, t: WrapTaps) -> BilinearSample {
+    let a = textureLoad(tex, t.i0, 0);
+    let b = textureLoad(tex, vec2<i32>(t.i1.x, t.i0.y), 0);
+    let c = textureLoad(tex, vec2<i32>(t.i0.x, t.i1.y), 0);
+    let d = textureLoad(tex, t.i1, 0);
+    return BilinearSample(
+        mix(mix(a, b, t.f.x), mix(c, d, t.f.x), t.f.y),
+        mix(b - a, d - c, t.f.y),
+        mix(c - a, d - b, t.f.x),
+    );
+}
+
 /// Bilinear fetch with periodic wrap. `uv` is in tiles, so `uv = 1` is one full period.
 fn bilinear_wrap(tex: texture_2d<f32>, uv: vec2<f32>) -> vec4<f32> {
     return bilinear_taps(tex, wrap_taps(vec2<i32>(textureDimensions(tex, 0)), uv));

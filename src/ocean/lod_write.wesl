@@ -9,13 +9,27 @@
 // Linear waves move each surface particle with the time derivative of its displacement, so this is
 // the orbital velocity. It uses the physical displacement, without the artistic choppiness factor.
 // Drift is the cascades' summed Stokes drift, which the CPU integrates from the spectrum.
+//
+// Breaking follows Gilligan (Tessendorf 2017, §5.3.3, with the eigenvalues of course notes §4.6).
+// A texel breaks where the smaller eigenvalue of the horizontal displacement Jacobian drops below
+// `foam_cutoff`. The Jacobian sums the cascades marked in `cascade_breaking`, taken from the
+// derivatives of each cascade's bilinear fetch, as Dupuy and Bruneton (2012, Eq. 4) sum their wave
+// patterns. Short waves riding on long ones then break together. Short waves alone also fold, but
+// their Jacobian barely depends on the wind, so leaving them out is what lets coverage follow the
+// wind as Monahan and Woolf (1989) measured. Breaking cascades count in every slice, also those too
+// coarse to show their waves, because foam coverage is a texel average and point samples of the
+// Jacobian keep its statistics.
 
-import bevy_fft::ocean::sampling::{WrapTaps, bilinear_taps, wrap_taps};
+import bevy_fft::ocean::sampling::{
+    BilinearSample, WrapTaps, bilinear_taps, bilinear_taps_with_gradient, wrap_taps,
+};
 import bevy_fft::water::lod::{WaterLodSlices, lod_texel_world};
 
 struct OceanLodWriteParams {
     /// World tile edge in meters for cascades 0 to 3.
     cascade_tile_sizes: vec4<f32>,
+    /// One for cascades whose waves count toward breaking, zero for the rest.
+    cascade_breaking: vec4<f32>,
     cascade_count: u32,
     amplitude: f32,
     choppiness: f32,
@@ -26,6 +40,12 @@ struct OceanLodWriteParams {
     _pad0: f32,
     /// Surface Stokes drift of all cascades in meters per second.
     stokes_drift: vec2<f32>,
+    /// Smaller Jacobian eigenvalue below which waves break.
+    foam_cutoff: f32,
+    /// Width of the breaking transition in eigenvalue units.
+    foam_falloff: f32,
+    _pad1: f32,
+    _pad2: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: OceanLodWriteParams;
@@ -47,15 +67,15 @@ struct OceanLodWriteParams {
 @group(0) @binding(16) var previous_2: texture_2d<f32>;
 @group(0) @binding(17) var previous_3: texture_2d<f32>;
 
-fn displacement_cascade(i: u32, t: WrapTaps) -> vec4<f32> {
+fn displacement_cascade(i: u32, t: WrapTaps) -> BilinearSample {
     if i == 0u {
-        return bilinear_taps(displacement_0, t);
+        return bilinear_taps_with_gradient(displacement_0, t);
     } else if i == 1u {
-        return bilinear_taps(displacement_1, t);
+        return bilinear_taps_with_gradient(displacement_1, t);
     } else if i == 2u {
-        return bilinear_taps(displacement_2, t);
+        return bilinear_taps_with_gradient(displacement_2, t);
     }
-    return bilinear_taps(displacement_3, t);
+    return bilinear_taps_with_gradient(displacement_3, t);
 }
 
 fn previous_cascade(i: u32, t: WrapTaps) -> vec4<f32> {
@@ -69,16 +89,16 @@ fn previous_cascade(i: u32, t: WrapTaps) -> vec4<f32> {
     return bilinear_taps(previous_3, t);
 }
 
-/// Foam in `.r`, horizontal displacement Z in `.g`, and last frame's displacement Z in `.b`.
-fn foam_cascade(i: u32, t: WrapTaps) -> vec4<f32> {
+/// Horizontal displacement Z in `.g` and last frame's displacement Z in `.b`.
+fn foam_cascade(i: u32, t: WrapTaps) -> BilinearSample {
     if i == 0u {
-        return bilinear_taps(foam_0, t);
+        return bilinear_taps_with_gradient(foam_0, t);
     } else if i == 1u {
-        return bilinear_taps(foam_1, t);
+        return bilinear_taps_with_gradient(foam_1, t);
     } else if i == 2u {
-        return bilinear_taps(foam_2, t);
+        return bilinear_taps_with_gradient(foam_2, t);
     }
-    return bilinear_taps(foam_3, t);
+    return bilinear_taps_with_gradient(foam_3, t);
 }
 
 /// Size of cascade `i`. The displacement, previous and foam textures of a cascade share it.
@@ -113,25 +133,35 @@ fn ocean_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var disp = vec4<f32>(0.0);
     var change = vec4<f32>(0.0);
-    var foam = 0.0;
     var dz = 0.0;
     var dz_change = 0.0;
+    // Unscaled derivatives dDx/dx, dDx/dz, dDz/dx and dDz/dz in meters per meter.
+    var jacobian = vec4<f32>(0.0);
     let count = min(params.cascade_count, 4u);
     for (var i = 0u; i < count; i++) {
-        let taps = wrap_taps(cascade_dims(i), xz / params.cascade_tile_sizes[i]);
+        let dims = cascade_dims(i);
+        let taps = wrap_taps(dims, xz / params.cascade_tile_sizes[i]);
         let w = cascade_weight(i, texel);
+        let d = displacement_cascade(i, taps);
         let f = foam_cascade(i, taps);
+        let per_meter = vec2<f32>(dims) / params.cascade_tile_sizes[i];
+        let breaking = params.cascade_breaking[i];
+        jacobian += vec4<f32>(d.d_dx.a, d.d_dy.a, f.d_dx.g, f.d_dy.g) * per_meter.xyxy * breaking;
         if w > 0.0 {
-            let now = displacement_cascade(i, taps);
-            disp += now * w;
-            change += (now - previous_cascade(i, taps)) * w;
-            dz += f.g * w;
-            dz_change += (f.g - f.b) * w;
+            disp += d.value * w;
+            change += (d.value - previous_cascade(i, taps)) * w;
+            dz += f.value.g * w;
+            dz_change += (f.value.g - f.value.b) * w;
         }
-        foam = max(foam, f.r);
     }
     let amp = params.amplitude;
     let chop = amp * params.choppiness;
+    let jxx = 1.0 + chop * jacobian.x;
+    let jzz = 1.0 + chop * jacobian.w;
+    let half_trace = 0.5 * (jxx + jzz);
+    let det = jxx * jzz - chop * chop * jacobian.y * jacobian.z;
+    let lambda_min = half_trace - sqrt(max(half_trace * half_trace - det, 0.0));
+    let foam = saturate((params.foam_cutoff - lambda_min) / max(params.foam_falloff, 1e-5));
     let scaled = vec4<f32>(disp.rgb * amp, disp.a * chop);
     textureStore(displacement_out, gid.xy, slice, scaled);
     textureStore(foam_out, gid.xy, slice, vec4<f32>(foam, params.depth, dz * chop, 1.0));

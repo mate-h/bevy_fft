@@ -35,6 +35,9 @@ use crate::{
 #[derive(Clone, Copy, Default, ShaderType)]
 pub struct OceanLodWriteParams {
     pub cascade_tile_sizes: Vec4,
+    /// One for cascades whose waves count toward breaking, zero for the rest. See
+    /// [`OceanSurfaceSettings::breaking_wavelength`].
+    pub cascade_breaking: Vec4,
     pub cascade_count: u32,
     pub amplitude: f32,
     pub choppiness: f32,
@@ -46,6 +49,12 @@ pub struct OceanLodWriteParams {
     pub _pad0: f32,
     /// Surface Stokes drift of all cascades in meters per second, after amplitude shaping.
     pub stokes_drift: Vec2,
+    /// [`OceanSurfaceSettings::foam_cutoff`].
+    pub foam_cutoff: f32,
+    /// [`OceanSurfaceSettings::foam_falloff`].
+    pub foam_falloff: f32,
+    pub _pad1: f32,
+    pub _pad2: f32,
 }
 
 /// What the writer needs from the main world this frame.
@@ -94,6 +103,7 @@ pub(super) fn gather_ocean_lod_write(
                     sim.depth,
                     sim.time_scale,
                     drift.map_or(Vec2::ZERO, |d| d.0),
+                    sim.band_k_min,
                 )
             })
         })
@@ -104,9 +114,12 @@ pub(super) fn gather_ocean_lod_write(
     };
 
     let mut tiles = Vec4::ONE;
+    let mut breaking = Vec4::ZERO;
     let mut drift = Vec2::ZERO;
-    for (i, (_, tile, disp, foam, _, _, cascade_drift)) in slots.iter().enumerate() {
+    let breaking_k = std::f32::consts::TAU / settings.breaking_wavelength.max(1e-6);
+    for (i, (_, tile, disp, foam, _, _, cascade_drift, k_min)) in slots.iter().enumerate() {
         tiles[i] = *tile;
+        breaking[i] = if *k_min < breaking_k { 1.0 } else { 0.0 };
         drift += *cascade_drift;
         frame.displacement.push(disp.clone());
         frame.foam.push(foam.clone());
@@ -119,6 +132,7 @@ pub(super) fn gather_ocean_lod_write(
     let dt = time.delta_secs() * first.5;
     frame.params = OceanLodWriteParams {
         cascade_tile_sizes: tiles,
+        cascade_breaking: breaking,
         cascade_count: slots.len() as u32,
         amplitude: settings.amplitude,
         choppiness: settings.choppiness,
@@ -126,6 +140,8 @@ pub(super) fn gather_ocean_lod_write(
         inv_dt: if dt > 0.0 { dt.recip() } else { 0.0 },
         // Drift goes with the square of wave height, so it takes the height gain twice.
         stokes_drift: drift * settings.amplitude * settings.amplitude,
+        foam_cutoff: settings.foam_cutoff,
+        foam_falloff: settings.foam_falloff,
         ..default()
     };
 }
