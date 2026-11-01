@@ -53,8 +53,10 @@ pub struct OceanLodWriteParams {
     pub foam_cutoff: f32,
     /// [`OceanSurfaceSettings::foam_falloff`].
     pub foam_falloff: f32,
-    pub _pad1: f32,
-    pub _pad2: f32,
+    /// [`OceanSurfaceSettings::far_foam_cutoff`].
+    pub far_foam_cutoff: f32,
+    /// [`OceanSurfaceSettings::far_foam_texel`].
+    pub far_foam_texel: f32,
 }
 
 /// What the writer needs from the main world this frame.
@@ -64,6 +66,7 @@ pub struct OceanLodWriteFrame {
     pub(crate) params: OceanLodWriteParams,
     pub(crate) displacement: Vec<Handle<Image>>,
     pub(crate) foam: Vec<Handle<Image>>,
+    pub(crate) jacobian: Vec<Handle<Image>>,
 }
 
 #[allow(clippy::type_complexity)]
@@ -82,6 +85,7 @@ pub(super) fn gather_ocean_lod_write(
 ) {
     frame.displacement.clear();
     frame.foam.clear();
+    frame.jacobian.clear();
     frame.params.cascade_count = 0;
 
     let mut slots: Vec<_> = cascades
@@ -104,6 +108,7 @@ pub(super) fn gather_ocean_lod_write(
                     sim.time_scale,
                     drift.map_or(Vec2::ZERO, |d| d.0),
                     sim.band_k_min,
+                    mask.jacobian.clone(),
                 )
             })
         })
@@ -117,17 +122,20 @@ pub(super) fn gather_ocean_lod_write(
     let mut breaking = Vec4::ZERO;
     let mut drift = Vec2::ZERO;
     let breaking_k = std::f32::consts::TAU / settings.breaking_wavelength.max(1e-6);
-    for (i, (_, tile, disp, foam, _, _, cascade_drift, k_min)) in slots.iter().enumerate() {
+    for (i, (_, tile, disp, foam, _, _, cascade_drift, k_min, jacobian)) in slots.iter().enumerate()
+    {
         tiles[i] = *tile;
         breaking[i] = if *k_min < breaking_k { 1.0 } else { 0.0 };
         drift += *cascade_drift;
         frame.displacement.push(disp.clone());
         frame.foam.push(foam.clone());
+        frame.jacobian.push(jacobian.clone());
     }
     // Unused bindings repeat cascade 0 so the bind group is always complete.
     while frame.displacement.len() < OCEAN_MAX_CASCADES {
         frame.displacement.push(first.2.clone());
         frame.foam.push(first.3.clone());
+        frame.jacobian.push(first.8.clone());
     }
     let dt = time.delta_secs() * first.5;
     frame.params = OceanLodWriteParams {
@@ -142,6 +150,8 @@ pub(super) fn gather_ocean_lod_write(
         stokes_drift: drift * settings.amplitude * settings.amplitude,
         foam_cutoff: settings.foam_cutoff,
         foam_falloff: settings.foam_falloff,
+        far_foam_cutoff: settings.far_foam_cutoff,
+        far_foam_texel: settings.far_foam_texel,
         ..default()
     };
 }
@@ -150,6 +160,8 @@ pub(super) fn gather_ocean_lod_write(
 pub struct OceanLodWritePipeline {
     layout: BindGroupLayoutDescriptor,
     pipeline: CachedComputePipelineId,
+    /// Trilinear and repeating, for the cascades' Jacobian statistics.
+    sampler: Sampler,
 }
 
 impl FromWorld for OceanLodWritePipeline {
@@ -157,6 +169,7 @@ impl FromWorld for OceanLodWritePipeline {
         let pipeline_cache = world.resource::<PipelineCache>();
         let asset_server = world.resource::<AssetServer>();
         let tex = || texture_2d(TextureSampleType::Float { filterable: false });
+        let filtered = || texture_2d(TextureSampleType::Float { filterable: true });
         let out = |format| texture_storage_2d_array(format, StorageTextureAccess::WriteOnly);
         let entries = BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
@@ -179,9 +192,25 @@ impl FromWorld for OceanLodWritePipeline {
                 tex(),
                 tex(),
                 tex(),
+                filtered(),
+                filtered(),
+                filtered(),
+                filtered(),
+                sampler(SamplerBindingType::Filtering),
             ),
         );
         let layout = BindGroupLayoutDescriptor::new("ocean_lod_write_layout", &entries);
+        let sampler = world
+            .resource::<RenderDevice>()
+            .create_sampler(&SamplerDescriptor {
+                label: Some("ocean_jacobian_sampler"),
+                address_mode_u: AddressMode::Repeat,
+                address_mode_v: AddressMode::Repeat,
+                mag_filter: FilterMode::Linear,
+                min_filter: FilterMode::Linear,
+                mipmap_filter: MipmapFilterMode::Linear,
+                ..default()
+            });
         let pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("ocean_lod_write".into()),
             layout: vec![layout.clone()],
@@ -192,7 +221,11 @@ impl FromWorld for OceanLodWritePipeline {
             zero_initialize_workgroup_memory: false,
             constants: vec![],
         });
-        Self { layout, pipeline }
+        Self {
+            layout,
+            pipeline,
+            sampler,
+        }
     }
 }
 
@@ -241,7 +274,7 @@ pub(super) fn prepare_ocean_lod_write(
     ) else {
         return;
     };
-    let (Some(disp), Some(foam)) = (
+    let (Some(disp), Some(foam), Some(jacobian)) = (
         frame
             .displacement
             .iter()
@@ -249,6 +282,11 @@ pub(super) fn prepare_ocean_lod_write(
             .collect::<Option<Vec<_>>>(),
         frame
             .foam
+            .iter()
+            .map(|h| images.get(h).map(|g| &g.texture_view))
+            .collect::<Option<Vec<_>>>(),
+        frame
+            .jacobian
             .iter()
             .map(|h| images.get(h).map(|g| &g.texture_view))
             .collect::<Option<Vec<_>>>(),
@@ -329,6 +367,11 @@ pub(super) fn prepare_ocean_lod_write(
             &prev[1].view,
             &prev[2].view,
             &prev[3].view,
+            jacobian[0],
+            jacobian[1],
+            jacobian[2],
+            jacobian[3],
+            &pipeline.sampler,
         )),
     );
     state.group = Some(group);

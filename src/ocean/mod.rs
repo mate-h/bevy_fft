@@ -154,6 +154,17 @@ pub struct OceanSurfaceSettings {
     /// The Jacobian of the short end of the spectrum hardly changes with the wind, so including it
     /// makes whitecap coverage nearly independent of wind speed.
     pub breaking_wavelength: f32,
+    /// Breaking threshold on the Jacobian determinant in the far range, where whitecap coverage
+    /// comes from Dupuy and Bruneton's (2012) erf formula over the determinant's mean and
+    /// variance in each texel. It differs from [`Self::foam_cutoff`], which applies to the
+    /// smaller eigenvalue, and is set so the far range breaks as much as the near range where
+    /// they meet. With the defaults, far breaking stays within 0.5 to 2.6 times near breaking on
+    /// 0.5 m and 1 m texels from 5 to 15 m/s. The far range responds less to wind, so it runs
+    /// high in light wind and low in strong wind.
+    pub far_foam_cutoff: f32,
+    /// Texel width in meters of the LOD slices where the far range takes over. It is fully in
+    /// place at twice this width. Finer slices threshold the Jacobian per texel.
+    pub far_foam_texel: f32,
 }
 
 impl Default for OceanSurfaceSettings {
@@ -164,6 +175,8 @@ impl Default for OceanSurfaceSettings {
             foam_cutoff: 0.925,
             foam_falloff: 0.02,
             breaking_wavelength: 2.0,
+            far_foam_cutoff: 0.89,
+            far_foam_texel: 0.5,
         }
     }
 }

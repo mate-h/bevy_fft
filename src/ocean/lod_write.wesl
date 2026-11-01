@@ -44,8 +44,10 @@ struct OceanLodWriteParams {
     foam_cutoff: f32,
     /// Width of the breaking transition in eigenvalue units.
     foam_falloff: f32,
-    _pad1: f32,
-    _pad2: f32,
+    /// Threshold on the Jacobian determinant for far whitecaps.
+    far_foam_cutoff: f32,
+    /// Texel width where the far range takes over, fully at twice this width.
+    far_foam_texel: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: OceanLodWriteParams;
@@ -66,6 +68,33 @@ struct OceanLodWriteParams {
 @group(0) @binding(15) var previous_1: texture_2d<f32>;
 @group(0) @binding(16) var previous_2: texture_2d<f32>;
 @group(0) @binding(17) var previous_3: texture_2d<f32>;
+/// Each cascade's term of the Jacobian determinant in `.r` and its square in `.g`, with mips.
+@group(0) @binding(18) var jacobian_0: texture_2d<f32>;
+@group(0) @binding(19) var jacobian_1: texture_2d<f32>;
+@group(0) @binding(20) var jacobian_2: texture_2d<f32>;
+@group(0) @binding(21) var jacobian_3: texture_2d<f32>;
+/// Trilinear and repeating.
+@group(0) @binding(22) var jacobian_sampler: sampler;
+
+/// Mean of cascade `i`'s determinant term and of its square over a footprint `level` mips wide.
+fn jacobian_cascade(i: u32, uv: vec2<f32>, level: f32) -> vec2<f32> {
+    if i == 0u {
+        return textureSampleLevel(jacobian_0, jacobian_sampler, uv, level).rg;
+    } else if i == 1u {
+        return textureSampleLevel(jacobian_1, jacobian_sampler, uv, level).rg;
+    } else if i == 2u {
+        return textureSampleLevel(jacobian_2, jacobian_sampler, uv, level).rg;
+    }
+    return textureSampleLevel(jacobian_3, jacobian_sampler, uv, level).rg;
+}
+
+/// Error function, after Abramowitz and Stegun 7.1.26, with absolute error below 1.5e-7.
+fn erf(x: f32) -> f32 {
+    let t = 1.0 / (1.0 + 0.3275911 * abs(x));
+    let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741
+        + t * (-1.453152027 + t * 1.061405429))));
+    return sign(x) * (1.0 - poly * exp(-x * x));
+}
 
 fn displacement_cascade(i: u32, t: WrapTaps) -> BilinearSample {
     if i == 0u {
@@ -137,6 +166,11 @@ fn ocean_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     var dz_change = 0.0;
     // Unscaled derivatives dDx/dx, dDx/dz, dDz/dx and dDz/dz in meters per meter.
     var jacobian = vec4<f32>(0.0);
+    // Mean and variance of the Jacobian determinant over the texel, after Dupuy and Bruneton
+    // (2012, Eqs. 7 and 8). The cascades are independent, so the variance is the sum of each
+    // cascade's own variance.
+    var det_mean = 1.0;
+    var det_variance = 0.0;
     let count = min(params.cascade_count, 4u);
     for (var i = 0u; i < count; i++) {
         let dims = cascade_dims(i);
@@ -147,6 +181,10 @@ fn ocean_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
         let per_meter = vec2<f32>(dims) / params.cascade_tile_sizes[i];
         let breaking = params.cascade_breaking[i];
         jacobian += vec4<f32>(d.d_dx.a, d.d_dy.a, f.d_dx.g, f.d_dy.g) * per_meter.xyxy * breaking;
+        let level = log2(max(texel * per_meter.x, 1.0));
+        let stats = jacobian_cascade(i, xz / params.cascade_tile_sizes[i], level) * breaking;
+        det_mean += stats.x;
+        det_variance += max(stats.y - stats.x * stats.x, 0.0);
         if w > 0.0 {
             disp += d.value * w;
             change += (d.value - previous_cascade(i, taps)) * w;
@@ -161,7 +199,13 @@ fn ocean_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     let half_trace = 0.5 * (jxx + jzz);
     let det = jxx * jzz - chop * chop * jacobian.y * jacobian.z;
     let lambda_min = half_trace - sqrt(max(half_trace * half_trace - det, 0.0));
-    let foam = saturate((params.foam_cutoff - lambda_min) / max(params.foam_falloff, 1e-5));
+    let near = saturate((params.foam_cutoff - lambda_min) / max(params.foam_falloff, 1e-5));
+    // Dupuy and Bruneton (2012, Eq. 6): the share of the texel whose determinant falls below the
+    // threshold, for a normally distributed determinant.
+    let sigma = sqrt(max(det_variance, 1e-10));
+    let far = 0.5 + 0.5 * erf((params.far_foam_cutoff - det_mean) / (sqrt(2.0) * sigma));
+    let far_weight = smoothstep(params.far_foam_texel, 2.0 * params.far_foam_texel, texel);
+    let foam = mix(near, far, far_weight);
     let scaled = vec4<f32>(disp.rgb * amp, disp.a * chop);
     textureStore(displacement_out, gid.xy, slice, scaled);
     textureStore(foam_out, gid.xy, slice, vec4<f32>(foam, params.depth, dz * chop, 1.0));
