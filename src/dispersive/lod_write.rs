@@ -159,7 +159,7 @@ pub(super) fn prepare_dispersive_lod_write(
         hull: controller.pointer,
         hull_prev: controller.pointer_prev,
         hull_radius: controller.brush_radius,
-        hull_speed: hull_speed,
+        hull_speed,
         _pad1: 0.0,
         _pad2: 0.0,
     });
