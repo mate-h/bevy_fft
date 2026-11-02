@@ -244,7 +244,7 @@ pub struct WaterSurfaceExtension {
     pub medium: WaterMediumUniform,
     /// Caustic map from [`super::WaterCaustics`], which the single-scattered sunlight under the
     /// underside follows. The plugin keeps it and its placement current.
-    #[texture(113, sample_type = "float", filterable = false)]
+    #[texture(113, dimension = "2d_array", sample_type = "float", filterable = false)]
     pub caustic_map: Handle<Image>,
     #[uniform(114)]
     pub caustics: super::caustics::CausticsLookup,

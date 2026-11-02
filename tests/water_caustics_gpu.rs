@@ -148,6 +148,8 @@ fn caustics_app() -> App {
         enabled: true,
         slice: 0,
         receiver_depth: 0.5 * focal_depth(),
+        receiver_count: 1,
+        receiver_scale: 2.0,
         rays_per_texel: 8,
         ior: IOR,
     })
@@ -207,6 +209,13 @@ fn observe_into_capture(app: &mut App, readback: Readback) {
 #[ignore = "requires a graphics adapter"]
 fn wave_crests_focus_sunlight_at_the_lens_depth() {
     let mut app = caustics_app();
+    // Receivers at a quarter and half of the focal depth.
+    *app.world_mut().resource_mut::<WaterCausticsSettings>() = WaterCausticsSettings {
+        receiver_depth: 0.25 * focal_depth(),
+        receiver_count: 2,
+        receiver_scale: 2.0,
+        ..*app.world().resource::<WaterCausticsSettings>()
+    };
     app.world_mut().spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 10.0, 0.0).looking_at(Vec3::ZERO, Vec3::Z),
@@ -219,51 +228,56 @@ fn wave_crests_focus_sunlight_at_the_lens_depth() {
         .chunks_exact(4)
         .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
         .collect();
-    assert_eq!(map.len(), (RESOLUTION * RESOLUTION) as usize);
-
-    // Columns away from the slice edges, where rays from outside the slice would be missing.
-    let margin = 8;
-    let column = |i: u32| {
-        let rows = margin..RESOLUTION - margin;
-        rows.clone()
-            .map(|j| map[(j * RESOLUTION + i) as usize])
-            .sum::<f32>()
-            / rows.len() as f32
-    };
-    let interior: Vec<u32> = (margin..RESOLUTION - margin).collect();
-    let mean = interior.iter().map(|&i| column(i)).sum::<f32>() / interior.len() as f32;
-    eprintln!("focal depth {} m, mean intensity {mean}", focal_depth());
-    assert!((mean - 1.0).abs() < 0.01, "mean intensity {mean}");
-
-    let depth = 0.5 * focal_depth();
-    let crest = interior
-        .iter()
-        .copied()
-        .find(|&i| (K * texel_x(i)).cos() > 0.98)
-        .unwrap();
-    let trough = interior
-        .iter()
-        .copied()
-        .find(|&i| (K * texel_x(i)).cos() < -0.98)
-        .unwrap();
-    for (label, i) in [("crest", crest), ("trough", trough)] {
-        let measured = column(i);
-        let expected = expected_intensity(texel_x(i), depth);
-        eprintln!("{label}: {measured} against {expected}");
-        assert!(
-            (measured / expected - 1.0).abs() < 0.02,
-            "{label}: {measured} against {expected}"
+    let layer = (RESOLUTION * RESOLUTION) as usize;
+    assert_eq!(map.len(), layer * WATER_CAUSTICS_MAX_RECEIVERS as usize);
+    for (receiver, depth) in [(0, 0.25 * focal_depth()), (1, 0.5 * focal_depth())] {
+        let map = &map[receiver * layer..(receiver + 1) * layer];
+        // Columns away from the slice edges, where rays from outside the slice would be missing.
+        let margin = 8;
+        let column = |i: u32| {
+            let rows = margin..RESOLUTION - margin;
+            rows.clone()
+                .map(|j| map[(j * RESOLUTION + i) as usize])
+                .sum::<f32>()
+                / rows.len() as f32
+        };
+        let interior: Vec<u32> = (margin..RESOLUTION - margin).collect();
+        let mean = interior.iter().map(|&i| column(i)).sum::<f32>() / interior.len() as f32;
+        eprintln!(
+            "receiver at {depth} m, focal depth {} m, mean intensity {mean}",
+            focal_depth()
         );
+        assert!((mean - 1.0).abs() < 0.01, "mean intensity {mean}");
+
+        let crest = interior
+            .iter()
+            .copied()
+            .find(|&i| (K * texel_x(i)).cos() > 0.98)
+            .unwrap();
+        let trough = interior
+            .iter()
+            .copied()
+            .find(|&i| (K * texel_x(i)).cos() < -0.98)
+            .unwrap();
+        for (label, i) in [("crest", crest), ("trough", trough)] {
+            let measured = column(i);
+            let expected = expected_intensity(texel_x(i), depth);
+            eprintln!("{label}: {measured} against {expected}");
+            assert!(
+                (measured / expected - 1.0).abs() < 0.02,
+                "{label} at {depth} m: {measured} against {expected}"
+            );
+        }
     }
 }
 
-#[test]
-#[ignore = "requires a graphics adapter"]
-fn caustics_light_a_plate_on_the_receiver() {
+/// Crest and trough of the caustics on a white plate `depth` meters down, seen from 1 m above it
+/// under water, relative to the plate's mean, with `settings` placing the receivers.
+fn plate_caustics(settings: WaterCausticsSettings, depth: f32) -> (f32, f32) {
     const SIZE: u32 = 256;
     const VIEW: f32 = 16.0;
-    let depth = 0.5 * focal_depth();
     let mut app = caustics_app();
+    app.insert_resource(settings);
     // Clear water, so the plate shows only the sun and its caustics.
     app.insert_resource(WaterMedium(WaterMediumUniform {
         absorption: Vec3::ZERO,
@@ -349,12 +363,63 @@ fn caustics_light_a_plate_on_the_receiver() {
     let crest = 0.5 * (column(SIZE / 2 - 1) + column(SIZE / 2)) / mean;
     let trough_column = SIZE / 2 + (2.0 / pixel) as u32;
     let trough = 0.5 * (column(trough_column - 1) + column(trough_column)) / mean;
+    assert!(mean > 0.0, "plate must be lit");
+    (crest, trough)
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn caustics_light_a_plate_on_the_receiver() {
+    let depth = 0.5 * focal_depth();
+    let (crest, trough) = plate_caustics(
+        WaterCausticsSettings {
+            enabled: true,
+            slice: 0,
+            receiver_depth: depth,
+            receiver_count: 1,
+            rays_per_texel: 8,
+            ior: IOR,
+            ..default()
+        },
+        depth,
+    );
     let expected_crest = expected_intensity(0.125, depth);
     let expected_trough = expected_intensity(2.125, depth);
     eprintln!(
         "plate crest {crest} against {expected_crest}, trough {trough} against {expected_trough}"
     );
-    assert!(mean > 0.0, "plate must be lit");
+    assert!(
+        (crest / expected_crest - 1.0).abs() < 0.03,
+        "crest {crest} against {expected_crest}"
+    );
+    assert!(
+        (trough / expected_trough - 1.0).abs() < 0.03,
+        "trough {trough} against {expected_trough}"
+    );
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn plates_between_receivers_blend_the_two_by_depth() {
+    let (shallow, deep) = (0.25 * focal_depth(), 0.5 * focal_depth());
+    let depth = 0.5 * (shallow + deep);
+    let (crest, trough) = plate_caustics(
+        WaterCausticsSettings {
+            enabled: true,
+            slice: 0,
+            receiver_depth: shallow,
+            receiver_count: 2,
+            receiver_scale: 2.0,
+            rays_per_texel: 8,
+            ior: IOR,
+        },
+        depth,
+    );
+    let blend = |x: f32| 0.5 * (expected_intensity(x, shallow) + expected_intensity(x, deep));
+    let (expected_crest, expected_trough) = (blend(0.125), blend(2.125));
+    eprintln!(
+        "plate between receivers: crest {crest} against {expected_crest}, trough {trough} against {expected_trough}"
+    );
     assert!(
         (crest / expected_crest - 1.0).abs() < 0.03,
         "crest {crest} against {expected_crest}"

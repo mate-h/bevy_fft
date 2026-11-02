@@ -24,12 +24,14 @@ struct WaterMediumUniform {
 struct CausticsLookup {
     /// The covered slice: centre X, centre Z, texel width, and width in meters.
     rect: vec4<f32>,
-    /// One when the map was traced this frame, then the receiver depth in meters.
+    /// One when the map was traced this frame, then the receiver count.
     params: vec4<f32>,
+    /// Depth of each receiver in meters, shallowest first.
+    receiver_depths: vec4<f32>,
 }
 
-/// Caustic intensity on a level receiver, from the caustics pass.
-@group(constants::MATERIAL_BIND_GROUP) @binding(113) var caustic_map: texture_2d<f32>;
+/// Caustic intensity on each level receiver, one layer per receiver, from the caustics pass.
+@group(constants::MATERIAL_BIND_GROUP) @binding(113) var caustic_map: texture_2d_array<f32>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(114) var<uniform> caustics: CausticsLookup;
 
 /// Longest path in meters the medium terms integrate over.
@@ -141,8 +143,8 @@ fn medium_multiple_scattering(
     return medium.scattering / (4.0 * PI) * e0 * (down + up);
 }
 
-/// Bilinear caustic intensity at world `xz` on the receiver, one outside the map.
-fn caustic_at_receiver(xz: vec2<f32>) -> f32 {
+/// Bilinear caustic intensity at world `xz` on receiver `receiver`, one outside the map.
+fn caustic_at_receiver(xz: vec2<f32>, receiver: i32) -> f32 {
     let n = vec2<f32>(textureDimensions(caustic_map));
     let x = ((xz - caustics.rect.xy) / caustics.rect.w + 0.5) * n - 0.5;
     let i0 = vec2<i32>(floor(x));
@@ -150,23 +152,48 @@ fn caustic_at_receiver(xz: vec2<f32>) -> f32 {
         return 1.0;
     }
     let f = x - floor(x);
-    let a = textureLoad(caustic_map, i0, 0).r;
-    let b = textureLoad(caustic_map, i0 + vec2<i32>(1, 0), 0).r;
-    let c = textureLoad(caustic_map, i0 + vec2<i32>(0, 1), 0).r;
-    let d = textureLoad(caustic_map, i0 + vec2<i32>(1, 1), 0).r;
+    let a = textureLoad(caustic_map, i0, receiver, 0).r;
+    let b = textureLoad(caustic_map, i0 + vec2<i32>(1, 0), receiver, 0).r;
+    let c = textureLoad(caustic_map, i0 + vec2<i32>(0, 1), receiver, 0).r;
+    let d = textureLoad(caustic_map, i0 + vec2<i32>(1, 1), receiver, 0).r;
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
+/// Caustic intensity on receiver `receiver` where the refracted beam `beam` through a point at
+/// `xz`, `depth` meters down, crosses it.
+fn caustic_along_beam(xz: vec2<f32>, beam: vec3<f32>, depth: f32, receiver: i32) -> f32 {
+    let back = (depth - caustics.receiver_depths[receiver]) / max(-beam.y, 1e-3);
+    return caustic_at_receiver(xz - beam.xz * back, receiver);
+}
+
 /// Caustic intensity of the refracted beam `beam` at point `p` under a level surface at height
-/// `surface_y`. The map holds the pattern at the receiver depth only, so it is read where the beam
-/// through `p` crosses the receiver, and points far above or below it see that pattern rather than
-/// their own focus.
+/// `surface_y`. The map holds the pattern on a few receivers, so `p` reads the two receivers
+/// around its depth where the beam through it crosses them and blends them linearly in depth.
+/// Points above the shallowest or below the deepest receiver see that receiver's pattern rather
+/// than their own focus.
 fn caustic_scale(p: vec3<f32>, beam: vec3<f32>, surface_y: f32) -> f32 {
     if caustics.params.x == 0.0 {
         return 1.0;
     }
-    let back = (surface_y - p.y - caustics.params.y) / max(-beam.y, 1e-3);
-    return caustic_at_receiver(p.xz - beam.xz * back);
+    let count = max(i32(caustics.params.y), 1);
+    let depth = surface_y - p.y;
+    var lower = 0;
+    for (var i = 1; i < count; i++) {
+        if caustics.receiver_depths[i] <= depth {
+            lower = i;
+        }
+    }
+    let upper = min(lower + 1, count - 1);
+    let shallow = caustic_along_beam(p.xz, beam, depth, lower);
+    let gap = caustics.receiver_depths[upper] - caustics.receiver_depths[lower];
+    if upper == lower || gap <= 0.0 {
+        return shallow;
+    }
+    let f = saturate((depth - caustics.receiver_depths[lower]) / gap);
+    if f == 0.0 {
+        return shallow;
+    }
+    return mix(shallow, caustic_along_beam(p.xz, beam, depth, upper), f);
 }
 
 /// Scale on the light reaching scene point `p`, `depth` meters under the water, relative to the

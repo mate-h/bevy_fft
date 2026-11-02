@@ -35,8 +35,8 @@ mod underwater;
 
 pub use blend::WaterLodScratch;
 pub use caustics::{
-    CausticsLookup, WATER_CAUSTICS_FORMAT, WATER_CAUSTICS_SHADER, WaterCaustics,
-    WaterCausticsSettings,
+    CausticsLookup, WATER_CAUSTICS_FORMAT, WATER_CAUSTICS_MAX_RECEIVERS, WATER_CAUSTICS_SHADER,
+    WaterCaustics, WaterCausticsSettings,
 };
 pub use foam::{
     WATER_FOAM_SHADER, WATER_FOAM_STATE_FORMAT, WaterFoamFrame, WaterFoamParams, WaterFoamSettings,

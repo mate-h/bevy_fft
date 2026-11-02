@@ -102,7 +102,7 @@ pub(super) fn init_water_medium_layout(
                 (6, sampler(SamplerBindingType::Filtering)),
                 (7, uniform_buffer::<Vec4>(false)),
                 (112, uniform_buffer::<WaterMediumUniform>(false)),
-                (113, texture_2d(unfiltered)),
+                (113, texture_2d_array(unfiltered)),
                 (114, uniform_buffer::<CausticsLookup>(false)),
             ),
         ),
