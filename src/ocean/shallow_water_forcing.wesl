@@ -87,23 +87,34 @@ fn height_and_displacement(xz: vec2<f32>) -> vec3<f32> {
     return sum * vec3<f32>(params.amplitude, chop, chop);
 }
 
+/// With `full_grid` the dispatch covers the grid. Otherwise `gid.z` picks one of the four edge
+/// bands, `gid.x` runs along it and `gid.y` inward. The corners belong to two bands and get the
+/// same value twice.
 @compute @workgroup_size(16, 16, 1)
 fn shallow_water_forcing(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if gid.x >= params.cells.x || gid.y >= params.cells.y {
-        return;
-    }
+    var id = gid.xy;
     if params.full_grid == 0u {
-        let edge = min(min(gid.x, params.cells.x - 1u - gid.x), min(gid.y, params.cells.y - 1u - gid.y));
-        if edge >= params.edge_cells {
+        let along = gid.x;
+        let inward = gid.y;
+        if inward >= params.edge_cells || inward >= min(params.cells.x, params.cells.y) {
             return;
         }
+        switch gid.z {
+            case 0u: { id = vec2<u32>(along, inward); }
+            case 1u: { id = vec2<u32>(along, params.cells.y - 1u - inward); }
+            case 2u: { id = vec2<u32>(inward, along); }
+            default: { id = vec2<u32>(params.cells.x - 1u - inward, along); }
+        }
     }
-    let cell = vec2<f32>(gid.xy) + 0.5 - 0.5 * vec2<f32>(params.cells);
+    if id.x >= params.cells.x || id.y >= params.cells.y {
+        return;
+    }
+    let cell = vec2<f32>(id) + 0.5 - 0.5 * vec2<f32>(params.cells);
     let target_xz = params.grid_center + cell * params.cell_size;
     var xz = target_xz;
     for (var step = 0u; step < INVERT_STEPS; step++) {
         xz = target_xz - height_and_displacement(xz).yz;
     }
     let eta = height_and_displacement(xz).x - params.datum;
-    textureStore(eta_out, gid.xy, vec4<f32>(eta, 0.0, 0.0, 0.0));
+    textureStore(eta_out, id, vec4<f32>(eta, 0.0, 0.0, 0.0));
 }

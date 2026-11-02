@@ -86,7 +86,7 @@ impl FromWorld for ShallowWaterForcingPipeline {
 pub struct ShallowWaterForcingBindGroup {
     group: Option<BindGroup>,
     params: UniformBuffer<ShallowWaterForcingParams>,
-    dispatch: UVec2,
+    dispatch: UVec3,
     /// This frame's dispatch writes a target for every cell, for the shallow-water seed.
     full_grid: bool,
 }
@@ -135,6 +135,7 @@ pub(super) fn prepare_shallow_water_forcing(
         controller.sim_apply_serial != gpu.last_applied_serial.load(Ordering::Relaxed)
     });
     state.full_grid = seeding;
+    let edge_cells = controller.pml_width + controller.ocean_band_cells.max(0.0).ceil() as u32 + 1;
     state.params.set(ShallowWaterForcingParams {
         cascade_tile_sizes: frame.params.cascade_tile_sizes,
         grid_center: placement.center,
@@ -146,7 +147,7 @@ pub(super) fn prepare_shallow_water_forcing(
         cascade_count: frame.params.cascade_count,
         // The solver reads the target in the PML and the ocean band. A reset also fills the
         // interior, which the seed dispatch copies into the wet cells.
-        edge_cells: controller.pml_width + controller.ocean_band_cells.max(0.0).ceil() as u32 + 1,
+        edge_cells,
         full_grid: u32::from(seeding),
         _pad0: 0,
         _pad1: 0,
@@ -174,10 +175,19 @@ pub(super) fn prepare_shallow_water_forcing(
         )),
     );
     state.group = Some(group);
-    state.dispatch = UVec2::new(
-        controller.cells_x.div_ceil(16),
-        controller.cells_y.div_ceil(16),
-    );
+    state.dispatch = if seeding {
+        UVec3::new(
+            controller.cells_x.div_ceil(16),
+            controller.cells_y.div_ceil(16),
+            1,
+        )
+    } else {
+        UVec3::new(
+            controller.cells_x.max(controller.cells_y).div_ceil(16),
+            edge_cells.div_ceil(16),
+            4,
+        )
+    };
 }
 
 pub fn run_shallow_water_forcing(
@@ -207,7 +217,7 @@ pub fn run_shallow_water_forcing(
         });
         pass.set_pipeline(compute);
         pass.set_bind_group(0, group, &[]);
-        pass.dispatch_workgroups(state.dispatch.x, state.dispatch.y, 1);
+        pass.dispatch_workgroups(state.dispatch.x, state.dispatch.y, state.dispatch.z);
     }
     if state.full_grid
         && let Some(gpu) = gpu.as_ref()
