@@ -46,6 +46,7 @@ pub struct ShallowWaterPipelines {
     pub mac_w_sl_forward: CachedComputePipelineId,
     pub mac_w_sl_reverse: CachedComputePipelineId,
     pub mac_w_combine: CachedComputePipelineId,
+    pub stage_movable_depth: CachedComputePipelineId,
     pub limit_outflow: CachedComputePipelineId,
     pub integrate_height: CachedComputePipelineId,
     pub commit_height: CachedComputePipelineId,
@@ -133,6 +134,7 @@ impl FromWorld for ShallowWaterPipelines {
             mac_w_sl_forward: q("shallow_water_mac_w_fwd", "macW_sl_forward"),
             mac_w_sl_reverse: q("shallow_water_mac_w_rev", "macW_sl_reverse"),
             mac_w_combine: q("shallow_water_mac_w_comb", "macW_combine"),
+            stage_movable_depth: q("shallow_water_stage_movable_depth", "stageMovableDepth"),
             limit_outflow: q("shallow_water_limit_outflow", "limitOutflow"),
             integrate_height: q("shallow_water_height", "integrateHeight"),
             commit_height: q("shallow_water_commit_height", "commitHeight"),
@@ -175,6 +177,7 @@ impl ShallowWaterPipelines {
             mac_w_sl_forward: get(self.mac_w_sl_forward)?,
             mac_w_sl_reverse: get(self.mac_w_sl_reverse)?,
             mac_w_combine: get(self.mac_w_combine)?,
+            stage_movable_depth: get(self.stage_movable_depth)?,
             limit_outflow: get(self.limit_outflow)?,
             integrate_height: get(self.integrate_height)?,
             commit_height: get(self.commit_height)?,
@@ -213,6 +216,7 @@ pub struct ShallowWaterKernels {
     mac_w_sl_forward: ComputePipeline,
     mac_w_sl_reverse: ComputePipeline,
     mac_w_combine: ComputePipeline,
+    stage_movable_depth: ComputePipeline,
     limit_outflow: ComputePipeline,
     integrate_height: ComputePipeline,
     commit_height: ComputePipeline,
@@ -238,7 +242,8 @@ pub struct ShallowWaterKernels {
 /// are `(nx + 1) × ny`, and `flow_y` and `mac_w_temps` are `nx × (ny + 1)`. `flow_x`, `flow_y` and
 /// `ocean_eta` are `R32Float` and the rest `Rgba32Float`. Each texture needs storage binding.
 ///
-/// `bed_water.x` is the bed height H and `.y` the water depth h. `flow_x` holds the face velocity
+/// `bed_water.x` is the bed height H and `.y` the water depth h. `.z` is scratch that each step
+/// overwrites. `flow_x` holds the face velocity
 /// u on vertical faces and `flow_y` the face velocity w on horizontal faces, positive along +x and
 /// +y. `velocity.xy` is the cell-centered velocity that
 /// [`ShallowWaterSolver::encode_reconstruct_velocity`] writes.
@@ -745,6 +750,7 @@ impl ShallowWaterSolver {
         self.dispatch(pass, &k.mac_w_sl_forward, w);
         self.dispatch(pass, &k.mac_w_sl_reverse, w);
         self.dispatch(pass, &k.mac_w_combine, w);
+        self.dispatch(pass, &k.stage_movable_depth, cell);
         self.dispatch(pass, &k.limit_outflow, cell);
         self.dispatch(pass, &k.integrate_height, cell);
         self.dispatch(pass, &k.commit_height, cell);

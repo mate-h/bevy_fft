@@ -633,11 +633,26 @@ fn h_adj_cell(ic : i32, jc : i32) -> f32 {
     return max(0.0, avg - h_avgmax);
 }
 
-/// Upwind depth flux through a face from the left (or lower) cell to the right (or upper) one.
-/// `r_*` scales the flux by the outflow limit of whichever cell it leaves.
 /// Depth a cell can pass on: its depth less the `h_avgmax` share that stays put.
-fn h_movable(ic : i32, jc : i32) -> f32 {
+fn movable_depth(ic : i32, jc : i32) -> f32 {
     return max(0.0, h_at(ic, jc) - h_adj_cell(ic, jc));
+}
+
+/// Writes `movable_depth` of every cell to `bed_water.z`, so the flux kernels read one value per
+/// cell instead of five depths.
+@compute @workgroup_size(16, 16)
+fn stageMovableDepth(@builtin(global_invocation_id) id: vec3u) {
+    if (id.x >= simulationSettings.size.x || id.y >= simulationSettings.size.y) { return; }
+    var bw = textureLoad(bedWaterTexture, id.xy);
+    bw.z = movable_depth(i32(id.x), i32(id.y));
+    textureStore(bedWaterTexture, id.xy, bw);
+}
+
+/// `movable_depth` as `stageMovableDepth` left it. Cells past the grid edge compute it, since
+/// their neighbours clamp differently from the edge cell's.
+fn h_movable(ic : i32, jc : i32) -> f32 {
+    if (ic < 0 || jc < 0 || ic >= nx() || jc >= ny()) { return movable_depth(ic, jc); }
+    return textureLoad(bedWaterTexture, vec2u(u32(ic), u32(jc))).z;
 }
 
 /// Van Leer's limited slope from the backward and forward differences.
