@@ -10,9 +10,9 @@
 // the orbital velocity. It uses the physical displacement, without the artistic choppiness factor.
 // Drift is the cascades' summed Stokes drift, which the CPU integrates from the spectrum.
 //
-// Breaking follows Gilligan (Tessendorf 2017, §5.3.3, with the eigenvalues of course notes §4.6).
-// A texel breaks where the smaller eigenvalue of the horizontal displacement Jacobian drops below
-// `foam_cutoff`. The Jacobian sums the cascades marked in `cascade_breaking`, taken from the
+// Breaking follows Dupuy and Bruneton (2012, §3). A texel breaks where the determinant of the
+// horizontal displacement Jacobian drops below `foam_cutoff`, the same measure the far range takes
+// over a texel's footprint. The Jacobian sums the cascades marked in `cascade_breaking`, taken from the
 // derivatives of each cascade's bilinear fetch, as Dupuy and Bruneton (2012, Eq. 4) sum their wave
 // patterns. Short waves riding on long ones then break together. Short waves alone also fold, but
 // their Jacobian barely depends on the wind, so leaving them out is what lets coverage follow the
@@ -40,9 +40,9 @@ struct OceanLodWriteParams {
     _pad0: f32,
     /// Surface Stokes drift of all cascades in meters per second.
     stokes_drift: vec2<f32>,
-    /// Smaller Jacobian eigenvalue below which waves break.
+    /// Jacobian determinant below which waves break.
     foam_cutoff: f32,
-    /// Width of the breaking transition in eigenvalue units.
+    /// Width of the breaking transition in determinant units.
     foam_falloff: f32,
     /// Threshold on the Jacobian determinant for far whitecaps.
     far_foam_cutoff: f32,
@@ -196,10 +196,8 @@ fn ocean_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     let chop = amp * params.choppiness;
     let jxx = 1.0 + chop * jacobian.x;
     let jzz = 1.0 + chop * jacobian.w;
-    let half_trace = 0.5 * (jxx + jzz);
     let det = jxx * jzz - chop * chop * jacobian.y * jacobian.z;
-    let lambda_min = half_trace - sqrt(max(half_trace * half_trace - det, 0.0));
-    let near = saturate((params.foam_cutoff - lambda_min) / max(params.foam_falloff, 1e-5));
+    let near = saturate((params.foam_cutoff - det) / max(params.foam_falloff, 1e-5));
     // Dupuy and Bruneton (2012, Eq. 6): the share of the texel whose determinant falls below the
     // threshold, for a normally distributed determinant.
     let sigma = sqrt(max(det_variance, 1e-10));

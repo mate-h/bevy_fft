@@ -141,14 +141,14 @@ pub struct OceanSurfaceSettings {
     /// Multiplier on horizontal displacement, same sense as amplitude on height.
     /// Typical range about 0 to 2.
     pub choppiness: f32,
-    /// Waves break where the smaller eigenvalue of the horizontal displacement Jacobian drops
-    /// below this value, which is where the surface compresses toward folding. The default and
-    /// [`Self::foam_falloff`] put mean whitecap coverage within a factor of two of Monahan and
-    /// Woolf's (1989) fits at 5, 10 and 15 m/s with the default choppiness and
+    /// Waves break where the determinant of the horizontal displacement Jacobian drops below this
+    /// value, which is where the surface compresses toward folding (Dupuy and Bruneton 2012, §3).
+    /// The default and [`Self::foam_falloff`] put mean whitecap coverage within a factor of two of
+    /// Monahan and Woolf's (1989) fits at 5, 10 and 15 m/s with the default choppiness and
     /// [`crate::water::WaterFoamSettings`]. Coverage is steep in this value, about tenfold per
     /// 0.01, and changing the choppiness moves the calibrated value.
     pub foam_cutoff: f32,
-    /// Width of the transition in eigenvalue units. Larger values give softer edges.
+    /// Width of the transition in determinant units. Larger values give softer edges.
     pub foam_falloff: f32,
     /// Only cascades whose band reaches waves longer than this many meters count toward breaking.
     /// The Jacobian of the short end of the spectrum hardly changes with the wind, so including it
@@ -156,11 +156,11 @@ pub struct OceanSurfaceSettings {
     pub breaking_wavelength: f32,
     /// Breaking threshold on the Jacobian determinant in the far range, where whitecap coverage
     /// comes from Dupuy and Bruneton's (2012) erf formula over the determinant's mean and
-    /// variance in each texel. It differs from [`Self::foam_cutoff`], which applies to the
-    /// smaller eigenvalue, and is set so the far range breaks as much as the near range where
-    /// they meet. With the defaults, far breaking stays within 0.5 to 2.6 times near breaking on
-    /// 0.5 m and 1 m texels from 5 to 15 m/s. The far range responds less to wind, so it runs
-    /// high in light wind and low in strong wind.
+    /// variance in each texel. [`Self::foam_cutoff`] thresholds the same determinant per texel.
+    /// This value is set so the far range breaks as much as the near range where they meet.
+    /// With the defaults, far breaking stays within 0.8 to 2.5 times near breaking on 0.5 m and
+    /// 1 m texels from 5 to 15 m/s. The far range responds less to wind, so it runs high in light
+    /// wind and low in strong wind.
     pub far_foam_cutoff: f32,
     /// Texel width in meters of the LOD slices where the far range takes over. It is fully in
     /// place at twice this width. Finer slices threshold the Jacobian per texel.
@@ -172,7 +172,7 @@ impl Default for OceanSurfaceSettings {
         Self {
             amplitude: 1.0,
             choppiness: 0.35,
-            foam_cutoff: 0.925,
+            foam_cutoff: 0.903,
             foam_falloff: 0.02,
             breaking_wavelength: 2.0,
             far_foam_cutoff: 0.89,

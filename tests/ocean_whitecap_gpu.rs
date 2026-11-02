@@ -245,7 +245,7 @@ fn far_whitecaps_break_like_near_whitecaps_where_they_meet() {
             },
             |lod| lod.foam.clone(),
             blend,
-            10,
+            30,
         );
         let far = measure(
             u,
@@ -255,7 +255,7 @@ fn far_whitecaps_break_like_near_whitecaps_where_they_meet() {
             },
             |lod| lod.foam.clone(),
             blend,
-            10,
+            30,
         );
         let ratio = far / near;
         println!(
