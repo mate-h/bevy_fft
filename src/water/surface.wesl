@@ -369,11 +369,28 @@ fn water_foam_flow_pattern(xz: vec2<f32>, flow: WaterFoamFlow, detail_fade: f32)
     return water_flatten_blend(long, short, flow.long_weight);
 }
 
+/// Active plus residual foam at or below this counts as none, so most of the water skips the
+/// foam pattern. Coverage this low lights about one pixel in ten thousand.
+const FOAM_SKIP_TOTAL: f32 = 1e-4;
+
+/// True when `v` is nonzero at any pixel of this pixel's 2x2 quad. Fine derivatives give each
+/// pixel the other three values, and differences of zeros are exactly zero, so all four pixels
+/// agree. A branch on the result keeps the derivatives taken inside it defined.
+fn water_quad_any(v: f32) -> bool {
+    let dx = dpdxFine(v);
+    let dy = dpdyFine(v);
+    return abs(v) + abs(dx) + abs(dy) + abs(dpdyFine(dx)) > 0.0;
+}
+
 /// Foam at undisplaced position `xz` from the sim's active and residual coverage. Foam edges are
 /// one pixel wide. Where a pixel spans several texels of a pattern sample, that sample would
 /// alias, so the finer sample drops out first and the foam then fades to its mean opacity.
 fn water_foam_surface(xz: vec2<f32>, foam: vec2<f32>) -> WaterFoamSurface {
     var out: WaterFoamSurface;
+    let total = foam.x + foam.y;
+    if !water_quad_any(select(total, 0.0, total <= FOAM_SKIP_TOTAL)) {
+        return out;
+    }
     let texel = FOAM_TILE / FOAM_TEXTURE_SIZE;
     let detail_texel = texel * FOAM_DETAIL_SCALE;
     // Geometric mean of the pixel's extent along both screen axes, so grazing views keep the lace
