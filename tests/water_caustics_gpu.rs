@@ -465,14 +465,14 @@ fn light_shafts_follow_the_caustics() {
     );
 }
 
-#[test]
-#[ignore = "requires a graphics adapter"]
-fn caustics_light_a_bed_seen_from_above() {
-    const SIZE: u32 = 256;
-    const VIEW: f32 = 16.0;
-    let depth = 0.5 * focal_depth();
-    let mut app = caustics_app();
-    let mut image = Image::new_target_texture(SIZE, SIZE, TextureFormat::Rgba16Float, None);
+#[derive(Component)]
+struct Plate;
+
+/// Water seen straight down from 10 m above through a clear surface with no reflectance and no
+/// refraction, over a white plate `depth` meters down, so each pixel shows the plate straight
+/// below it. Returns the render target.
+fn bed_seen_from_above(app: &mut App, depth: f32, view: f32, size: u32) -> Handle<Image> {
+    let mut image = Image::new_target_texture(size, size, TextureFormat::Rgba16Float, None);
     image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
     let target = app.world_mut().resource_mut::<Assets<Image>>().add(image);
     app.world_mut().spawn((
@@ -485,8 +485,8 @@ fn caustics_light_a_bed_seen_from_above() {
         Exposure { ev100: 0.0 },
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::Fixed {
-                width: VIEW,
-                height: VIEW,
+                width: view,
+                height: view,
             },
             ..OrthographicProjection::default_3d()
         }),
@@ -503,8 +503,6 @@ fn caustics_light_a_bed_seen_from_above() {
             assets.add(Plane3d::default().mesh().size(40.0, 40.0)),
         )
     };
-    // Clear water with no reflectance and no refraction, so each pixel shows the plate straight
-    // below it, lit by the sun alone.
     let surface_material = app
         .world_mut()
         .resource_mut::<Assets<WaterSurfaceMaterial>>()
@@ -549,18 +547,37 @@ fn caustics_light_a_bed_seen_from_above() {
         Mesh3d(plate_mesh),
         MeshMaterial3d(plate_material),
         Transform::from_xyz(0.0, -depth, 0.0),
+        Plate,
     ));
+    target
+}
+
+/// Sets the deep water column the plate sits in. The LOD data exists after the first update.
+fn deep_column(app: &mut App) {
+    let foam = app.world().resource::<WaterLodData>().foam.clone();
+    let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+    let mut image = images.get_mut(&foam).unwrap();
+    for texel in image.data.as_mut().unwrap().chunks_exact_mut(8) {
+        texel[2..4].copy_from_slice(&half_bits(1000.0).to_le_bytes());
+    }
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn caustics_light_a_bed_seen_from_above() {
+    const SIZE: u32 = 256;
+    const VIEW: f32 = 16.0;
+    let depth = 0.5 * focal_depth();
+    let mut app = caustics_app();
+    // Clear water, so the plate shows only the sun and its caustics.
+    app.insert_resource(WaterMedium(WaterMediumUniform {
+        diffuse_attenuation: Vec3::ZERO,
+        ..default()
+    }));
+    let target = bed_seen_from_above(&mut app, depth, VIEW, SIZE);
     step(&mut app);
     set_sinusoid(&mut app);
-    // The water column reaches past the plate.
-    let foam = app.world().resource::<WaterLodData>().foam.clone();
-    {
-        let mut images = app.world_mut().resource_mut::<Assets<Image>>();
-        let mut image = images.get_mut(&foam).unwrap();
-        for texel in image.data.as_mut().unwrap().chunks_exact_mut(8) {
-            texel[2..4].copy_from_slice(&half_bits(1000.0).to_le_bytes());
-        }
-    }
+    deep_column(&mut app);
     observe_into_capture(&mut app, Readback::texture(target));
     let red = |data: Vec<u8>| -> Vec<f32> {
         data.chunks_exact(8)
@@ -598,5 +615,71 @@ fn caustics_light_a_bed_seen_from_above() {
     assert!(
         (trough / expected_trough - 1.0).abs() < 0.03,
         "trough {trough} against {expected_trough}"
+    );
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn sunlight_fades_along_its_refracted_beam_down_to_a_bed_seen_from_above() {
+    const SIZE: u32 = 64;
+    const VIEW: f32 = 4.0;
+    const UPPER: f32 = 2.0;
+    const LOWER: f32 = 6.0;
+    let kd = Vec3::new(0.3, 0.1, 0.05);
+    let mut app = caustics_app();
+    app.world_mut()
+        .resource_mut::<WaterCausticsSettings>()
+        .enabled = false;
+    app.insert_resource(WaterMedium(WaterMediumUniform {
+        diffuse_attenuation: kd,
+        ..default()
+    }));
+    // A sun 30 degrees above the horizon, the only light.
+    let elevation = 30f32.to_radians();
+    let to_light = Vec3::new(0.0, elevation.sin(), elevation.cos());
+    let mut sun = app
+        .world_mut()
+        .query_filtered::<&mut Transform, With<DirectionalLight>>();
+    *sun.single_mut(app.world_mut()).unwrap() = Transform::default().looking_to(-to_light, Vec3::X);
+    let target = bed_seen_from_above(&mut app, UPPER, VIEW, SIZE);
+    step(&mut app);
+    deep_column(&mut app);
+    observe_into_capture(&mut app, Readback::texture(target));
+    let centre = |data: Vec<u8>| -> Vec3 {
+        let pixels: Vec<Vec3> = data
+            .chunks_exact(8)
+            .map(|p| {
+                let lane = |i: usize| half(u16::from_le_bytes([p[i * 2], p[i * 2 + 1]]));
+                Vec3::new(lane(0), lane(1), lane(2))
+            })
+            .collect();
+        let mut sum = Vec3::ZERO;
+        for y in SIZE / 2 - 4..SIZE / 2 + 4 {
+            for x in SIZE / 2 - 4..SIZE / 2 + 4 {
+                sum += pixels[(y * SIZE + x) as usize];
+            }
+        }
+        sum / 64.0
+    };
+    let mut plate_at = |depth: f32| {
+        let mut plate = app
+            .world_mut()
+            .query_filtered::<&mut Transform, With<Plate>>();
+        plate.single_mut(app.world_mut()).unwrap().translation.y = -depth;
+        centre(capture(&mut app))
+    };
+    let upper = plate_at(UPPER);
+    let lower = plate_at(LOWER);
+    // Snell's law gives the refracted beam's angle from the vertical.
+    let sin_t = elevation.cos() / IOR;
+    let cos_t = (1.0 - sin_t * sin_t).sqrt();
+    let expected = (-kd * (LOWER - UPPER) / cos_t).exp();
+    let measured = lower / upper;
+    eprintln!("plate from {UPPER} m to {LOWER} m: measured {measured}, expected {expected}");
+    assert!(upper.min_element() > 0.0, "plate must be lit, got {upper}");
+    let error = (measured / expected - Vec3::ONE).abs().max_element();
+    assert!(
+        error < 0.02,
+        "plate from {UPPER} m to {LOWER} m: measured {measured}, expected {expected}"
     );
 }

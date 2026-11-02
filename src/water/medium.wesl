@@ -5,7 +5,8 @@
 // underside together with the medium below it, so pixels that land on the surface are left alone.
 // Everything else seen from under water fades with the extinction along the ray, gains the
 // multiple-scattered light of Eq. 9 and the single-scattered sunlight of Eq. 5, and is lit as if
-// by the downwelling irradiance at its depth, which is the `exp(-K_d y_S)` factor of Eq. 10.
+// by the downwelling irradiance at its depth, which is the `exp(-K_d y_S)` factor of Eq. 10. The
+// sun's share fades over its refracted beam's slant path, the same way beds seen from above do.
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 import bevy_pbr::render::mesh_view_bindings::{view, lights};
 import bevy_pbr::render::view_transformations::position_ndc_to_world;
@@ -13,10 +14,10 @@ import bevy_fft::water::lod::{WaterLodSlices, displaced_height, lod_coverage, sa
 import bevy_fft::water::underside::{
     MEDIUM_MAX_PATH,
     downwelling_irradiance,
-    caustic_lighting,
     medium,
     medium_multiple_scattering,
     single_scattering,
+    underwater_lighting,
 };
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var source: texture_2d<f32>;
@@ -74,8 +75,7 @@ fn water_medium(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
             return color;
         }
         path = distance(near, far);
-        lighting = exp(-max(medium.diffuse_attenuation, vec3<f32>(0.0)) * (h - far.y))
-            * caustic_lighting(far, e0, water_plane.x);
+        lighting = underwater_lighting(far, e0, water_plane.x, h - far.y);
     } else if descent < 0.0 {
         // A ray that rises without meeting the surface mesh stops at the surface.
         path = depth_near / max(-descent, 1e-3);

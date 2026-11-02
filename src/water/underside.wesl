@@ -169,24 +169,39 @@ fn caustic_scale(p: vec3<f32>, beam: vec3<f32>, surface_y: f32) -> f32 {
     return caustic_at_receiver(p.xz - beam.xz * back);
 }
 
-/// Scale on the light reaching scene point `p` under a level surface at height `surface_y` from
-/// the caustic map, along the first directional light's refracted beam. Only the sun's share of the
-/// downwelling irradiance `e0` follows the map, and points above the surface keep their light.
-fn caustic_lighting(p: vec3<f32>, e0: vec3<f32>, surface_y: f32) -> vec3<f32> {
-    if lights.n_directional_lights == 0u || caustics.params.x == 0.0 || p.y >= surface_y {
+/// Scale on the light reaching scene point `p`, `depth` meters under the water, relative to the
+/// unattenuated light the scene was lit with. `e0` is the downwelling irradiance and `surface_y`
+/// the height of the level surface the caustic map refracts through. Sky light fades as
+/// `exp(-K_d y)` with depth `y`, the downwelling attenuation of Monzon et al. (2024, Eq. 10). Each
+/// directional light's share instead fades over its refracted beam's slant path `y / cos(theta_t)`,
+/// as their single scattering does (§4.1), and the first light's share follows the caustic map.
+/// Points at or above the surface keep their light.
+fn underwater_lighting(p: vec3<f32>, e0: vec3<f32>, surface_y: f32, depth: f32) -> vec3<f32> {
+    if depth <= 0.0 {
         return vec3<f32>(1.0);
     }
-    let light = &lights.directional_lights[0];
-    let L = (*light).direction_to_light.xyz;
-    if L.y <= 0.0 {
-        return vec3<f32>(1.0);
-    }
+    let kd = max(medium.diffuse_attenuation, vec3<f32>(0.0));
+    let diffuse = exp(-kd * depth);
     let eta = 1.0 / medium.ior;
-    let beam = refract(-L, vec3<f32>(0.0, 1.0, 0.0), eta);
-    let intensity = caustic_scale(p, beam, surface_y);
-    let sun = (*light).color.rgb * L.y * (1.0 - fresnel_dielectric(L.y, eta));
-    let share = select(sun / e0, vec3<f32>(0.0), e0 <= vec3<f32>(0.0));
-    return 1.0 + (intensity - 1.0) * saturate(share);
+    var suns = vec3<f32>(0.0);
+    var sun_light = vec3<f32>(0.0);
+    for (var i = 0u; i < lights.n_directional_lights; i++) {
+        let light = &lights.directional_lights[i];
+        let L = (*light).direction_to_light.xyz;
+        if L.y <= 0.0 {
+            continue;
+        }
+        let beam = refract(-L, vec3<f32>(0.0, 1.0, 0.0), eta);
+        let sun = (*light).color.rgb * L.y * (1.0 - fresnel_dielectric(L.y, eta));
+        var intensity = 1.0;
+        if i == 0u && p.y < surface_y {
+            intensity = caustic_scale(p, beam, surface_y);
+        }
+        suns += sun;
+        sun_light += sun * intensity * exp(-kd * depth / max(-beam.y, 1e-3));
+    }
+    let sky = max(e0 - suns, vec3<f32>(0.0));
+    return select((sky * diffuse + sun_light) / e0, diffuse, e0 <= vec3<f32>(0.0));
 }
 
 /// Mean cosine of the Henyey-Greenstein phase function for single scattering, from Monzon et al.

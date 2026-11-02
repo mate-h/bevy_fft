@@ -72,6 +72,11 @@ fn transmission_preserves_bottom_and_measures_metric_thickness() {
         slice_count: 1,
         base_texel_size: 1.0,
     })
+    // No downwelling attenuation, so only the optics extinction dims the receiver.
+    .insert_resource(WaterMedium(WaterMediumUniform {
+        diffuse_attenuation: Vec3::ZERO,
+        ..default()
+    }))
     .insert_resource(bevy::render::error_handler::RenderErrorHandler(
         |error, _, _| {
             panic!("GPU validation failed: {error:?}");
