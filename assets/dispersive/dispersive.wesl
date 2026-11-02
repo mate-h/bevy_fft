@@ -177,7 +177,7 @@ fn decompose_split(@builtin(global_invocation_id) id: vec3u) {
     textureStore(d_tilde, id.xy, vec4(h_t, 0.0, 0.0, prev_h));
 }
 
-// --- Bulk bar: Chentanez–Müller 2010 (CMF10), same order as `shallow_water/simulator.wgsl` MacCormack + upwind h + η pressure.
+// --- Bulk bar: Chentanez–Müller 2010 (CMF10), same order as `src/shallow_water/simulator.wesl` MacCormack + upwind h + η pressure.
 
 fn bar_nxi() -> i32 { return i32(sim.n); }
 

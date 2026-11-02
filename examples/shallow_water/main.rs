@@ -36,6 +36,9 @@ const GRID: u32 = 256;
 const PATCH_HALF_EXTENT: f32 = 16.0;
 const PATCH_TILE_WORLD: f32 = PATCH_HALF_EXTENT * 2.0;
 
+#[path = "../common/screenshot.rs"]
+mod screenshot;
+
 fn main() {
     let mut wgpu = WgpuSettings::default();
     wgpu.features |= WgpuFeatures::FLOAT32_FILTERABLE;
@@ -45,13 +48,14 @@ fn main() {
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(GlobalAmbientLight::NONE)
         .add_plugins((
-            DefaultPlugins.set(RenderPlugin {
+            screenshot::default_plugins().set(RenderPlugin {
                 render_creation: RenderCreation::Automatic(Box::new(wgpu)),
                 ..default()
             }),
             FreeCameraPlugin,
             ShallowWaterPlugin,
             EguiPlugin::default(),
+            screenshot::ScreenshotOnEnvPlugin,
         ))
         .add_systems(Startup, setup)
         .add_systems(EguiPrimaryContextPass, shallow_water_egui_panel)
