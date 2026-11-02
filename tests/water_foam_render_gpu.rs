@@ -3,14 +3,20 @@
 //! A flat, unlit, black water plane is drawn from above with fixed active and residual foam in
 //! [`WaterLodData::foam_state`]. Each pixel then shows foam albedo times foam opacity, so the share
 //! of pixels at albedo 0.5 or more is the Stage A coverage the whitecap calibration measures.
+//!
+//! Seen from below under a uniform sky through clear water, a pixel without foam shows the sky
+//! dimmed by the Fresnel reflection at normal incidence. Foam reflects nothing back down there,
+//! since no light rises from the water, and passes `1 - 0.55` of the sky, so dense foam is darker
+//! than the open window by a known amount.
 use bevy::{
     app::PluginsState,
-    camera::{ImageRenderTarget, RenderTarget, ScalingMode},
+    camera::{Exposure, ImageRenderTarget, RenderTarget, ScalingMode},
     core_pipeline::tonemapping::Tonemapping,
+    light::EnvironmentMapLight,
     prelude::*,
     render::{
         gpu_readback::{Readback, ReadbackComplete},
-        render_resource::{TextureFormat, TextureUsages},
+        render_resource::{Face, TextureFormat, TextureUsages},
     },
     time::TimeUpdateStrategy,
     window::ExitCondition,
@@ -57,7 +63,16 @@ fn linear(value: u8) -> f32 {
     }
 }
 
+/// Linear brightness of the sky after exposure, for the view from below.
+const SKY: f32 = 0.5;
+const IOR: f32 = 1.333;
+
 fn foam_app() -> App {
+    foam_app_viewed(false)
+}
+
+/// Foam drawn from above, or from below under a uniform sky through clear water when `below`.
+fn foam_app_viewed(below: bool) -> App {
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -109,23 +124,45 @@ fn foam_app() -> App {
     let target = app.world_mut().resource_mut::<Assets<Image>>().add(image);
     // 6 m across 1024 pixels, finer than the foam texture, so the lace is resolved, and wide
     // enough to hold a few hundred foam cells.
-    app.world_mut().spawn((
-        Camera3d::default(),
-        Msaa::Off,
-        Tonemapping::None,
-        Projection::Orthographic(OrthographicProjection {
-            scaling_mode: ScalingMode::Fixed {
-                width: 6.0,
-                height: 6.0,
-            },
-            ..OrthographicProjection::default_3d()
-        }),
-        Transform::from_xyz(0.3, 4.0, -0.2).looking_at(Vec3::new(0.3, 0.0, -0.2), Vec3::NEG_Z),
-        RenderTarget::Image(ImageRenderTarget {
-            handle: target.clone(),
-            scale_factor: 1.0,
-        }),
-    ));
+    let camera = app
+        .world_mut()
+        .spawn((
+            Camera3d::default(),
+            Msaa::Off,
+            Tonemapping::None,
+            Projection::Orthographic(OrthographicProjection {
+                scaling_mode: ScalingMode::Fixed {
+                    width: 6.0,
+                    height: 6.0,
+                },
+                ..OrthographicProjection::default_3d()
+            }),
+            Transform::from_xyz(0.3, 4.0, -0.2).looking_at(Vec3::new(0.3, 0.0, -0.2), Vec3::NEG_Z),
+            RenderTarget::Image(ImageRenderTarget {
+                handle: target.clone(),
+                scale_factor: 1.0,
+            }),
+        ))
+        .id();
+    if below {
+        let exposure = Exposure { ev100: 0.0 };
+        let sky = {
+            let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+            EnvironmentMapLight::solid_color(&mut images, Color::WHITE)
+                .with_intensity(SKY / exposure.exposure())
+        };
+        app.world_mut().entity_mut(camera).insert((
+            exposure,
+            sky,
+            Transform::from_xyz(0.3, -4.0, -0.2).looking_at(Vec3::new(0.3, 0.0, -0.2), Vec3::NEG_Z),
+        ));
+        app.insert_resource(WaterMedium(WaterMediumUniform {
+            absorption: Vec3::ZERO,
+            scattering: Vec3::ZERO,
+            diffuse_attenuation: Vec3::ZERO,
+            ..default()
+        }));
+    }
     app.world_mut().spawn(Readback::texture(target)).observe(
         |event: On<ReadbackComplete>, mut capture: ResMut<Capture>| {
             capture.pixels = event.data.clone();
@@ -143,6 +180,7 @@ fn foam_app() -> App {
             base: StandardMaterial {
                 base_color: Color::BLACK,
                 unlit: true,
+                cull_mode: (!below).then_some(Face::Back),
                 ..default()
             },
             extension: WaterSurfaceExtension::default(),
@@ -291,6 +329,65 @@ fn sheared_foam_keeps_its_coverage() {
             (s.mean / expected - 1.0).abs() < 0.05,
             "mean albedo {} against {expected}",
             s.mean
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn foam_seen_from_below_passes_the_sky_it_does_not_reflect() {
+    let mut app = foam_app_viewed(true);
+    // Deep water, so the view from below sees no bed.
+    let foam = app.world().resource::<WaterLodData>().foam.clone();
+    {
+        let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+        let mut image = images.get_mut(&foam).unwrap();
+        for texel in image.data.as_mut().unwrap().chunks_exact_mut(8) {
+            texel[2..4].copy_from_slice(&0x63d0u16.to_le_bytes());
+        }
+    }
+    let r0 = ((IOR - 1.0) / (IOR + 1.0)).powi(2);
+    let open = SKY * (1.0 - r0);
+    let dense = SKY * (1.0 - FOAM_ALBEDO);
+    let brightness =
+        |pixels: &[u8]| -> Vec<f32> { pixels.chunks_exact(4).map(|p| linear(p[0])).collect() };
+
+    set_foam_state(&mut app, 0.0, 0.0);
+    let clear = brightness(&capture(&mut app, 7));
+    let clear_mean = clear.iter().sum::<f32>() / clear.len() as f32;
+    eprintln!("no foam from below: {clear_mean} against {open}");
+    assert!(
+        (clear_mean / open - 1.0).abs() < 0.02,
+        "open window {clear_mean} against {open}"
+    );
+
+    set_foam_state(&mut app, 0.2, 0.3);
+    for _ in 0..3 {
+        let pixels = brightness(&capture(&mut app, 7));
+        let n = pixels.len() as f32;
+        // Pixels whose centre lies inside dense foam, with the same opacity cut as from above.
+        let opacity_cut = 0.5 + 0.5 * 1.5 * 0.1 / 0.55;
+        let cut = open + (dense - open) * opacity_cut;
+        let inside: Vec<f32> = pixels.iter().copied().filter(|v| *v <= cut).collect();
+        let share = inside.len() as f32 / n;
+        let darkest = inside.iter().copied().fold(f32::INFINITY, f32::min);
+        let mean = pixels.iter().sum::<f32>() / n;
+        let opacity = 0.2 + 0.3 * 0.1 / 0.55;
+        let expected_mean = open + (dense - open) * opacity;
+        eprintln!(
+            "active 0.2, residual 0.3 from below: dense share {share}, darkest {darkest} against {dense}, mean {mean} against {expected_mean}"
+        );
+        assert!(
+            (share - 0.2).abs() < 0.02,
+            "dense foam must cover the active share from below, got {share}"
+        );
+        assert!(
+            (darkest / dense - 1.0).abs() < 0.03,
+            "dense foam passes 1 - R_f of the sky, {darkest} against {dense}"
+        );
+        assert!(
+            (mean / expected_mean - 1.0).abs() < 0.02,
+            "mean {mean} against {expected_mean}"
         );
     }
 }

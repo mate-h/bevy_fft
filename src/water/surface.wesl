@@ -101,7 +101,8 @@ struct WaterSurfaceUniform {
 @group(constants::MATERIAL_BIND_GROUP) @binding(111) var lod_foam_flow: texture_2d_array<f32>;
 
 /// Reflectance of dense foam. Koepke (1984, §III) takes about 55 percent from Whitlock et al.'s
-/// laboratory foam of more than 25 bubble layers. Matches `FOAM_ALBEDO` in `optics.wesl`.
+/// laboratory foam of more than 25 bubble layers. Matches `FOAM_ALBEDO` in `optics.wesl` and
+/// `underside.wesl`.
 const FOAM_ALBEDO: f32 = 0.55;
 /// Mean opacity of residual foam. Koepke (1984, §IV) measured foam streaks near 10 percent
 /// reflectance, a single bubble layer, against 55 percent for dense foam.
@@ -517,19 +518,23 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     );
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
-    let n_world = water_foam_normal(water_pixel_normal(xz), foam);
+    let wave_normal = water_pixel_normal(xz);
+    let n_world = water_foam_normal(wave_normal, foam);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = water_mix_foam_into_material(foam.opacity, pbr_input.material.base_color);
     var out: FragmentOutput;
     // Back faces are seen from under the water. They draw only when the material leaves them unculled.
     if !is_front {
+        // The foam relief shades the foam seen from above. From below the foam is a diffuse
+        // layer, so the surface keeps the wave normal.
         let radiance = shade_underside(
             in.world_position.xyz,
             view.world_position,
-            n_world,
+            wave_normal,
             foam_depth.z,
             pbr_input.material.perceptual_roughness,
+            foam.opacity,
             in.position.xy,
         );
         out.color = main_pass_post_lighting_processing(pbr_input, vec4<f32>(radiance, 1.0));

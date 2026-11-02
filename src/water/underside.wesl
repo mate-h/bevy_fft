@@ -377,18 +377,39 @@ fn sun_transmission(n: vec3<f32>, V: vec3<f32>, alpha: f32) -> vec3<f32> {
     return radiance;
 }
 
+/// Reflectance of dense foam. Matches `FOAM_ALBEDO` in `surface.wesl`.
+const FOAM_ALBEDO: f32 = 0.55;
+
+/// Foam seen from below. Frouin et al. (1996, Eq. 3) and Dierssen (2019, Eq. 13) treat foam, after
+/// Duntley (1942), as a diffusing layer that does not absorb visible light, so it passes
+/// `1 - R_f` of the light each way. From below it reflects `R_f` of the light rising from the water
+/// body, taken as diffuse with the radiance `upwelling` at the surface, and diffusely passes
+/// `1 - R_f` of the sky and sun irradiance on the surface. `R_f` is the dense foam reflectance. The
+/// foam opacity from `surface.wesl` scales it, as it does from above, so residual foam passes
+/// most of the window's light.
+fn foam_from_below(upwelling: vec3<f32>) -> vec3<f32> {
+    var irradiance = environment_irradiance_down();
+    for (var i = 0u; i < lights.n_directional_lights; i++) {
+        let light = &lights.directional_lights[i];
+        irradiance += (*light).color.rgb * max((*light).direction_to_light.y, 0.0);
+    }
+    return FOAM_ALBEDO * upwelling + (1.0 - FOAM_ALBEDO) * irradiance / PI;
+}
+
 /// Radiance reaching the eye at `eye` from the underside of the surface at `position`, whose
 /// upward normal is `n`. Inside Snell's window the sky refracts through the surface. Outside it,
 /// total internal reflection shows the lit water body (Monzon et al. 2024, Eq. 11), with both its
 /// multiple-scattered and single-scattered light. The sun shows through as a lobe as wide as
-/// `perceptual_roughness` makes it. The medium between the surface and the eye then dims that and
-/// adds its own light. `floor_depth` is the water column below the surface point.
+/// `perceptual_roughness` makes it. Foam of opacity `foam` covers that with `foam_from_below`. The
+/// medium between the surface and the eye then dims it all and adds its own light. `floor_depth`
+/// is the water column below the surface point.
 fn shade_underside(
     position: vec3<f32>,
     eye: vec3<f32>,
     n: vec3<f32>,
     floor_depth: f32,
     perceptual_roughness: f32,
+    foam: f32,
     frag_xy: vec2<f32>,
 ) -> vec3<f32> {
     let to_eye = eye - position;
@@ -414,7 +435,11 @@ fn shade_underside(
         + single_scattering(position, reflected, column / descent, position.y, frag_xy);
     let roughness = clamp(perceptual_roughness, MIN_PERCEPTUAL_ROUGHNESS, 1.0);
     let sun = sun_transmission(n, V, roughness * roughness);
-    let surface = (1.0 - reflectance) * sky + reflectance * body + sun;
+    var surface = (1.0 - reflectance) * sky + reflectance * body + sun;
+    if foam > 0.0 {
+        let upwelling = medium_multiple_scattering(0.0, 1.0, column, column, e0);
+        surface = mix(surface, foam_from_below(upwelling), saturate(foam));
+    }
     // The view ray runs from the eye up to the surface point.
     let eye_depth = max(position.y - eye.y, 0.0);
     let sigma_t = max(medium.absorption + medium.scattering, vec3<f32>(0.0));
