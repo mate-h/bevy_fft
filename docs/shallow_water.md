@@ -54,6 +54,8 @@ The plugin also uses `encode_clear`, `encode_load_preset`, `encode_seed_ocean`, 
 
 Manning friction slows each face implicitly by `u / (1 + g Δt n² |u| / h^(4/3))`, with h the mean depth of the two cells beside the face, floored at the wet threshold. It applies after the linear `friction` factor, and a zero `manning_n` turns it off.
 
+Before the depth update, `limitOutflow` scales each cell's outgoing fluxes so one step never drains more than the cell holds, so the depth stays non-negative without a clamp that creates water. The height kernels stage their result in `pml_state.z` and `commitHeight` copies it into `bed_water.y`, so every cell reads its neighbours' depth from before the kernel. By default the depth moves through each face first-order upwind, which diffuses about |u| Δx / 2. `second_order_depth` adds a flux-limited Lax-Wendroff correction with van Leer's limiter (Sweby 1984), which stays TVD up to Courant number 1 and lets roll waves grow at lower Froude numbers.
+
 [`tests/shallow_water_solver_gpu.rs`](../tests/shallow_water_solver_gpu.rs) drives the core this way over a bed that changes every frame, with a source texture and no presets, and checks that the bed matches the input and that water volume is conserved. Run it with `cargo test --test shallow_water_solver_gpu -- --ignored`, since it needs a graphics adapter.
 
 ## Try it

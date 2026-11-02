@@ -295,6 +295,7 @@ impl ShallowWaterController {
             ocean_band_cells: self.ocean_band_cells,
             ocean_forcing: self.ocean_forcing,
             overshoot_limiter: true,
+            second_order_depth: false,
             wind_dir,
             timestamp,
         }

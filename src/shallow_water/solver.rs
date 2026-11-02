@@ -46,7 +46,9 @@ pub struct ShallowWaterPipelines {
     pub mac_w_sl_forward: CachedComputePipelineId,
     pub mac_w_sl_reverse: CachedComputePipelineId,
     pub mac_w_combine: CachedComputePipelineId,
+    pub limit_outflow: CachedComputePipelineId,
     pub integrate_height: CachedComputePipelineId,
+    pub commit_height: CachedComputePipelineId,
     pub integrate_velocity_u: CachedComputePipelineId,
     pub integrate_velocity_w: CachedComputePipelineId,
     pub apply_domain_boundaries: CachedComputePipelineId,
@@ -131,7 +133,9 @@ impl FromWorld for ShallowWaterPipelines {
             mac_w_sl_forward: q("shallow_water_mac_w_fwd", "macW_sl_forward"),
             mac_w_sl_reverse: q("shallow_water_mac_w_rev", "macW_sl_reverse"),
             mac_w_combine: q("shallow_water_mac_w_comb", "macW_combine"),
+            limit_outflow: q("shallow_water_limit_outflow", "limitOutflow"),
             integrate_height: q("shallow_water_height", "integrateHeight"),
+            commit_height: q("shallow_water_commit_height", "commitHeight"),
             integrate_velocity_u: q("shallow_water_vel_u", "integrateVelocityU"),
             integrate_velocity_w: q("shallow_water_vel_w", "integrateVelocityW"),
             apply_domain_boundaries: q("shallow_water_borders", "applyDomainBoundaries"),
@@ -171,7 +175,9 @@ impl ShallowWaterPipelines {
             mac_w_sl_forward: get(self.mac_w_sl_forward)?,
             mac_w_sl_reverse: get(self.mac_w_sl_reverse)?,
             mac_w_combine: get(self.mac_w_combine)?,
+            limit_outflow: get(self.limit_outflow)?,
             integrate_height: get(self.integrate_height)?,
+            commit_height: get(self.commit_height)?,
             integrate_velocity_u: get(self.integrate_velocity_u)?,
             integrate_velocity_w: get(self.integrate_velocity_w)?,
             apply_domain_boundaries: get(self.apply_domain_boundaries)?,
@@ -207,7 +213,9 @@ pub struct ShallowWaterKernels {
     mac_w_sl_forward: ComputePipeline,
     mac_w_sl_reverse: ComputePipeline,
     mac_w_combine: ComputePipeline,
+    limit_outflow: ComputePipeline,
     integrate_height: ComputePipeline,
+    commit_height: ComputePipeline,
     integrate_velocity_u: ComputePipeline,
     integrate_velocity_w: ComputePipeline,
     apply_domain_boundaries: ComputePipeline,
@@ -371,6 +379,10 @@ pub struct ShallowWaterSettings {
     pub ocean_forcing: bool,
     /// Limits overshoot where the surface steps sharply between cells.
     pub overshoot_limiter: bool,
+    /// Carries depth through each face with a flux-limited second-order scheme instead of first
+    /// order upwind. Upwind diffuses about |u| Δx / 2, enough to damp roll waves well past the
+    /// Froude number where they should grow.
+    pub second_order_depth: bool,
     /// Unit wind direction on the grid, for the ocean seed.
     pub wind_dir: Vec2,
     /// Step counter for the wave maker edge and particle respawns.
@@ -397,6 +409,7 @@ impl Default for ShallowWaterSettings {
             ocean_band_cells: 5.0,
             ocean_forcing: false,
             overshoot_limiter: true,
+            second_order_depth: false,
             wind_dir: Vec2::X,
             timestamp: 0,
         }
@@ -416,7 +429,8 @@ impl ShallowWaterSettings {
         let friction_factor = (1.0 - self.friction.clamp(0.0, 1.0)).powf(self.dt);
         let flags = u32::from(self.overshoot_limiter)
             | (u32::from(self.ocean_forcing) << 1)
-            | (u32::from(has_source) << 2);
+            | (u32::from(has_source) << 2)
+            | (u32::from(self.second_order_depth) << 3);
         GpuSimulationUniform {
             size: cells,
             dt: self.dt,
@@ -731,7 +745,9 @@ impl ShallowWaterSolver {
         self.dispatch(pass, &k.mac_w_sl_forward, w);
         self.dispatch(pass, &k.mac_w_sl_reverse, w);
         self.dispatch(pass, &k.mac_w_combine, w);
+        self.dispatch(pass, &k.limit_outflow, cell);
         self.dispatch(pass, &k.integrate_height, cell);
+        self.dispatch(pass, &k.commit_height, cell);
         self.dispatch(pass, &k.integrate_velocity_u, u);
         self.dispatch(pass, &k.integrate_velocity_w, w);
         self.dispatch(pass, &k.apply_domain_boundaries, border);
@@ -744,6 +760,7 @@ impl ShallowWaterSolver {
         self.dispatch(pass, &k.pml_damp_w, w);
         self.dispatch(pass, &k.apply_domain_boundaries, border);
         self.dispatch(pass, &k.overshoot_reduce, cell);
+        self.dispatch(pass, &k.commit_height, cell);
     }
 
     /// Averages the face velocities into the cell-centered `velocity` texture.
