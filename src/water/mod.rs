@@ -12,8 +12,10 @@
 //! are culled to the camera frustum.
 //!
 //! Writers run in the render graph in the order of [`WaterLodGraphSystems`]. A base writer such
-//! as the ocean covers every texel. Regional solvers such as shallow water then blend over it
-//! through [`WaterLodScratch`]. The foam sim then carries foam over from the previous frame, and
+//! as the ocean covers every texel. Without one, insert [`WaterLodClear`] so the slices start each
+//! frame empty. Regional solvers such as shallow water then blend over the base through
+//! [`WaterLodScratch`]. A solver from another crate joins in by spawning a [`WaterHeightfield`]
+//! over its bed, depth, and velocity textures. The foam sim then carries foam over from the previous frame, and
 //! readers such as height queries run last.
 //!
 //! [`WaterUnderwater`] on the viewer adds a waterline mask, [`WaterWaterline`], that tells which
@@ -25,6 +27,7 @@ mod blend;
 mod caustics;
 mod foam;
 mod foam_texture;
+mod heightfield;
 mod lod_data;
 mod medium;
 mod quadtree;
@@ -42,10 +45,11 @@ pub use foam::{
     WATER_FOAM_SHADER, WATER_FOAM_STATE_FORMAT, WaterFoamFrame, WaterFoamParams, WaterFoamSettings,
 };
 pub use foam_texture::{WATER_FOAM_TEXTURE_SIZE, WaterFoamTexture, foam_texture_image};
+pub use heightfield::{WATER_HEIGHTFIELD_SHADER, WaterHeightfield, WaterHeightfieldDry};
 pub use lod_data::{
     WATER_FOAM_FLOW_FORMAT, WATER_FOAM_FLOW_LAYERS_PER_SLICE, WATER_LOD_DRIFT_FORMAT,
-    WATER_LOD_MAX_SLICES, WATER_LOD_SURFACE_FORMAT, WaterLodData, WaterLodGpu, WaterLodSettings,
-    WaterLodSlices, WaterViewer,
+    WATER_LOD_MAX_SLICES, WATER_LOD_SURFACE_FORMAT, WaterLodClear, WaterLodData, WaterLodGpu,
+    WaterLodSettings, WaterLodSlices, WaterViewer,
 };
 pub use medium::{WATER_MEDIUM_SHADER, WaterMedium};
 pub use quadtree::{
@@ -66,6 +70,7 @@ use bevy::{
     prelude::*,
     render::{
         GpuResourceAppExt, Render, RenderApp, RenderSystems,
+        extract_component::ExtractComponentPlugin,
         extract_resource::ExtractResourcePlugin,
         renderer::{RenderGraph, RenderGraphSystems},
     },
@@ -80,6 +85,8 @@ pub struct WaterLodSystems;
 /// cameras draw.
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WaterLodGraphSystems {
+    /// Empties the slices when [`WaterLodClear`] is present.
+    Clear,
     /// Writers that cover every texel, such as the FFT ocean.
     Base,
     /// Regional writers that fade into the base data at their edges.
@@ -107,8 +114,11 @@ impl Plugin for WaterPlugin {
         embedded_asset!(app, "surface.wesl");
         embedded_asset!(app, "quadtree.wesl");
         embedded_asset!(app, "foam.wesl");
+        embedded_asset!(app, "heightfield.wesl");
         app.register_type::<WaterLodSettings>()
             .register_type::<WaterViewer>()
+            .register_type::<WaterHeightfield>()
+            .register_type::<WaterHeightfieldDry>()
             .register_type::<WaterSurfaceUniform>()
             .register_type::<WaterOpticsUniform>()
             .register_type::<WaterMediumUniform>()
@@ -123,6 +133,8 @@ impl Plugin for WaterPlugin {
             .init_resource::<quadtree_gpu::WaterQuadtreeFrame>()
             .add_plugins(ExtractResourcePlugin::<quadtree_gpu::WaterQuadtreeFrame>::default())
             .add_plugins(ExtractResourcePlugin::<WaterLodData>::default())
+            .add_plugins(ExtractResourcePlugin::<WaterLodClear>::default())
+            .add_plugins(ExtractComponentPlugin::<WaterHeightfield>::default())
             .add_plugins(MaterialPlugin::<WaterSurfaceMaterial>::default())
             .add_observer(quadtree::read_quadtree_stats)
             .add_systems(
@@ -155,6 +167,7 @@ impl Plugin for WaterPlugin {
                 .init_resource::<WaterLodGpu>()
                 .init_resource::<WaterLodScratch>()
                 .init_resource::<foam::WaterFoamSim>()
+                .init_resource::<heightfield::WaterHeightfieldPasses>()
                 .add_systems(
                     Render,
                     (
@@ -166,11 +179,16 @@ impl Plugin for WaterPlugin {
                 )
                 .add_systems(
                     Render,
-                    foam::prepare_water_foam.in_set(RenderSystems::PrepareBindGroups),
+                    (
+                        foam::prepare_water_foam,
+                        heightfield::prepare_water_heightfields,
+                    )
+                        .in_set(RenderSystems::PrepareBindGroups),
                 )
                 .configure_sets(
                     RenderGraph,
                     (
+                        WaterLodGraphSystems::Clear,
                         WaterLodGraphSystems::Base,
                         WaterLodGraphSystems::Blend,
                         WaterLodGraphSystems::Simulate,
@@ -182,7 +200,11 @@ impl Plugin for WaterPlugin {
                 )
                 .add_systems(
                     RenderGraph,
-                    foam::run_water_foam.in_set(WaterLodGraphSystems::Simulate),
+                    (
+                        lod_data::clear_water_lod.in_set(WaterLodGraphSystems::Clear),
+                        heightfield::run_water_heightfields.in_set(WaterLodGraphSystems::Blend),
+                        foam::run_water_foam.in_set(WaterLodGraphSystems::Simulate),
+                    ),
                 )
                 .add_systems(
                     RenderGraph,
@@ -196,7 +218,9 @@ impl Plugin for WaterPlugin {
 
     fn finish(&self, app: &mut App) {
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-            render_app.init_resource::<foam::WaterFoamPipeline>();
+            render_app
+                .init_resource::<foam::WaterFoamPipeline>()
+                .init_resource::<heightfield::WaterHeightfieldPipeline>();
         }
         underwater::finish(app);
         caustics::finish(app);

@@ -1,10 +1,12 @@
-// Blends the shallow water surface into every water LOD slice that overlaps the grid.
+// Blends a heightfield of water, such as a shallow water grid, into every water LOD slice that
+// overlaps the grid.
 //
-// Inside the grid the solver replaces the long waves. Along the grid edge that replacement fades
+// Inside the grid the heightfield replaces the long waves. Along the grid edge that replacement fades
 // into the data below it over `blend_cells`, so the ocean shows through without a seam. Cascades
 // the cells cannot resolve are added back from the FFT, faded out in the last half meter of
 // depth, and stay at full strength through the edge blend. Dry cells contribute the still-water
-// level so the mesh does not follow the bed up onto land. Flow takes the solver's velocity the
+// level so the mesh does not follow the bed up onto land, or sit on the bed, where a river on a
+// slope should meet its banks. Flow takes the solver's velocity the
 // same way, with the vertical lane from mass conservation. The foam lane gets the breaking
 // intensity of CMF10 fronts between wet columns, of bores running up the beach, and of shear in the
 // current. The base data comes from a scratch copy made just before this pass.
@@ -12,22 +14,27 @@
 import bevy_fft::water::breaking::{breaking_front, breaking_swash, breaking_turbulence, max_abs};
 import bevy_fft::water::lod::{WaterLodSlices, lod_texel_world};
 
-struct ShallowWaterLodParams {
+struct WaterHeightfieldParams {
     /// World X and Z of the grid centre in meters.
     center: vec2<f32>,
     cell_size: f32,
-    /// Height above the surface mesh plane of the solver's zero level, in meters.
+    /// Height above the surface mesh plane of the source's zero level, in meters.
     datum: f32,
     cells: vec2<u32>,
     blend_cells: f32,
-    /// Still water level in solver height units. Dry cells render at `datum + fill_level`.
-    fill_level: f32,
+    /// Still water level in meters. With `dry_mode` 0, dry cells render at `datum + dry_level`.
+    dry_level: f32,
     /// World tile edge in meters for cascades 0 to 3.
     cascade_tile_sizes: vec4<f32>,
     amplitude: f32,
     choppiness: f32,
     cascade_count: u32,
-    _pad: u32,
+    /// 0 puts dry cells at `dry_level`, 1 on the bed.
+    dry_mode: u32,
+    /// Meters per unit of the source's bed height and water depth.
+    height_scale: f32,
+    /// Meters per second per unit of the source's velocity.
+    velocity_scale: f32,
 }
 
 /// Depth at or below this, in meters, is treated as dry for the mesh height.
@@ -43,7 +50,7 @@ const BREAK_MIN_DEPTH: f32 = 0.03;
 const BREAK_FADE_START: f32 = 1.5;
 const BREAK_FADE_END: f32 = 3.0;
 
-@group(0) @binding(0) var<uniform> params: ShallowWaterLodParams;
+@group(0) @binding(0) var<uniform> params: WaterHeightfieldParams;
 @group(0) @binding(1) var<uniform> lod: WaterLodSlices;
 @group(0) @binding(2) var displacement_out: texture_storage_2d_array<rgba16float, write>;
 @group(0) @binding(3) var foam_out: texture_storage_2d_array<rgba16float, write>;
@@ -51,9 +58,9 @@ const BREAK_FADE_END: f32 = 3.0;
 @group(0) @binding(5) var base_displacement: texture_2d_array<f32>;
 @group(0) @binding(6) var base_foam: texture_2d_array<f32>;
 @group(0) @binding(7) var base_flow: texture_2d_array<f32>;
-/// Bed height in `.x` and water depth in `.y`, both in meters.
+/// Bed height in `.x` and water depth in `.y`, in units of `params.height_scale`.
 @group(0) @binding(8) var bed_water: texture_2d<f32>;
-/// Depth-averaged velocity at cell centres in `.xy`, in meters per second.
+/// Depth-averaged velocity at cell centres in `.xy`, in units of `params.velocity_scale`.
 @group(0) @binding(9) var velocity: texture_2d<f32>;
 @group(0) @binding(10) var displacement_0: texture_2d<f32>;
 @group(0) @binding(11) var displacement_1: texture_2d<f32>;
@@ -137,29 +144,39 @@ fn unresolved_displacement(xz: vec2<f32>, texel: f32) -> Unresolved {
     return Unresolved(vec4<f32>(disp.rgb * amp, disp.a * chop), dz * chop);
 }
 
+/// Bed and depth of cell `p` in meters, with `p` clamped to the grid.
+fn load_bed_water(p: vec2<i32>) -> vec2<f32> {
+    let hi = vec2<i32>(params.cells) - 1;
+    return textureLoad(bed_water, clamp(p, vec2(0), hi), 0).xy * params.height_scale;
+}
+
+/// Velocity of cell `p` in meters per second, with `p` clamped to the grid.
+fn load_velocity(p: vec2<i32>) -> vec2<f32> {
+    let hi = vec2<i32>(params.cells) - 1;
+    return textureLoad(velocity, clamp(p, vec2(0), hi), 0).xy * params.velocity_scale;
+}
+
 /// Bilinear bed and depth at grid coordinate `g`, where cell `i` spans `i..i + 1`.
 fn bed_water_at(g: vec2<f32>) -> vec2<f32> {
-    let hi = vec2<i32>(params.cells) - 1;
     let x = g - 0.5;
     let i0 = vec2<i32>(floor(x));
     let f = x - floor(x);
-    let a = textureLoad(bed_water, clamp(i0, vec2(0), hi), 0).xy;
-    let b = textureLoad(bed_water, clamp(i0 + vec2(1, 0), vec2(0), hi), 0).xy;
-    let c = textureLoad(bed_water, clamp(i0 + vec2(0, 1), vec2(0), hi), 0).xy;
-    let d = textureLoad(bed_water, clamp(i0 + vec2(1, 1), vec2(0), hi), 0).xy;
+    let a = load_bed_water(i0);
+    let b = load_bed_water(i0 + vec2(1, 0));
+    let c = load_bed_water(i0 + vec2(0, 1));
+    let d = load_bed_water(i0 + vec2(1, 1));
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
 /// Bilinear velocity at grid coordinate `g`.
 fn velocity_at(g: vec2<f32>) -> vec2<f32> {
-    let hi = vec2<i32>(params.cells) - 1;
     let x = g - 0.5;
     let i0 = vec2<i32>(floor(x));
     let f = x - floor(x);
-    let a = textureLoad(velocity, clamp(i0, vec2(0), hi), 0).xy;
-    let b = textureLoad(velocity, clamp(i0 + vec2(1, 0), vec2(0), hi), 0).xy;
-    let c = textureLoad(velocity, clamp(i0 + vec2(0, 1), vec2(0), hi), 0).xy;
-    let d = textureLoad(velocity, clamp(i0 + vec2(1, 1), vec2(0), hi), 0).xy;
+    let a = load_velocity(i0);
+    let b = load_velocity(i0 + vec2(1, 0));
+    let c = load_velocity(i0 + vec2(0, 1));
+    let d = load_velocity(i0 + vec2(1, 1));
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
@@ -168,11 +185,11 @@ fn flux_at(g: vec2<f32>) -> vec2<f32> {
     return bed_water_at(g).y * velocity_at(g);
 }
 
-/// Solver free-surface height used for the mesh. Dry cells sit at the still-water level so a
-/// triangle onto land does not climb the bed.
+/// Free-surface height used for the mesh. With `dry_mode` 0, dry cells sit at the still-water
+/// level so a triangle onto land does not climb the bed.
 fn render_eta(bw: vec2<f32>) -> f32 {
-    if bw.y <= DRY_DEPTH {
-        return params.fill_level;
+    if bw.y <= DRY_DEPTH && params.dry_mode == 0u {
+        return params.dry_level;
     }
     return bw.x + bw.y;
 }
@@ -181,19 +198,18 @@ fn render_eta(bw: vec2<f32>) -> f32 {
 /// Blending bed and depth first, then adding them, lifts a sample that straddles the shore onto
 /// the averaged bed.
 fn eta_at(g: vec2<f32>) -> f32 {
-    let hi = vec2<i32>(params.cells) - 1;
     let x = g - 0.5;
     let i0 = vec2<i32>(floor(x));
     let f = x - floor(x);
-    let a = render_eta(textureLoad(bed_water, clamp(i0, vec2(0), hi), 0).xy);
-    let b = render_eta(textureLoad(bed_water, clamp(i0 + vec2(1, 0), vec2(0), hi), 0).xy);
-    let c = render_eta(textureLoad(bed_water, clamp(i0 + vec2(0, 1), vec2(0), hi), 0).xy);
-    let d = render_eta(textureLoad(bed_water, clamp(i0 + vec2(1, 1), vec2(0), hi), 0).xy);
+    let a = render_eta(load_bed_water(i0));
+    let b = render_eta(load_bed_water(i0 + vec2(1, 0)));
+    let c = render_eta(load_bed_water(i0 + vec2(0, 1)));
+    let d = render_eta(load_bed_water(i0 + vec2(1, 1)));
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn shallow_water_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn water_heightfield(@builtin(global_invocation_id) gid: vec3<u32>) {
     let res = lod.resolution;
     let slice = gid.z;
     if gid.x >= res || gid.y >= res || slice >= lod.count {

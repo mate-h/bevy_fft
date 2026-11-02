@@ -204,6 +204,7 @@ pub fn plug_shallow_water_render_app(render_app: &mut SubApp) {
     render_app.add_systems(
         bevy::render::renderer::RenderGraph,
         run_shallow_water_sim
+            .before(crate::water::WaterLodGraphSystems::Blend)
             .before(bevy::core_pipeline::schedule::camera_driver)
             .in_set(bevy::render::renderer::RenderGraphSystems::Render),
     );

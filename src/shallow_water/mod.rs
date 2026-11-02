@@ -12,11 +12,10 @@
 //!
 //! To place the grid in a larger scene, set [`ShallowWaterController::placement`] and add
 //! [`WaterPlugin`](crate::water::WaterPlugin), which [`OceanPlugin`](crate::ocean::OceanPlugin)
-//! also brings in. The surface is then blended into the shared
-//! [`WaterLodData`](crate::water::WaterLodData) each frame, so the ocean surface material and
+//! also brings in. The plugin then keeps a [`WaterHeightfield`] over the grid, which blends the
+//! surface into the shared [`WaterLodData`](crate::water::WaterLodData) each frame, so the ocean surface material and
 //! [`OceanQueries`](crate::ocean::OceanQueries) show it and it fades into the ocean at its edges.
 
-mod lod_write;
 mod render;
 mod solver;
 
@@ -27,7 +26,7 @@ use bevy::{
     prelude::*,
     reflect::Reflect,
     render::{
-        Render, RenderApp, RenderSystems,
+        RenderApp,
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_resource::{
             AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat, TextureUsages,
@@ -35,6 +34,8 @@ use bevy::{
     },
     shader::ShaderRef,
 };
+
+use crate::water::{WaterHeightfield, WaterHeightfieldDry};
 
 pub use render::{
     ShallowWaterGpuResources, ShallowWaterSimLabel, ShallowWaterTimestamp,
@@ -510,7 +511,6 @@ pub struct ShallowWaterSurfaceTag;
 pub mod shaders {
     pub const SHALLOW_WATER_SIMULATOR: &str = "embedded://bevy_fft/shallow_water/simulator.wesl";
     pub const SHALLOW_WATER_SURFACE: &str = "embedded://bevy_fft/shallow_water/surface.wesl";
-    pub const SHALLOW_WATER_LOD_WRITE: &str = "embedded://bevy_fft/shallow_water/lod_write.wesl";
 }
 
 fn sync_shallow_water_mesh_material(
@@ -527,6 +527,43 @@ fn sync_shallow_water_mesh_material(
     let g = sim.cells_x.max(sim.cells_y) as f32;
     mat.extension.settings.grid_size = g;
     mat.extension.bed_water = sim.bed_water.clone();
+}
+
+/// Marks the [`WaterHeightfield`] that [`ShallowWaterPlugin`] keeps over the controller's grid.
+#[derive(Component)]
+struct ShallowWaterHeightfield;
+
+/// Keeps a [`WaterHeightfield`] over the grid while [`ShallowWaterController::placement`] is set.
+/// The placed solver runs in meters, so heights and velocities need no scaling.
+fn sync_shallow_water_heightfield(
+    mut commands: Commands,
+    sim: Res<ShallowWaterController>,
+    mut existing: Query<(Entity, &mut WaterHeightfield), With<ShallowWaterHeightfield>>,
+) {
+    let Some(placement) = sim.placement else {
+        for (entity, _) in &existing {
+            commands.entity(entity).despawn();
+        }
+        return;
+    };
+    let heightfield = WaterHeightfield {
+        center: placement.center,
+        cell_size: placement.cell_size,
+        datum: placement.datum,
+        blend_cells: placement.blend_cells,
+        dry: WaterHeightfieldDry::Level(sim.fill_level),
+        ..WaterHeightfield::new(
+            sim.bed_water.clone(),
+            sim.velocity.clone(),
+            UVec2::new(sim.cells_x, sim.cells_y),
+        )
+    };
+    match existing.single_mut() {
+        Ok((_, mut current)) => *current = heightfield,
+        Err(_) => {
+            commands.spawn((heightfield, ShallowWaterHeightfield));
+        }
+    }
 }
 
 /// Registers the solver shader and queues [`ShallowWaterPipelines`] in the render world, for
@@ -555,7 +592,6 @@ impl Plugin for ShallowWaterPlugin {
             app.add_plugins(ShallowWaterSolverPlugin);
         }
         embedded_asset!(app, "surface.wesl");
-        embedded_asset!(app, "lod_write.wesl");
 
         app.register_type::<ShallowWaterController>()
             .register_type::<ShallowWaterBorder>()
@@ -563,30 +599,19 @@ impl Plugin for ShallowWaterPlugin {
             .register_type::<ShallowWaterMaterialUniform>()
             .add_plugins(ExtractResourcePlugin::<ShallowWaterController>::default())
             .add_plugins(MaterialPlugin::<ShallowWaterSurfaceMaterial>::default())
-            .add_systems(PostUpdate, sync_shallow_water_mesh_material);
+            .add_systems(
+                PostUpdate,
+                (
+                    sync_shallow_water_mesh_material,
+                    sync_shallow_water_heightfield,
+                ),
+            );
     }
 
     fn finish(&self, app: &mut App) {
-        let with_lod = app.is_plugin_added::<crate::water::WaterPlugin>();
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
         plug_shallow_water_render_app(render_app);
-        if with_lod {
-            render_app
-                .init_resource::<lod_write::ShallowWaterLodPipeline>()
-                .init_resource::<lod_write::ShallowWaterLodBindGroup>()
-                .add_systems(
-                    Render,
-                    lod_write::prepare_shallow_water_lod_write
-                        .in_set(RenderSystems::PrepareBindGroups),
-                )
-                .add_systems(
-                    bevy::render::renderer::RenderGraph,
-                    lod_write::run_shallow_water_lod_write
-                        .after(run_shallow_water_sim)
-                        .in_set(crate::water::WaterLodGraphSystems::Blend),
-                );
-        }
     }
 }

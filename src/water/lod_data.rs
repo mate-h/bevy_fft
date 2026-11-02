@@ -5,11 +5,13 @@ use bevy::{
     render::{
         RenderApp,
         extract_resource::ExtractResource,
+        render_asset::RenderAssets,
         render_resource::{
-            Extent3d, ShaderType, TextureDimension, TextureFormat, TextureUsages,
-            TextureViewDescriptor, TextureViewDimension, UniformBuffer,
+            Extent3d, ImageSubresourceRange, ShaderType, TextureDimension, TextureFormat,
+            TextureUsages, TextureViewDescriptor, TextureViewDimension, UniformBuffer,
         },
-        renderer::{RenderDevice, RenderQueue},
+        renderer::{RenderContext, RenderDevice, RenderQueue},
+        texture::GpuImage,
     },
 };
 
@@ -107,6 +109,31 @@ impl WaterLodData {
             let half = s.w * 0.5 - s.z;
             (xz.x - s.x).abs() <= half && (xz.y - s.y).abs() <= half
         })
+    }
+}
+
+/// Empties the `displacement`, `foam`, `flow`, and `drift` arrays of the [`WaterLodData`] at the
+/// start of each frame, for scenes with no base writer such as the FFT ocean. Without a base, a
+/// texel that a regional writer left would keep a value written for last frame's slice placement.
+/// Empty texels hold a still surface on the mesh plane with no water under it.
+#[derive(Resource, Clone, Copy, Debug, Default, ExtractResource, Reflect)]
+#[extract_app(RenderApp)]
+pub struct WaterLodClear;
+
+pub(super) fn clear_water_lod(
+    mut ctx: RenderContext,
+    clear: Option<Res<WaterLodClear>>,
+    lod: Option<Res<WaterLodData>>,
+    images: Res<RenderAssets<GpuImage>>,
+) {
+    let (Some(_), Some(lod)) = (clear, lod) else {
+        return;
+    };
+    let encoder = ctx.command_encoder();
+    for handle in [&lod.displacement, &lod.foam, &lod.flow, &lod.drift] {
+        if let Some(image) = images.get(handle) {
+            encoder.clear_texture(&image.texture, &ImageSubresourceRange::default());
+        }
     }
 }
 
