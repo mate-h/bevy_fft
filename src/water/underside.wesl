@@ -307,16 +307,88 @@ fn single_scattering(
     return sum * sigma_s * dt;
 }
 
+/// Smallest perceptual roughness, as Bevy clamps it. Bruneton et al. (2010, §5.1) clamp the slope
+/// variance the same way, so a flat surface shows the sun as a small disk rather than a point.
+const MIN_PERCEPTUAL_ROUGHNESS: f32 = 0.089;
+
+/// GGX density of microfacet normals at `cos_m` from the macro normal, Walter et al. (2007,
+/// Eq. 33).
+fn ggx_distribution(cos_m: f32, alpha: f32) -> f32 {
+    if cos_m <= 0.0 {
+        return 0.0;
+    }
+    let c2 = cos_m * cos_m;
+    let tan2 = (1.0 - c2) / c2;
+    let a2 = alpha * alpha;
+    let d = a2 + tan2;
+    return a2 / (PI * c2 * c2 * d * d);
+}
+
+/// Smith shadowing of direction `v` for microfacet normal `m` on macro normal `n`, with the GGX
+/// distribution, Walter et al. (2007, Eq. 34).
+fn ggx_smith_g1(v: vec3<f32>, m: vec3<f32>, n: vec3<f32>, alpha: f32) -> f32 {
+    let vn = dot(v, n);
+    if dot(v, m) * vn <= 0.0 {
+        return 0.0;
+    }
+    let c2 = vn * vn;
+    let tan2 = (1.0 - c2) / max(c2, 1e-8);
+    return 2.0 / (1.0 + sqrt(1.0 + alpha * alpha * tan2));
+}
+
+/// Sunlight the rough surface refracts toward the eye, seen along `V` from below, for a surface
+/// with upward normal `n` and GGX width `alpha`. Each directional light shines through Walter et
+/// al.'s (2007, Eq. 21) microfacet BTDF with the half vector of Eq. 16, from air into water. As
+/// Bruneton et al. (2010, §5.1) do for the reflected sun, the BTDF is taken as constant over the
+/// solar disk, so the sun's irradiance stands in for its radiance times its solid angle. The
+/// result is radiance, not yet exposed. It grows by the squared index over the light above, since
+/// the beam narrows as it enters the water, and integrates over directions below to the Fresnel
+/// transmittance times the irradiance on the surface, less what microfacets shadow.
+fn sun_transmission(n: vec3<f32>, V: vec3<f32>, alpha: f32) -> vec3<f32> {
+    let on = dot(V, n);
+    if on >= 0.0 {
+        return vec3<f32>(0.0);
+    }
+    let eta = medium.ior;
+    var radiance = vec3<f32>(0.0);
+    for (var i = 0u; i < lights.n_directional_lights; i++) {
+        let light = &lights.directional_lights[i];
+        let L = (*light).direction_to_light.xyz;
+        let ln = dot(L, n);
+        if ln <= 0.0 {
+            continue;
+        }
+        var h = -normalize(L + eta * V);
+        if dot(h, n) < 0.0 {
+            h = -h;
+        }
+        let lh = dot(L, h);
+        let vh = dot(V, h);
+        let denom = lh + eta * vh;
+        if lh <= 0.0 || abs(denom) < 1e-6 {
+            continue;
+        }
+        let g = ggx_smith_g1(L, h, n, alpha) * ggx_smith_g1(V, h, n, alpha);
+        let d = ggx_distribution(dot(h, n), alpha);
+        let transmitted = 1.0 - fresnel_dielectric(lh, 1.0 / eta);
+        let btdf = abs(lh * vh) / (ln * -on) * eta * eta * transmitted * g * d / (denom * denom);
+        radiance += (*light).color.rgb * btdf * ln;
+    }
+    return radiance;
+}
+
 /// Radiance reaching the eye at `eye` from the underside of the surface at `position`, whose
 /// upward normal is `n`. Inside Snell's window the sky refracts through the surface. Outside it,
 /// total internal reflection shows the lit water body (Monzon et al. 2024, Eq. 11), with both its
-/// multiple-scattered and single-scattered light. The medium between the surface and the eye then
-/// dims that and adds its own light. `floor_depth` is the water column below the surface point.
+/// multiple-scattered and single-scattered light. The sun shows through as a lobe as wide as
+/// `perceptual_roughness` makes it. The medium between the surface and the eye then dims that and
+/// adds its own light. `floor_depth` is the water column below the surface point.
 fn shade_underside(
     position: vec3<f32>,
     eye: vec3<f32>,
     n: vec3<f32>,
     floor_depth: f32,
+    perceptual_roughness: f32,
     frag_xy: vec2<f32>,
 ) -> vec3<f32> {
     let to_eye = eye - position;
@@ -340,7 +412,9 @@ fn shade_underside(
     let column = max(floor_depth, 0.0);
     let body = medium_multiple_scattering(0.0, descent, column / descent, column, e0)
         + single_scattering(position, reflected, column / descent, position.y, frag_xy);
-    let surface = (1.0 - reflectance) * sky + reflectance * body;
+    let roughness = clamp(perceptual_roughness, MIN_PERCEPTUAL_ROUGHNESS, 1.0);
+    let sun = sun_transmission(n, V, roughness * roughness);
+    let surface = (1.0 - reflectance) * sky + reflectance * body + sun;
     // The view ray runs from the eye up to the surface point.
     let eye_depth = max(position.y - eye.y, 0.0);
     let sigma_t = max(medium.absorption + medium.scattering, vec3<f32>(0.0));
