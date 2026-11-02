@@ -8,14 +8,21 @@
 //! CPU [`Image`] for `state` after init: re-uploading that buffer wipes the live GPU field.
 //! See `docs/dispersive.md` for the hybrid split and stability notes.
 //!
+//! Set [`DispersiveController::placement`] and add [`WaterPlugin`](crate::water::WaterPlugin),
+//! which [`OceanPlugin`](crate::ocean::OceanPlugin) also brings in, to write the patch into the
+//! shared [`WaterLodData`](crate::water::WaterLodData). [`DispersiveLodBlend`] picks whether it
+//! adds onto the ocean or replaces it.
+//!
 //! FFT bin layout matches eWave and the README: DC at `(0,0)`, positive then wrapped-negative bins.
 //! `k_xy` in `assets/dispersive/dispersive.wgsl` must stay on that convention. A centered
 //! `i - N/2` grid only matches if the spectrum was explicitly fftshifted (ocean path).
 
+mod lod_write;
 mod render;
 
 pub mod shaders {
     pub const DISPERSIVE_SURFACE: &str = "embedded://bevy_fft/dispersive/surface.wesl";
+    pub const DISPERSIVE_LOD_WRITE: &str = "embedded://bevy_fft/dispersive/lod_write.wesl";
 }
 
 pub use render::{
@@ -31,7 +38,7 @@ use bevy::{
     prelude::*,
     reflect::{Reflect, TypePath},
     render::{
-        RenderApp,
+        Render, RenderApp, RenderSystems,
         extract_component::{ExtractComponent, ExtractComponentPlugin},
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_resource::{AsBindGroup, ShaderType},
@@ -163,6 +170,43 @@ impl DispersiveGridImages {
     }
 }
 
+/// How a placed dispersive patch combines with the water LOD data below it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
+pub enum DispersiveLodBlend {
+    /// Adds the patch's deviation from rest onto the data below, so ocean waves keep running
+    /// through it. Suits wakes and ripples on open water, where the waves superpose linearly.
+    #[default]
+    Add,
+    /// Replaces the data below, including the water depth lane. Suits flooding and shorelines,
+    /// where the patch's own bed and depth matter.
+    Replace,
+}
+
+/// Where a dispersive patch sits in the world, for writing into the shared
+/// [`WaterLodData`](crate::water::WaterLodData). The cell width is
+/// [`DispersiveController::tile_world`] divided by [`DispersiveController::n`].
+#[derive(Clone, Copy, Debug, Reflect)]
+pub struct DispersivePlacement {
+    /// World X and Z of the patch centre in meters.
+    pub center: Vec2,
+    /// Height of the solver's rest surface above the surface mesh plane, in meters.
+    pub datum: f32,
+    /// Width in cells of the band along the patch edge where it fades out.
+    pub blend_cells: f32,
+    pub blend: DispersiveLodBlend,
+}
+
+impl Default for DispersivePlacement {
+    fn default() -> Self {
+        Self {
+            center: Vec2::ZERO,
+            datum: 0.0,
+            blend_cells: 24.0,
+            blend: DispersiveLodBlend::Add,
+        }
+    }
+}
+
 /// Main-world parameters (extracted to render world).
 #[derive(Resource, Clone, ExtractResource, Reflect)]
 #[extract_app(RenderApp)]
@@ -195,9 +239,24 @@ pub struct DispersiveController {
     pub brush_strength: f32,
     pub pointer: Vec2,
     pub pointer_prev: Vec2,
+    /// World placement. When set and [`WaterPlugin`](crate::water::WaterPlugin) is present, the
+    /// patch is written into the shared water LOD data every frame.
+    pub placement: Option<DispersivePlacement>,
 }
 
 impl DispersiveController {
+    /// Width of one cell in meters.
+    pub fn cell_size(&self) -> f32 {
+        self.tile_world / self.n.max(1) as f32
+    }
+
+    /// Grid coordinates in cells of world `xz`, with cell `i` spanning `i..i + 1`. Uses the
+    /// placement centre, or the origin without one.
+    pub fn world_to_cells(&self, xz: Vec2) -> Vec2 {
+        let center = self.placement.map_or(Vec2::ZERO, |p| p.center);
+        (xz - center) / self.cell_size() + 0.5 * self.n as f32
+    }
+
     /// Spawns the FFT + dispersive entity (power-of-two `n` only).
     pub fn spawn(commands: &mut Commands, images: &mut Assets<Image>, n: u32) -> Self {
         let grid = DispersiveGridImages::new(images, n);
@@ -231,6 +290,7 @@ impl DispersiveController {
             brush_strength: 0.7,
             pointer: Vec2::ZERO,
             pointer_prev: Vec2::ZERO,
+            placement: None,
         }
     }
 
@@ -254,6 +314,7 @@ impl DispersiveController {
         let brush_strength = self.brush_strength;
         let pointer = self.pointer;
         let pointer_prev = self.pointer_prev;
+        let placement = self.placement;
         let sim_apply_serial = self.sim_apply_serial.wrapping_add(1);
         commands.entity(self.sim_entity).despawn();
         let mut next = Self::spawn(commands, images, n);
@@ -273,6 +334,7 @@ impl DispersiveController {
         next.brush_strength = brush_strength;
         next.pointer = pointer;
         next.pointer_prev = pointer_prev;
+        next.placement = placement;
         next.sim_apply_serial = sim_apply_serial;
         next.init_serial = 1;
         *self = next;
@@ -351,7 +413,10 @@ pub struct DispersivePlugin;
 impl Plugin for DispersivePlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "surface.wesl");
+        embedded_asset!(app, "lod_write.wesl");
         app.register_type::<DispersiveController>()
+            .register_type::<DispersivePlacement>()
+            .register_type::<DispersiveLodBlend>()
             .register_type::<DispersiveSimRoot>()
             .register_type::<DispersiveGridImages>()
             .register_type::<DispersiveMaterialUniform>()
@@ -367,8 +432,26 @@ impl Plugin for DispersivePlugin {
             app.is_plugin_added::<FftPlugin>(),
             "DispersivePlugin requires FftPlugin (add FftPlugin before DispersivePlugin)."
         );
-        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-            plug_dispersive_render_app(render_app);
+        let with_lod = app.is_plugin_added::<crate::water::WaterPlugin>();
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+            return;
+        };
+        plug_dispersive_render_app(render_app);
+        if with_lod {
+            render_app
+                .init_resource::<lod_write::DispersiveLodPipeline>()
+                .init_resource::<lod_write::DispersiveLodBindGroup>()
+                .add_systems(
+                    Render,
+                    lod_write::prepare_dispersive_lod_write
+                        .in_set(RenderSystems::PrepareBindGroups),
+                )
+                .add_systems(
+                    bevy::render::renderer::RenderGraph,
+                    lod_write::run_dispersive_lod_write
+                        .after(run_dispersive_sim)
+                        .in_set(crate::water::WaterLodGraphSystems::Blend),
+                );
         }
     }
 }

@@ -1,6 +1,6 @@
 //! GPU init of `H0` and spectrum fill for buffer **C**, spliced into the root FFT graph.
 
-use std::sync::Mutex;
+use std::{collections::HashMap, sync::Mutex};
 
 use bevy::{
     asset::{Assets, Handle, RenderAssetUsages},
@@ -8,37 +8,40 @@ use bevy::{
         system::lifetimeless::Read,
         world::{FromWorld, World},
     },
-    image::Image,
-    pbr::MeshMaterial3d,
+    image::{Image, ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     prelude::*,
     reflect::Reflect,
     render::{
         RenderApp,
+        diagnostic::RecordDiagnostics,
         extract_component::{ComponentUniforms, ExtractComponent},
         render_asset::RenderAssets,
         render_resource::{
-            binding_types::{texture_storage_2d, uniform_buffer},
+            binding_types::{texture_2d, texture_storage_2d, uniform_buffer},
             *,
         },
         renderer::{RenderContext, RenderDevice},
         sync_component::SyncComponent,
+        sync_world::MainEntity,
         texture::GpuImage,
+        uniform::DynamicUniformIndex,
     },
     shader::ShaderDefVal,
 };
 
 use crate::fft::{
     FftSettings, FftSource,
-    resources::{FftBindGroupLayouts, FftBindGroups, FftTextures},
+    resources::{FftBindGroupLayouts, FftBindGroups, FftTextures, component_uniform_binding},
 };
 
-/// Snapshot of [`OceanH0Uniform`] from the last `init_h0` dispatch.
+/// Snapshot of each ocean entity's [`OceanH0Uniform`] from its last `init_h0` dispatch.
 ///
 /// `init_h0` bakes wind, JONSWAP, and amplitude into the `H0` texture. The compute pass runs again
-/// when this value differs from the current uniform, including when [`OceanSimSettings::h0_serial`](crate::ocean::OceanSimSettings#structfield.h0_serial) changes.
+/// for an entity when its uniform differs from the snapshot, including when [`OceanSimSettings::h0_serial`](crate::ocean::OceanSimSettings#structfield.h0_serial) changes.
+/// Snapshots are keyed by main-world entity so cascades do not overwrite each other.
 #[derive(Resource, Default)]
 pub struct OceanInitTracker {
-    last_init_h0_uniform: Mutex<Option<OceanH0Uniform>>,
+    last_init_h0_uniform: Mutex<HashMap<MainEntity, OceanH0Uniform>>,
 }
 
 #[repr(C)]
@@ -55,9 +58,14 @@ pub struct OceanH0Uniform {
     pub gravity: f32,
     pub amplitude_scale: f32,
     pub h0_serial: u32,
-    pub _pad1: u32,
-    pub _pad2: u32,
-    pub _pad3: u32,
+    /// Mean water depth in meters, see [`crate::ocean::OceanSimSettings::depth`].
+    pub depth: f32,
+    /// Horvath swell parameter, see [`crate::ocean::OceanSimSettings::swell`].
+    pub swell: f32,
+    /// Lower wavenumber band edge in rad/m, see [`crate::ocean::OceanSimSettings::band_k_min`].
+    pub band_k_min: f32,
+    /// Upper wavenumber band edge in rad/m. Infinity is sent as `f32::MAX`.
+    pub band_k_max: f32,
 }
 
 impl SyncComponent<RenderApp> for OceanH0Uniform {
@@ -86,7 +94,8 @@ pub struct OceanDynamicUniform {
     pub gravity: f32,
     /// Same radians as [`crate::ocean::OceanSimSettings::wind_direction`] and `init_h0` (`atan2(k.y, k.x)` on the XZ plane; texture row is Z).
     pub wind_direction: f32,
-    pub _pad2: f32,
+    /// Mean water depth in meters for the finite-depth dispersion relation.
+    pub depth: f32,
     pub _pad3: f32,
 }
 
@@ -148,18 +157,11 @@ pub struct OceanSpectrumLabel;
 #[derive(Component, Clone, Copy, Default, Reflect, ShaderType)]
 pub struct OceanFoamUniform {
     pub texture_size: u32,
-    pub _pad0: u32,
+    /// Amplitude times choppiness, which scales the horizontal displacement.
+    pub chop: f32,
     pub tile_size: f32,
-    pub _pad1: f32,
-    pub amplitude: f32,
-    pub choppiness: f32,
-    pub wind_direction: f32,
-    pub foam_cutoff: f32,
-    pub foam_falloff: f32,
-    pub foam_trail_decay: f32,
-    pub _foam_uniform_pad2: f32,
-    pub _foam_uniform_pad3: f32,
-    pub _foam_uniform_pad4: f32,
+    /// [`FftSource::spatial_display_gain`], which the resolve applies to the real lanes only.
+    pub normalization: f32,
 }
 
 impl SyncComponent<RenderApp> for OceanFoamUniform {
@@ -178,13 +180,20 @@ impl ExtractComponent<RenderApp> for OceanFoamUniform {
     }
 }
 
-/// GPU foam history ping-pong targets written after [`crate::fft::FftNode::ResolveOutputs`].
+/// Ping-pong targets written after [`crate::fft::FftNode::ResolveOutputs`]: horizontal
+/// displacement Z in G and last frame's Z in B. R and A are unused.
+///
+/// `jacobian` holds this cascade's term of the Jacobian determinant for far whitecaps, after
+/// Dupuy and Bruneton (2012, Eq. 7): with `a = dDx/dx`, `b = dDz/dz` and the off-diagonal terms
+/// scaled by the choppiness, R holds `a + b + a b - c_xz c_zx` and G its square. A full mip chain
+/// filters both over any footprint.
 ///
 /// The material samples whichever half was written last; see [`sync_ocean_foam_display`] and [`OceanFoamPhase`].
 #[derive(Component, Clone, Reflect)]
 pub struct OceanFoamMask {
     pub texture_a: Handle<Image>,
     pub texture_b: Handle<Image>,
+    pub jacobian: Handle<Image>,
 }
 
 impl SyncComponent<RenderApp> for OceanFoamMask {
@@ -226,15 +235,23 @@ impl ExtractComponent<RenderApp> for OceanFoamPhase {
 #[derive(Component)]
 pub struct OceanFoamBindGroups {
     pub group: BindGroup,
+    /// One bind group per mip level of the Jacobian statistics after the first, with that
+    /// level's size.
+    pub mips: Vec<(BindGroup, u32)>,
 }
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash)]
 pub struct OceanFoamLabel;
 
+/// Format of [`OceanFoamMask::jacobian`]. Filterable, so readers get trilinear filtering.
+pub const OCEAN_JACOBIAN_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+
 #[derive(Resource)]
 pub struct OceanFoamPipelines {
     pub layout: BindGroupLayoutDescriptor,
     pub foam: CachedComputePipelineId,
+    pub mip_layout: BindGroupLayoutDescriptor,
+    pub mip: CachedComputePipelineId,
 }
 
 impl FromWorld for OceanFoamPipelines {
@@ -248,24 +265,47 @@ impl FromWorld for OceanFoamPipelines {
                 uniform_buffer::<OceanFoamUniform>(false),
                 texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadOnly),
                 texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadOnly),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadOnly),
                 texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
+                texture_storage_2d(OCEAN_JACOBIAN_FORMAT, StorageTextureAccess::WriteOnly),
             ),
         );
         let layout = BindGroupLayoutDescriptor::new("ocean_foam_layout", &entries);
+        let mip_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                texture_storage_2d(OCEAN_JACOBIAN_FORMAT, StorageTextureAccess::WriteOnly),
+            ),
+        );
+        let mip_layout = BindGroupLayoutDescriptor::new("ocean_jacobian_mip_layout", &mip_entries);
 
-        let shader = asset_server.load("ocean/ocean_foam.wesl");
-        let foam = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("ocean_jacobian_foam".into()),
-            layout: vec![layout.clone()],
-            immediate_size: 0,
-            shader,
-            shader_defs: vec![],
-            entry_point: Some("ocean_jacobian_foam".into()),
-            zero_initialize_workgroup_memory: false,
-            constants: vec![],
-        });
+        let queue =
+            |label: &'static str, path: &'static str, layout: &BindGroupLayoutDescriptor| {
+                pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                    label: Some(label.into()),
+                    layout: vec![layout.clone()],
+                    immediate_size: 0,
+                    shader: asset_server.load(path),
+                    shader_defs: vec![],
+                    entry_point: Some(label.into()),
+                    zero_initialize_workgroup_memory: false,
+                    constants: vec![],
+                })
+            };
+        let foam = queue("ocean_jacobian_foam", "ocean/ocean_foam.wesl", &layout);
+        let mip = queue(
+            "ocean_jacobian_downsample",
+            "ocean/ocean_jacobian_mips.wesl",
+            &mip_layout,
+        );
 
-        Self { layout, foam }
+        Self {
+            layout,
+            foam,
+            mip_layout,
+            mip,
+        }
     }
 }
 
@@ -393,6 +433,14 @@ pub(super) fn sync_ocean_h0_uniform(
         u.gravity = s.gravity;
         u.amplitude_scale = s.amplitude_scale;
         u.h0_serial = s.h0_serial;
+        u.depth = s.depth;
+        u.swell = s.swell;
+        u.band_k_min = s.band_k_min.max(0.0);
+        u.band_k_max = if s.band_k_max.is_finite() {
+            s.band_k_max
+        } else {
+            f32::MAX
+        };
     }
 }
 
@@ -406,6 +454,7 @@ pub(super) fn sync_ocean_dynamic_uniform(
         d.elapsed_seconds = time.elapsed_secs() * s.time_scale;
         d.gravity = s.gravity;
         d.wind_direction = s.wind_direction;
+        d.depth = s.depth;
     }
 }
 
@@ -438,61 +487,52 @@ pub(super) fn prepare_ocean_foam_mask_image(
         };
         let texture_a = make_tex();
         let texture_b = make_tex();
+        let mut jacobian = Image::new_uninit(
+            extent,
+            TextureDimension::D2,
+            OCEAN_JACOBIAN_FORMAT,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        jacobian.texture_descriptor.mip_level_count = extent.max_mips(TextureDimension::D2);
+        jacobian.texture_descriptor.usage =
+            TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING;
+        jacobian.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+            address_mode_u: ImageAddressMode::Repeat,
+            address_mode_v: ImageAddressMode::Repeat,
+            mag_filter: ImageFilterMode::Linear,
+            min_filter: ImageFilterMode::Linear,
+            mipmap_filter: ImageFilterMode::Linear,
+            ..default()
+        });
         commands.entity(entity).insert(OceanFoamMask {
             texture_a,
             texture_b,
+            jacobian: images.add(jacobian),
         });
     }
 }
 
 pub(super) fn sync_ocean_foam_uniform(
-    mut q: Query<(&crate::ocean::OceanSimSettings, &mut OceanFoamUniform)>,
-    surface: Query<
-        &MeshMaterial3d<crate::ocean::OceanSurfaceMaterial>,
-        With<crate::ocean::OceanSurfaceTag>,
-    >,
-    materials: Res<Assets<crate::ocean::OceanSurfaceMaterial>>,
+    mut q: Query<(
+        &crate::ocean::OceanSimSettings,
+        &FftSource,
+        &mut OceanFoamUniform,
+    )>,
+    settings: Res<crate::ocean::OceanSurfaceSettings>,
 ) {
-    let mat = surface.iter().next().and_then(|m| materials.get(&m.0));
-    for (s, mut u) in &mut q {
+    for (s, source, mut u) in &mut q {
         u.texture_size = s.texture_size;
+        u.chop = settings.amplitude * settings.choppiness;
         u.tile_size = s.tile_size;
-        u.wind_direction = s.wind_direction;
-        if let Some(m) = mat {
-            u.amplitude = m.extension.settings.amplitude;
-            u.choppiness = m.extension.settings.choppiness;
-            u.foam_cutoff = m.extension.settings.foam_cutoff;
-            u.foam_falloff = m.extension.settings.foam_falloff;
-            u.foam_trail_decay = m.extension.settings.foam_trail_decay;
-        }
+        u.normalization = source.spatial_display_gain;
     }
 }
 
-pub(super) fn sync_ocean_foam_display(
-    mut phase_q: Query<&mut OceanFoamPhase, With<FftSource>>,
-    mask: Query<&OceanFoamMask, With<FftSource>>,
-    surface: Query<
-        &MeshMaterial3d<crate::ocean::OceanSurfaceMaterial>,
-        With<crate::ocean::OceanSurfaceTag>,
-    >,
-    mut materials: ResMut<Assets<crate::ocean::OceanSurfaceMaterial>>,
-) {
-    let Ok(mask) = mask.single() else {
-        return;
-    };
-    let Ok(mut phase) = phase_q.single_mut() else {
-        return;
-    };
-    phase.0 = phase.0.wrapping_add(1);
-    let k = phase.0;
-    if let Ok(mh) = surface.single()
-        && let Some(mut mat) = materials.get_mut(mh)
-    {
-        mat.extension.foam_mask = if k % 2 == 0 {
-            mask.texture_b.clone()
-        } else {
-            mask.texture_a.clone()
-        };
+/// Advances each ocean entity's foam ping-pong phase once per frame. The LOD writer reads the
+/// half written last (see `lod_write::gather_ocean_lod_write`).
+pub(super) fn sync_ocean_foam_display(mut phases: Query<&mut OceanFoamPhase, With<FftSource>>) {
+    for mut phase in &mut phases {
+        phase.0 = phase.0.wrapping_add(1);
     }
 }
 
@@ -501,15 +541,11 @@ type PrepareOceanBgQuery<'w, 's> = Query<
     's,
     (
         Entity,
-        &'static FftTextures,
         &'static OceanH0Image,
-        &'static FftSettings,
+        &'static DynamicUniformIndex<OceanH0Uniform>,
+        &'static DynamicUniformIndex<OceanDynamicUniform>,
     ),
-    (
-        With<FftBindGroups>,
-        With<OceanH0Uniform>,
-        With<OceanDynamicUniform>,
-    ),
+    With<FftBindGroups>,
 >;
 
 #[allow(clippy::too_many_arguments)]
@@ -523,18 +559,17 @@ pub(super) fn prepare_ocean_compute_bind_groups(
     gpu_images: Res<RenderAssets<GpuImage>>,
     query: PrepareOceanBgQuery,
 ) {
-    let Some(h0_binding) = h0_uniforms.binding() else {
-        return;
-    };
-    let Some(dyn_binding) = dyn_uniforms.binding() else {
-        return;
-    };
-
     let init_layout = pipeline_cache.get_bind_group_layout(&ocean_pipelines.init_layout);
     let dyn_layout = pipeline_cache.get_bind_group_layout(&ocean_pipelines.spectrum_layout_dynamic);
     let h0_layout = pipeline_cache.get_bind_group_layout(&ocean_pipelines.spectrum_layout_h0);
 
-    for (entity, _textures, ocean_h0, _fft_settings) in &query {
+    for (entity, ocean_h0, h0_index, dyn_index) in &query {
+        let Some(h0_binding) = component_uniform_binding(&h0_uniforms, h0_index) else {
+            continue;
+        };
+        let Some(dyn_binding) = component_uniform_binding(&dyn_uniforms, dyn_index) else {
+            continue;
+        };
         let Some(h0_view) = gpu_images.get(&ocean_h0.texture).map(|g| &g.texture_view) else {
             continue;
         };
@@ -542,13 +577,13 @@ pub(super) fn prepare_ocean_compute_bind_groups(
         let init = render_device.create_bind_group(
             "ocean_init_bind_group",
             &init_layout,
-            &BindGroupEntries::sequential((h0_view, h0_binding.clone())),
+            &BindGroupEntries::sequential((h0_view, h0_binding)),
         );
 
         let spectrum_dynamic = render_device.create_bind_group(
             "ocean_spectrum_dyn_bind_group",
             &dyn_layout,
-            &BindGroupEntries::sequential((dyn_binding.clone(),)),
+            &BindGroupEntries::sequential((dyn_binding,)),
         );
 
         let spectrum_h0_read = render_device.create_bind_group(
@@ -573,8 +608,9 @@ type PrepareOceanFoamBgQuery<'w, 's> = Query<
         &'static FftTextures,
         &'static OceanFoamMask,
         &'static OceanFoamPhase,
+        &'static DynamicUniformIndex<OceanFoamUniform>,
     ),
-    (With<FftBindGroups>, With<OceanFoamUniform>),
+    With<FftBindGroups>,
 >;
 
 pub(super) fn prepare_ocean_foam_bind_groups(
@@ -586,15 +622,21 @@ pub(super) fn prepare_ocean_foam_bind_groups(
     gpu_images: Res<RenderAssets<GpuImage>>,
     query: PrepareOceanFoamBgQuery,
 ) {
-    let Some(foam_binding) = foam_uniforms.binding() else {
-        return;
-    };
-
     let layout = pipeline_cache.get_bind_group_layout(&foam_pipelines.layout);
+    let mip_layout = pipeline_cache.get_bind_group_layout(&foam_pipelines.mip_layout);
 
-    for (entity, textures, foam_mask, phase) in &query {
+    for (entity, textures, foam_mask, phase, foam_index) in &query {
+        let Some(foam_binding) = component_uniform_binding(&foam_uniforms, foam_index) else {
+            continue;
+        };
         let Some(spatial) = gpu_images
             .get(&textures.spatial_output)
+            .map(|g| &g.texture_view)
+        else {
+            continue;
+        };
+        let Some(spatial_im) = gpu_images
+            .get(&textures.buffer_b_im)
             .map(|g| &g.texture_view)
         else {
             continue;
@@ -615,16 +657,46 @@ pub(super) fn prepare_ocean_foam_bind_groups(
         let Some(foam_write) = gpu_images.get(write_handle).map(|g| &g.texture_view) else {
             continue;
         };
+        let Some(jacobian) = gpu_images.get(&foam_mask.jacobian) else {
+            continue;
+        };
+        let level = |mip: u32| {
+            jacobian.texture.create_view(&TextureViewDescriptor {
+                base_mip_level: mip,
+                mip_level_count: Some(1),
+                ..default()
+            })
+        };
+        let levels = jacobian.texture.mip_level_count();
+        let size = jacobian.texture.width();
+        let mips = (1..levels)
+            .map(|mip| {
+                let group = render_device.create_bind_group(
+                    "ocean_jacobian_mip_bind_group",
+                    &mip_layout,
+                    &BindGroupEntries::sequential((&level(mip - 1), &level(mip))),
+                );
+                (group, (size >> mip).max(1))
+            })
+            .collect();
+        let jacobian_out = level(0);
 
         let group = render_device.create_bind_group(
             "ocean_foam_bind_group",
             &layout,
-            &BindGroupEntries::sequential((foam_binding.clone(), spatial, foam_read, foam_write)),
+            &BindGroupEntries::sequential((
+                foam_binding,
+                spatial,
+                spatial_im,
+                foam_read,
+                foam_write,
+                &jacobian_out,
+            )),
         );
 
         commands
             .entity(entity)
-            .insert(OceanFoamBindGroups { group });
+            .insert(OceanFoamBindGroups { group, mips });
     }
 }
 
@@ -634,6 +706,7 @@ pub fn run_ocean_spectrum(
     cache: Res<PipelineCache>,
     tracker: Res<OceanInitTracker>,
     query: Query<(
+        &MainEntity,
         &FftBindGroups,
         &OceanComputeBindGroups,
         &FftSettings,
@@ -648,16 +721,19 @@ pub fn run_ocean_spectrum(
     };
 
     let wg = 8u32;
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let enc = ctx.command_encoder();
+    let time_span = diagnostics.time_span(enc, "ocean_spectrum");
 
-    for (fft_bg, ocean_bg, settings, h0_uni) in &query {
+    for (main_entity, fft_bg, ocean_bg, settings, h0_uni) in &query {
         let nx = settings.size.x.div_ceil(wg);
         let ny = settings.size.y.div_ceil(wg);
 
         let current = *h0_uni;
         let needs_h0_init = {
             let guard = tracker.last_init_h0_uniform.lock().unwrap();
-            guard.as_ref() != Some(&current)
+            guard.get(main_entity) != Some(&current)
         };
         if needs_h0_init {
             {
@@ -669,7 +745,11 @@ pub fn run_ocean_spectrum(
                 pass.set_bind_group(0, &ocean_bg.init, &[]);
                 pass.dispatch_workgroups(nx, ny, 1);
             }
-            *tracker.last_init_h0_uniform.lock().unwrap() = Some(current);
+            tracker
+                .last_init_h0_uniform
+                .lock()
+                .unwrap()
+                .insert(*main_entity, current);
         }
 
         {
@@ -684,6 +764,7 @@ pub fn run_ocean_spectrum(
             pass.dispatch_workgroups(nx, ny, 1);
         }
     }
+    time_span.end(enc);
 }
 
 pub fn run_ocean_foam(
@@ -692,12 +773,18 @@ pub fn run_ocean_foam(
     cache: Res<PipelineCache>,
     query: Query<(&OceanFoamBindGroups, &FftSettings)>,
 ) {
-    let Some(foam_pl) = cache.get_compute_pipeline(pl.foam) else {
+    let (Some(foam_pl), Some(mip_pl)) = (
+        cache.get_compute_pipeline(pl.foam),
+        cache.get_compute_pipeline(pl.mip),
+    ) else {
         return;
     };
 
     let wg = 8u32;
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let enc = ctx.command_encoder();
+    let time_span = diagnostics.time_span(enc, "ocean_foam");
 
     for (foam_bg, settings) in &query {
         let nx = settings.size.x.div_ceil(wg);
@@ -710,5 +797,11 @@ pub fn run_ocean_foam(
         pass.set_pipeline(foam_pl);
         pass.set_bind_group(0, &foam_bg.group, &[]);
         pass.dispatch_workgroups(nx, ny, 1);
+        pass.set_pipeline(mip_pl);
+        for (group, size) in &foam_bg.mips {
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(size.div_ceil(wg), size.div_ceil(wg), 1);
+        }
     }
+    time_span.end(enc);
 }

@@ -13,7 +13,6 @@ use bevy::{
         VolumetricLight, atmosphere::ScatteringMedium, light_consts::lux,
     },
     material::OpaqueRendererMethod,
-    math::primitives::InfinitePlane3d,
     mesh::Meshable,
     pbr::{AtmosphereSettings, DefaultOpaqueRendererMethod, StandardMaterial},
     post_process::bloom::Bloom,
@@ -23,6 +22,7 @@ use bevy::{
         render_resource::WgpuFeatures,
         settings::{RenderCreation, WgpuSettings},
     },
+    shape::InfinitePlane3d,
     transform::TransformSystems,
 };
 use bevy_egui::{
