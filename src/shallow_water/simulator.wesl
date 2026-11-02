@@ -633,55 +633,9 @@ fn h_adj_cell(ic : i32, jc : i32) -> f32 {
     return max(0.0, avg - h_avgmax);
 }
 
-/// Upwind depth flux through a face from the left (or lower) cell to the right (or upper) one.
-/// `r_*` scales the flux by the outflow limit of whichever cell it leaves.
-fn upwind_h_flux(
-    h_up : f32, h_dn : f32, u_face : f32, h_adj_up : f32, h_adj_dn : f32, r_up : f32, r_dn : f32,
-) -> f32 {
+fn upwind_h_flux(h_up : f32, h_dn : f32, u_face : f32, h_adj_up : f32, h_adj_dn : f32) -> f32 {
     let hu = select(h_dn - h_adj_dn, h_up - h_adj_up, u_face > 0.0);
-    let r = select(r_dn, r_up, u_face > 0.0);
-    return u_face * max(0.0, hu) * r;
-}
-
-/// Outflow limit of a cell from `limitOutflow`, in `pml_state.w`.
-fn outflow_limit(ic : i32, jc : i32) -> f32 {
-    return textureLoad(pmlStateTexture, cell_ij_clamped(ic, jc)).w;
-}
-
-/// Scales a cell's outgoing fluxes so one step never drains more than the cell holds, which keeps
-/// the depth non-negative without the clamp creating water. Writes `pml_state.w`.
-@compute @workgroup_size(16, 16)
-fn limitOutflow(@builtin(global_invocation_id) id: vec3u) {
-    if (id.x >= simulationSettings.size.x || id.y >= simulationSettings.size.y) { return; }
-    let i = i32(id.x);
-    let j = i32(id.y);
-    let uL = u_face_at(i, j);
-    let uR = u_face_at(i + 1, j);
-    let wB = w_face_at(i, j);
-    let wT = w_face_at(i, j + 1);
-    let h = h_at(i, j);
-    let hu = max(0.0, h - h_adj_cell(i, j));
-    let out = (max(uR, 0.0) + max(-uL, 0.0) + max(wT, 0.0) + max(-wB, 0.0)) * hu;
-    let drained = out * simulationSettings.dt / simulationSettings.dx;
-    var p = textureLoad(pmlStateTexture, id.xy);
-    p.w = select(1.0, h / drained, drained > h);
-    textureStore(pmlStateTexture, id.xy, p);
-}
-
-/// Copies the depth staged in `pml_state.z` into `bed_water.y`. Height kernels stage their result
-/// there, so every cell reads its neighbours' depth from before the kernel.
-@compute @workgroup_size(16, 16)
-fn commitHeight(@builtin(global_invocation_id) id: vec3u) {
-    if (id.x >= simulationSettings.size.x || id.y >= simulationSettings.size.y) { return; }
-    var bw = textureLoad(bedWaterTexture, id.xy);
-    bw.y = textureLoad(pmlStateTexture, id.xy).z;
-    textureStore(bedWaterTexture, id.xy, bw);
-}
-
-fn stage_height(cell : vec2u, h : f32) {
-    var p = textureLoad(pmlStateTexture, cell);
-    p.z = h;
-    textureStore(pmlStateTexture, cell, p);
+    return u_face * max(0.0, hu);
 }
 
 @compute @workgroup_size(16, 16)
@@ -705,11 +659,10 @@ fn integrateHeight(@builtin(global_invocation_id) id: vec3u) {
     let h_r = h_at(i + 1, j);
     let h_d = h_at(i, j - 1);
     let h_u = h_at(i, j + 1);
-    let r_c = outflow_limit(i, j);
-    let f_e = upwind_h_flux(h_c, h_r, uR, aj, aj_r, r_c, outflow_limit(i + 1, j));
-    let f_w = upwind_h_flux(h_l, h_c, uL, aj_l, aj, outflow_limit(i - 1, j), r_c);
-    let f_n = upwind_h_flux(h_c, h_u, wT, aj, aj_t, r_c, outflow_limit(i, j + 1));
-    let f_s = upwind_h_flux(h_d, h_c, wB, aj_b, aj, outflow_limit(i, j - 1), r_c);
+    let f_e = upwind_h_flux(h_c, h_r, uR, aj, aj_r);
+    let f_w = upwind_h_flux(h_l, h_c, uL, aj_l, aj);
+    let f_n = upwind_h_flux(h_c, h_u, wT, aj, aj_t);
+    let f_s = upwind_h_flux(h_d, h_c, wB, aj_b, aj);
     let div = (f_e - f_w + f_n - f_s);
     var bw = textureLoad(bedWaterTexture, id.xy);
     bw.y += -dt / dx * div;
@@ -720,7 +673,7 @@ fn integrateHeight(@builtin(global_invocation_id) id: vec3u) {
         bw.y *= 1.0 - clamp(source.y, 0.0, 1.0);
     }
     bw.y *= max(0.0, 1.0 - simulationSettings.evaporation * dt);
-    stage_height(id.xy, bw.y);
+    textureStore(bedWaterTexture, id.xy, bw);
 }
 
 @compute @workgroup_size(16, 16)
@@ -1065,15 +1018,12 @@ fn pmlDampFaceW(@builtin(global_invocation_id) id: vec3u) {
 @compute @workgroup_size(16, 16)
 fn overshootReduce(@builtin(global_invocation_id) id: vec3u) {
     if (id.x >= simulationSettings.size.x || id.y >= simulationSettings.size.y) { return; }
-    var bw = textureLoad(bedWaterTexture, id.xy);
-    if ((simulationSettings.flags & 1u) == 0u) {
-        stage_height(id.xy, bw.y);
-        return;
-    }
+    if ((simulationSettings.flags & 1u) == 0u) { return; }
     let i = i32(id.x);
     let j = i32(id.y);
     let lam = simulationSettings.overshoot_lambda_edge;
     let a_edge = simulationSettings.overshoot_alpha;
+    var bw = textureLoad(bedWaterTexture, id.xy);
     let eta_c = bw.x + bw.y;
     let eta_w = eta_at(i - 1, j);
     let eta_e = eta_at(i + 1, j);
@@ -1095,7 +1045,8 @@ fn overshootReduce(@builtin(global_invocation_id) id: vec3u) {
         let half = max(0.0, 0.5 * (bw.y + h_at(i, j - 1)));
         bw.y += a_edge * (half - bw.y);
     }
-    stage_height(id.xy, max(0.0, bw.y));
+    bw.y = max(0.0, bw.y);
+    textureStore(bedWaterTexture, id.xy, bw);
 }
 
 @compute @workgroup_size(16, 16)
