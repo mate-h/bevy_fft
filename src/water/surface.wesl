@@ -82,6 +82,8 @@ struct WaterSurfaceUniform {
     vertex_lod_bias: f32,
     dry_depth: f32,
     time: f32,
+    /// Height of the level plane the mesh displaces from.
+    plane_height: f32,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> surface: WaterSurfaceUniform;
@@ -532,6 +534,7 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
             in.world_position.xyz,
             view.world_position,
             wave_normal,
+            surface.plane_height,
             foam_depth.z,
             pbr_input.material.perceptual_roughness,
             foam.opacity,
@@ -542,8 +545,7 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     }
 @if(VIEW_TRANSMISSION_TEXTURE) {
     if optics.enabled != 0u {
-        let surface_y = in.world_position.y - water_sample(xz, 0.0).b;
-        out.color = shade_water(pbr_input, foam_depth.z, foam.opacity, foam_depth.x, surface_y);
+        out.color = shade_water(pbr_input, foam_depth.z, foam.opacity, foam_depth.x, surface.plane_height);
         out.color = main_pass_post_lighting_processing(pbr_input, out.color);
         return out;
     }

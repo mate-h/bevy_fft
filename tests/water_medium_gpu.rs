@@ -334,3 +334,104 @@ fn objects_under_water_shadow_the_sunlight_they_block() {
     assert_close("under the slab", shaded, multiple, 0.03);
     assert_close("beside the slab", lit, multiple + single, 0.03);
 }
+
+/// Half float bits for `value`, rounded to nearest. Covers the normal range used here.
+fn half_bits(value: f32) -> u16 {
+    if value.abs() < 1e-4 {
+        return 0;
+    }
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+    let rounded = ((bits & 0x7f_ffff) + 0x1000) >> 13;
+    let (exponent, rounded) = if rounded == 0x400 {
+        (exponent + 1, 0)
+    } else {
+        (exponent, rounded)
+    };
+    sign | ((exponent as u16) << 10) | rounded as u16
+}
+
+/// Fills every LOD slice with waves `h = A cos(k z)` running along the view, 0.4 m high and 32 m
+/// long.
+fn set_waves(app: &mut App) {
+    let slices = app.world().resource::<WaterLodData>().slices;
+    let handle = app.world().resource::<WaterLodData>().displacement.clone();
+    let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+    let mut image = images.get_mut(&handle).unwrap();
+    let res = slices.resolution as usize;
+    let k = std::f32::consts::TAU / 32.0;
+    let a = 0.4;
+    for (n, texel) in image.data.as_mut().unwrap().chunks_exact_mut(8).enumerate() {
+        let slice = slices.slices[n / (res * res)];
+        let row = (n % (res * res)) / res;
+        let z = slice.y + (row as f32 + 0.5 - res as f32 * 0.5) * slice.z;
+        let lanes = [0.0, -a * k * (k * z).sin(), a * (k * z).cos(), 0.0];
+        for (lane, value) in lanes.iter().enumerate() {
+            texel[lane * 2..lane * 2 + 2].copy_from_slice(&half_bits(*value).to_le_bytes());
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn the_horizon_seen_from_below_has_no_brightness_step() {
+    let mut app = medium_app(false);
+    app.insert_resource(WaterMedium(WaterMediumUniform::jerlov(
+        JerlovWaterType::OceanIB,
+    )));
+    // The underside draws above the horizon, the open medium below it.
+    let ids: Vec<_> = app
+        .world()
+        .resource::<Assets<WaterSurfaceMaterial>>()
+        .ids()
+        .collect();
+    for id in ids {
+        let mut materials = app
+            .world_mut()
+            .resource_mut::<Assets<WaterSurfaceMaterial>>();
+        materials.get_mut(id).unwrap().base.cull_mode = None;
+    }
+    let mut sun = app
+        .world_mut()
+        .query_filtered::<&mut Transform, With<DirectionalLight>>();
+    *sun.single_mut(app.world_mut()).unwrap() =
+        Transform::default().looking_to(-Vec3::new(0.0, 0.7, -1.0), Vec3::X);
+    place_viewer(&mut app, Transform::from_xyz(0.0, -3.0, 0.0));
+    let horizon = SIZE / 2;
+    let rows = horizon - 24..horizon + 8;
+    let profile = |pixels: &[Vec3]| -> Vec<Vec3> {
+        rows.clone()
+            .map(|r| {
+                (SIZE / 2 - 8..SIZE / 2 + 8)
+                    .map(|c| pixels[(r * SIZE + c) as usize])
+                    .sum::<Vec3>()
+                    / 16.0
+            })
+            .collect()
+    };
+    let flat = profile(&capture(&mut app));
+    set_waves(&mut app);
+    let waves = profile(&capture(&mut app));
+
+    // Level water: the last row above the horizon and the first below it differ no more than
+    // neighbouring rows do.
+    let above = flat[(horizon - 1 - rows.start) as usize];
+    let below = flat[(horizon - rows.start) as usize];
+    let step = ((below - above) / above).abs().max_element();
+    eprintln!("level water: {above} above the horizon, {below} below, step {step:.4}");
+    assert!(step < 0.02, "brightness step {step} at the horizon");
+    // Waves overhead leave the light field and the view through the surface in place.
+    let mut failures = Vec::new();
+    for (r, (w, f)) in rows.clone().zip(waves.iter().zip(&flat)) {
+        let error = ((*w - *f) / *f).abs().max_element();
+        if error > 0.03 {
+            failures.push((r, error));
+        }
+    }
+    eprintln!("rows off under waves: {failures:?}");
+    assert!(
+        failures.is_empty(),
+        "rows that waves overhead darken or brighten: {failures:?}"
+    );
+}

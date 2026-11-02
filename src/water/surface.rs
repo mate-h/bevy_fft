@@ -27,6 +27,10 @@ pub struct WaterSurfaceUniform {
     /// Seconds that drive the foam texture's flow phases. [`super::WaterPlugin`] sets it each
     /// frame.
     pub time: f32,
+    /// Height of the level plane the mesh displaces from, which caustics and the light under
+    /// water measure depth from. [`super::WaterPlugin`] sets it each frame from the surface
+    /// entity, or to zero for quadtree tiles.
+    pub plane_height: f32,
 }
 
 /// Optical settings for a transmissive water material. Distances are in meters.
@@ -258,6 +262,7 @@ impl Default for WaterSurfaceExtension {
                 vertex_lod_bias: 1.0,
                 dry_depth: 0.0,
                 time: 0.0,
+                plane_height: 0.0,
             },
             lod: WaterLodSlices::default(),
             lod_displacement: Handle::default(),
@@ -308,6 +313,13 @@ pub type WaterSurfaceMaterial = ExtendedMaterial<StandardMaterial, WaterSurfaceE
 #[derive(Component)]
 pub struct WaterSurfaceTag;
 
+/// Material, tile list, and placement of each water surface entity.
+type SurfaceLodQuery = (
+    &'static MeshMaterial3d<WaterSurfaceMaterial>,
+    Option<&'static WaterQuadtreeBuffer>,
+    &'static GlobalTransform,
+);
+
 /// Copies the current slice placement and texture handles from the [`WaterLodData`] into every
 /// water surface material, along with the tile list it draws.
 #[allow(clippy::too_many_arguments)]
@@ -319,19 +331,13 @@ pub(super) fn sync_water_surface_lod(
     medium: Option<Res<super::WaterMedium>>,
     caustics: Option<Res<super::caustics::WaterCausticsFrame>>,
     time: Res<Time>,
-    surface: Query<
-        (
-            &MeshMaterial3d<WaterSurfaceMaterial>,
-            Option<&WaterQuadtreeBuffer>,
-        ),
-        With<WaterSurfaceTag>,
-    >,
+    surface: Query<SurfaceLodQuery, With<WaterSurfaceTag>>,
     mut materials: ResMut<Assets<WaterSurfaceMaterial>>,
 ) {
     let (Some(lod), Some(fallback)) = (lod, fallback) else {
         return;
     };
-    for (handle, quadtree) in &surface {
+    for (handle, quadtree, transform) in &surface {
         if let Some(mut mat) = materials.get_mut(handle) {
             let tiles = quadtree.map_or(&fallback.0, |q| &q.0);
             if mat.extension.quadtree != *tiles {
@@ -339,6 +345,12 @@ pub(super) fn sync_water_surface_lod(
             }
             mat.extension.lod = lod.slices;
             mat.extension.settings.time = time.elapsed_secs_wrapped();
+            // Quadtree tiles always lie on the plane y = 0, as the waterline pass assumes.
+            mat.extension.settings.plane_height = if quadtree.is_some() {
+                0.0
+            } else {
+                transform.translation().y
+            };
             if let Some(medium) = &medium {
                 mat.extension.medium = medium.0;
             }

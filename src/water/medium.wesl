@@ -102,7 +102,9 @@ fn water_medium(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let near = position_ndc_to_world(vec3<f32>(ndc, 1.0));
     let direction = normalize(position_ndc_to_world(vec3<f32>(ndc, 0.5)) - near);
     let descent = -direction.y;
-    let depth_near = -near_height;
+    // Depths run from the mesh plane, as in the underside, since the light field of Monzon et al.
+    // falls off below a level surface. Waves passing overhead leave it in place.
+    let depth_near = max(water_plane.x - near.y, 0.0);
     let floor_depth = max(water_column(near.xz), depth_near);
 
     var path = MEDIUM_MAX_PATH;
@@ -116,7 +118,7 @@ fn water_medium(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
             return vec4<f32>(color.rgb * meniscus, color.a);
         }
         path = distance(near, far);
-        lighting = underwater_lighting(far, e0, water_plane.x, h - far.y);
+        lighting = underwater_lighting(far, e0, water_plane.x, water_plane.x - far.y);
     } else if descent < 0.0 {
         // A ray that rises without meeting the surface mesh stops at the surface.
         path = depth_near / max(-descent, 1e-3);

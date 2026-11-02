@@ -402,11 +402,13 @@ fn foam_from_below(upwelling: vec3<f32>) -> vec3<f32> {
 /// multiple-scattered and single-scattered light. The sun shows through as a lobe as wide as
 /// `perceptual_roughness` makes it. Foam of opacity `foam` covers that with `foam_from_below`. The
 /// medium between the surface and the eye then dims it all and adds its own light. `floor_depth`
-/// is the water column below the surface point.
+/// is the water column below the surface point. Depths run from `surface_y`, the height of the
+/// mesh plane, as in the medium pass, so the light seen through the surface and past it agree.
 fn shade_underside(
     position: vec3<f32>,
     eye: vec3<f32>,
     n: vec3<f32>,
+    surface_y: f32,
     floor_depth: f32,
     perceptual_roughness: f32,
     foam: f32,
@@ -431,8 +433,9 @@ fn shade_underside(
     let reflected = reflect(-V, N);
     let descent = max(-reflected.y, 1e-3);
     let column = max(floor_depth, 0.0);
-    let body = medium_multiple_scattering(0.0, descent, column / descent, column, e0)
-        + single_scattering(position, reflected, column / descent, position.y, frag_xy);
+    let surface_depth = max(surface_y - position.y, 0.0);
+    let body = medium_multiple_scattering(surface_depth, descent, column / descent, column, e0)
+        + single_scattering(position, reflected, column / descent, surface_y, frag_xy);
     let roughness = clamp(perceptual_roughness, MIN_PERCEPTUAL_ROUGHNESS, 1.0);
     let sun = sun_transmission(n, V, roughness * roughness);
     var surface = (1.0 - reflectance) * sky + reflectance * body + sun;
@@ -441,10 +444,10 @@ fn shade_underside(
         surface = mix(surface, foam_from_below(upwelling), saturate(foam));
     }
     // The view ray runs from the eye up to the surface point.
-    let eye_depth = max(position.y - eye.y, 0.0);
+    let eye_depth = max(surface_y - eye.y, 0.0);
     let sigma_t = max(medium.absorption + medium.scattering, vec3<f32>(0.0));
     let rise = -to_eye.y / max(distance, 1e-6);
     let path = medium_multiple_scattering(eye_depth, -rise, distance, max(column, eye_depth), e0)
-        + single_scattering(eye, -V, distance, position.y, frag_xy);
+        + single_scattering(eye, -V, distance, surface_y, frag_xy);
     return (exp(-sigma_t * distance) * surface + path) * view.exposure;
 }
