@@ -38,6 +38,46 @@ const SURFACE_TOLERANCE: f32 = 0.05;
 /// Depth reported past the coarsest slice, deep enough that no bed light returns.
 const OPEN_WATER_DEPTH: f32 = 1000.0;
 
+/// Darkening per meniscus sample that lands on the other side of the waterline, after Crest's
+/// `ComputeMeniscusWeight`.
+const MENISCUS_DARKENING: f32 = 0.9;
+/// Pixels along the horizon normal that the meniscus looks across.
+const MENISCUS_SAMPLES: i32 = 3;
+
+fn near_height_at(pixel: vec2<i32>) -> f32 {
+    let size = vec2<i32>(textureDimensions(waterline_mask));
+    return textureLoad(waterline_mask, clamp(pixel, vec2<i32>(0), size - 1), 0).r;
+}
+
+/// Dark line where the near plane cuts the water, the zero crossing of the waterline mask. It
+/// stands in for the water film a real lens gathers at that line. No paper models it, so it is an
+/// appearance choice after Crest's underwater meniscus: a pixel darkens by `MENISCUS_DARKENING`
+/// for each of the next `MENISCUS_SAMPLES` pixels along the horizon normal that lies on the other
+/// side, so the line is a few pixels wide on both sides. The horizon normal is the screen gradient
+/// of the mask. Crest also fades the line out by 15 m for water volumes whose edge can lie at a
+/// distance. This line always lies on the near plane, so it never fades.
+fn meniscus_weight(pixel: vec2<i32>, height: f32) -> f32 {
+    let gradient = vec2<f32>(
+        near_height_at(pixel + vec2<i32>(1, 0)) - near_height_at(pixel - vec2<i32>(1, 0)),
+        near_height_at(pixel + vec2<i32>(0, 1)) - near_height_at(pixel - vec2<i32>(0, 1)),
+    );
+    let length_g = length(gradient);
+    if length_g <= 0.0 {
+        return 1.0;
+    }
+    let below = height < 0.0;
+    // Toward the other side of the waterline.
+    let across = select(-gradient, gradient, below) / length_g;
+    var weight = 1.0;
+    for (var i = 1; i <= MENISCUS_SAMPLES; i++) {
+        let sample = pixel + vec2<i32>(round(across * f32(i)));
+        if (near_height_at(sample) < 0.0) != below {
+            weight *= MENISCUS_DARKENING;
+        }
+    }
+    return weight;
+}
+
 fn surface_height(xz: vec2<f32>) -> f32 {
     return water_plane.x + displaced_height(lod_displacement, lod_foam, lod_sampler, lod, xz);
 }
@@ -53,8 +93,9 @@ fn water_medium(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(in.position.xy);
     let color = textureLoad(source, pixel, 0);
     let near_height = textureLoad(waterline_mask, pixel, 0).r;
+    let meniscus = meniscus_weight(pixel, near_height);
     if near_height >= 0.0 {
-        return color;
+        return vec4<f32>(color.rgb * meniscus, color.a);
     }
     let ndc = in.uv * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
     // Reversed depth puts the near plane at one.
@@ -72,7 +113,7 @@ fn water_medium(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
         let far = position_ndc_to_world(vec3<f32>(ndc, depth));
         let h = surface_height(far.xz);
         if far.y > h - SURFACE_TOLERANCE {
-            return color;
+            return vec4<f32>(color.rgb * meniscus, color.a);
         }
         path = distance(near, far);
         lighting = underwater_lighting(far, e0, water_plane.x, h - far.y);
@@ -87,5 +128,6 @@ fn water_medium(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let transmittance = exp(-sigma_t * path);
     let scattered = medium_multiple_scattering(depth_near, descent, path, floor_depth, e0)
         + single_scattering(near, direction, path, water_plane.x, in.position.xy);
-    return vec4<f32>(color.rgb * lighting * transmittance + scattered * view.exposure, color.a);
+    let lit = color.rgb * lighting * transmittance + scattered * view.exposure;
+    return vec4<f32>(lit * meniscus, color.a);
 }
