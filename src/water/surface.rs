@@ -115,9 +115,11 @@ impl JerlovWaterType {
         }
     }
 
-    /// Absorption coefficient σ_a in inverse meters at 625, 550, and 450 nm. Solonenko and Mobley
-    /// (2015) fitted these inherent optical properties to the Jerlov types with Hydrolight. The
-    /// values are read from the vector curves of Monzon et al. (2024, Fig. 2), which plot them.
+    /// Absorption coefficient σ_a in inverse meters at 625, 550, and 450 nm, from the `a` columns
+    /// of Solonenko and Mobley (2015, Tables 4 to 8). They fitted these inherent optical
+    /// properties to the Jerlov types so that Hydrolight reproduces Jerlov's K_d. Table 7 prints
+    /// the 300 to 400 nm rows again for type 5C from 600 nm on, so the 5C value at 625 nm is read
+    /// from the curve of Monzon et al. (2024, Fig. 2) instead.
     pub fn absorption(self) -> Vec3 {
         match self {
             Self::OceanI => Vec3::new(0.295, 0.0620, 0.0180),
@@ -133,17 +135,17 @@ impl JerlovWaterType {
         }
     }
 
-    /// Scattering coefficient σ_s in inverse meters at 625, 550, and 450 nm, from the same source
-    /// as [`Self::absorption`].
+    /// Scattering coefficient σ_s in inverse meters at 625, 550, and 450 nm, from the `b` columns
+    /// of the same tables as [`Self::absorption`], with the same exception for type 5C.
     pub fn scattering(self) -> Vec3 {
         match self {
-            Self::OceanI => Vec3::new(0.00100, 0.00170, 0.00380),
-            Self::OceanIA => Vec3::new(0.00260, 0.00350, 0.00630),
+            Self::OceanI => Vec3::new(0.00104, 0.00170, 0.00381),
+            Self::OceanIA => Vec3::new(0.00256, 0.00354, 0.00631),
             Self::OceanIB => Vec3::new(0.0468, 0.0536, 0.0680),
             Self::OceanII => Vec3::new(0.288, 0.358, 0.504),
             Self::OceanIII => Vec3::new(0.788, 0.980, 1.38),
             Self::Coastal1 => Vec3::new(0.293, 0.365, 0.514),
-            Self::Coastal3 => Vec3::new(0.856, 1.06, 1.50),
+            Self::Coastal3 => Vec3::new(0.855, 1.06, 1.50),
             Self::Coastal5 => Vec3::new(1.07, 1.33, 1.87),
             Self::Coastal7 => Vec3::new(1.89, 2.35, 3.30),
             Self::Coastal9 => Vec3::new(2.51, 3.12, 4.39),
