@@ -14,7 +14,7 @@ The example (`examples/shallow_water/main.rs`) adds lighting and egui controls a
 
 ## Bevy integration
 
-Simulation WGSL lives in [`assets/shallow_water/simulator.wgsl`](../assets/shallow_water/simulator.wgsl). [`ShallowWaterController`](../src/shallow_water/mod.rs) is extracted to the render world; bind groups are built each frame in `prepare_shallow_water_gpu`. The example schedules egui on `EguiPrimaryContextPass`.
+Simulation WGSL lives in [`src/shallow_water/simulator.wesl`](../src/shallow_water/simulator.wesl) and is embedded in the crate, so it loads from `embedded://bevy_fft/shallow_water/simulator.wesl` in any app. [`ShallowWaterController`](../src/shallow_water/mod.rs) is extracted to the render world, and `prepare_shallow_water_gpu` keeps a `ShallowWaterSolver` built from its images, rebuilding it when the images or the particle count change. The example schedules egui on `EguiPrimaryContextPass`.
 
 `Rg32Float` storage is unreliable on Metal, so this module uses `Rgba32Float` where multi-channel or packed storage is needed, as above.
 
@@ -28,7 +28,33 @@ Set `ShallowWaterController::placement` to a `ShallowWaterPlacement` to put the 
 
 When `WaterPlugin` is in the app, which `OceanPlugin` adds on its own, a compute pass blends the grid into the shared water LOD data every frame. It runs after base writers such as the FFT ocean and before height queries. Inside the grid the solver replaces the long waves its cells can resolve. Shorter FFT cascades stay on top and fade out in the last half meter of water. Dry cells are drawn at the still-water level, so the mesh does not follow the bed onto land. Over the fade band the long waves hand back to the ocean. The foam texture's green channel receives the water depth for wet-region coverage. Its red channel receives breaking foam where the solver surface is steep between wet columns less than about 3 m deep. A bore resolved over one or two cells is a near-vertical step that the surface normals cannot show, so foam is what marks it. The [transmissive surface](water_rendering.md) uses rendered scene depth for optical thickness and shows the actual terrain beneath shallow water. The flow texture receives the cell velocity, plus the rate the surface rises from the divergence of depth times velocity, so `OceanQueries` report water velocity inside the grid.
 
+Two more controller fields feed the depth update. `manning_n` adds implicit Manning friction on top of the linear `friction`, and `evaporation` removes a fraction of the depth per second. `source` takes an optional water source texture, described in the next section.
+
 `fill_level` fills each preset to a still water level on reset. Cells whose bed rises above it start dry.
+
+## Driving the solver from another crate
+
+The plugin steps the grid once per frame from the controller. A crate with its own loop, such as a terrain erosion model that moves the bed every frame and runs its own sediment kernels between steps, can drive the same solver directly. Add `ShallowWaterSolverPlugin` instead of `ShallowWaterPlugin`. It registers the embedded shader and queues `ShallowWaterPipelines` in the render world, and nothing else runs.
+
+In the render world, `ShallowWaterSolver::new` takes the device, the pipelines, the pipeline cache, and a `ShallowWaterSolverDescriptor`. It returns `None` until every kernel has compiled, so call it again on later frames until it succeeds. The descriptor names the grid size in cells, the grid textures, the read-only inputs, and a particle count, which may be zero.
+
+The grid textures are a `ShallowWaterTextures` of texture views. `ShallowWaterTextures::create` makes zeroed textures on the device. `ShallowWaterTextures::from_images` takes the views of main-world images from `ShallowWaterImages::new`, which suits a grid that is also drawn with `ShallowWaterSurfaceMaterial` or read back. `bed_water` holds the bed H in `.x` and the depth h in `.y`. `flow_x` is `R32Float` at `(nx + 1) × ny` with the face velocity u on vertical faces, and `flow_y` is `R32Float` at `nx × (ny + 1)` with w on horizontal faces. Both are positive along +x and +y in cells per second times the cell size. A caller can bind these views in its own kernels.
+
+`ShallowWaterInputs` holds two optional sampled textures with one texel per cell. `bed` is `R32Float` bed height. `source` is `Rgba32Float`, where `.x` is depth added per second, negative to remove water, and `.y` is a sink weight between 0 and 1 that drains that fraction of the depth each step, so 1 keeps a cell dry. The depth never goes below zero. Missing inputs read as zero. `set_inputs` swaps them later. Both live in the settings bind group, so the main kernel stays at eight storage textures.
+
+`write_settings` uploads a `ShallowWaterSettings`: time step, cell size, gravity, linear friction, Manning n, evaporation per second, the four borders, the PML and ocean parameters, the overshoot limiter, and a step counter. Write it before the frame's command buffer is submitted. Every step in that frame uses the same values.
+
+Each `encode_*` method sets the solver's bind groups and pipelines and dispatches into a compute pass the caller has begun, so it can sit between the caller's own dispatches.
+
+- `encode_sync_bed` copies the bed input into `bed_water.x` and leaves the depth alone.
+- `encode_step` runs one full step: MacCormack advection of the face velocities, the depth update with sources, sinks and evaporation, pressure, domain edges, wet and dry faces, friction, the PML, and the overshoot limiter.
+- `encode_reconstruct_velocity` averages the faces into the cell-centered `velocity` texture.
+
+The plugin also uses `encode_clear`, `encode_load_preset`, `encode_seed_ocean`, `encode_interact`, `encode_ocean_band`, and `encode_particles`, which are public for callers that want them.
+
+Manning friction slows each face implicitly by `u / (1 + g Δt n² |u| / h^(4/3))`, with h the mean depth of the two cells beside the face, floored at the wet threshold. It applies after the linear `friction` factor, and a zero `manning_n` turns it off.
+
+[`tests/shallow_water_solver_gpu.rs`](../tests/shallow_water_solver_gpu.rs) drives the core this way over a bed that changes every frame, with a source texture and no presets, and checks that the bed matches the input and that water volume is conserved. Run it with `cargo test --test shallow_water_solver_gpu -- --ignored`, since it needs a graphics adapter.
 
 ## Try it
 

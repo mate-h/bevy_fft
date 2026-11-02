@@ -33,6 +33,10 @@ struct SimulationSettings {
     pml_sigma_exponent : f32,
     pml_cosine_blend : f32,
     ocean_band_cells : f32,
+    /// Manning roughness squared. Zero turns Manning friction off.
+    manning_n2 : f32,
+    /// Fraction of the water depth that evaporates per second.
+    evaporation : f32,
     /// Unit direction of the wind on the grid, X and then the row axis (world Z when placed).
     wind_dir : vec2f,
 }
@@ -110,8 +114,11 @@ fn perlinNoise(point : vec2f, gridSize : f32, seed : u32) -> f32 {
 
 @group(1) @binding(0) var<uniform> interactionSettings : InteractionSettings;
 @group(1) @binding(1) var<uniform> simulationSettings : SimulationSettings;
-/// Bed height per cell for the bed source preset.
+/// Bed height per cell, for the bed source preset and `syncBed`.
 @group(1) @binding(2) var bedSource : texture_2d<f32>;
+/// Water sources per cell when flag bit 2 is set. `.x` is depth added per second and `.y` the
+/// fraction of the depth drained each step.
+@group(1) @binding(3) var sourceTexture : texture_2d<f32>;
 
 fn nx() -> i32 { return i32(simulationSettings.size.x); }
 fn ny() -> i32 { return i32(simulationSettings.size.y); }
@@ -386,11 +393,25 @@ fn loadPreset(@builtin(global_invocation_id) id: vec3u) {
         let noise = perlinNoise(vec2f(position.x, 0.0), baseNoiseGridSize * 2.0, simulationSettings.timestamp);
         bed = clamp(40.0 * (position.y / f32(simulationSettings.size.y) - mix(0.4, 0.6, noise)), 0.0, 10.0);
     } else if (interactionSettings.preset == 4u) {
-        let last = vec2u(textureDimensions(bedSource)) - 1u;
-        bed = textureLoad(bedSource, min(id.xy, last), 0).r;
+        bed = bed_source_at(id.xy);
     }
     let water = max(interactionSettings.fill_level - bed, 0.0);
     textureStore(bedWaterTexture, id.xy, vec4f(bed, water, 0.0, 0.0));
+}
+
+fn bed_source_at(id : vec2u) -> f32 {
+    let last = vec2u(textureDimensions(bedSource)) - 1u;
+    return textureLoad(bedSource, min(id, last), 0).r;
+}
+
+/// Copies the bed input into `.x` and leaves the water depth alone, for a bed that changes while
+/// the water flows.
+@compute @workgroup_size(16, 16)
+fn syncBed(@builtin(global_invocation_id) id: vec3u) {
+    if (id.x >= simulationSettings.size.x || id.y >= simulationSettings.size.y) { return; }
+    var bw = textureLoad(bedWaterTexture, id.xy);
+    bw.x = bed_source_at(id.xy);
+    textureStore(bedWaterTexture, id.xy, bw);
 }
 
 /// Column velocity of a progressive long wave, or zero when `cell` is dry, too shallow, or has no
@@ -646,6 +667,12 @@ fn integrateHeight(@builtin(global_invocation_id) id: vec3u) {
     var bw = textureLoad(bedWaterTexture, id.xy);
     bw.y += -dt / dx * div;
     bw.y = max(0.0, bw.y);
+    if ((simulationSettings.flags & 4u) != 0u) {
+        let source = textureLoad(sourceTexture, id.xy, 0);
+        bw.y = max(0.0, bw.y + source.x * dt);
+        bw.y *= 1.0 - clamp(source.y, 0.0, 1.0);
+    }
+    bw.y *= max(0.0, 1.0 - simulationSettings.evaporation * dt);
     textureStore(bedWaterTexture, id.xy, bw);
 }
 
@@ -775,25 +802,40 @@ fn applyWetDryReflectW(@builtin(global_invocation_id) id: vec3u) {
     }
 }
 
+/// Linear drag, then implicit Manning friction `v / (1 + g dt n² |v| / h^(4/3))` with `h_face` the
+/// mean depth of the two cells beside the face.
+fn apply_friction(v : f32, h_face : f32) -> f32 {
+    var out = v * simulationSettings.friction_factor;
+    let n2 = simulationSettings.manning_n2;
+    if (n2 > 0.0) {
+        let h = max(h_face, simulationSettings.eps_wet);
+        let k = simulationSettings.gravity * simulationSettings.dt * n2 * abs(out) / pow(h, 4.0 / 3.0);
+        out /= 1.0 + k;
+    }
+    return out;
+}
+
 @compute @workgroup_size(16, 16)
 fn applyFrictionU(@builtin(global_invocation_id) id: vec3u) {
-    let f = simulationSettings.friction_factor;
     let sx = simulationSettings.size.x + 1u;
     let sy = simulationSettings.size.y;
     if (id.x >= sx || id.y >= sy) { return; }
-    var u = textureLoad(faceUTexture, id.xy).r;
-    u *= f;
+    let fi = i32(id.x);
+    let jc = i32(id.y);
+    let h_face = 0.5 * (h_at(fi - 1, jc) + h_at(fi, jc));
+    let u = apply_friction(textureLoad(faceUTexture, id.xy).r, h_face);
     textureStore(faceUTexture, id.xy, vec4f(u, 0.0, 0.0, 0.0));
 }
 
 @compute @workgroup_size(16, 16)
 fn applyFrictionW(@builtin(global_invocation_id) id: vec3u) {
-    let f = simulationSettings.friction_factor;
     let sx = simulationSettings.size.x;
     let sy = simulationSettings.size.y + 1u;
     if (id.x >= sx || id.y >= sy) { return; }
-    var wv = textureLoad(faceWTexture, id.xy).r;
-    wv *= f;
+    let ic = i32(id.x);
+    let fj = i32(id.y);
+    let h_face = 0.5 * (h_at(ic, fj - 1) + h_at(ic, fj));
+    let wv = apply_friction(textureLoad(faceWTexture, id.xy).r, h_face);
     textureStore(faceWTexture, id.xy, vec4f(wv, 0.0, 0.0, 0.0));
 }
 

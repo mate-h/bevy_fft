@@ -1,6 +1,10 @@
 //! Staggered shallow water on a heightfield (CMF10-style MacCormack on face velocities, upwind `h`,
-//! wet–dry, PML, overshoot limiter). See `docs/shallow_water.md` and `assets/shallow_water/simulator.wgsl`.
+//! wet–dry, PML, overshoot limiter). See `docs/shallow_water.md` and `src/shallow_water/simulator.wesl`.
 //! Brush and presets mirror [webgpu-shallow-water](https://github.com/mate-h/webgpu-shallow-water) UX only.
+//!
+//! To drive the solver from another crate, add [`ShallowWaterSolverPlugin`] and build a
+//! [`ShallowWaterSolver`] in the render world. It encodes single steps into a compute pass the
+//! caller owns, with a bed and water sources that can change every frame.
 //!
 //! Add [`ShallowWaterPlugin`], insert [`ShallowWaterController`] as a resource with GPU images, and use
 //! [`ShallowWaterSurfaceMaterial`] on an XZ plane. The compute pass runs on the root
@@ -14,6 +18,7 @@
 
 mod lod_write;
 mod render;
+mod solver;
 
 use bevy::{
     asset::{Asset, Assets, Handle, RenderAssetUsages, embedded_asset},
@@ -32,9 +37,12 @@ use bevy::{
 };
 
 pub use render::{
-    ShallowWaterGpuResources, ShallowWaterPipelines, ShallowWaterSimLabel, ShallowWaterTimestamp,
-    plug_shallow_water_render_app, prepare_shallow_water_gpu, round_particle_count,
-    run_shallow_water_sim,
+    ShallowWaterGpuResources, ShallowWaterSimLabel, ShallowWaterTimestamp,
+    plug_shallow_water_render_app, prepare_shallow_water_gpu, run_shallow_water_sim,
+};
+pub use solver::{
+    ShallowWaterInputs, ShallowWaterKernels, ShallowWaterPipelines, ShallowWaterSettings,
+    ShallowWaterSolver, ShallowWaterSolverDescriptor, ShallowWaterTextures, round_particle_count,
 };
 
 /// What happens at one edge of the grid.
@@ -59,7 +67,7 @@ pub enum ShallowWaterBorder {
 }
 
 impl ShallowWaterBorder {
-    fn bits(self) -> u32 {
+    pub(crate) fn bits(self) -> u32 {
         self as u32
     }
 }
@@ -122,6 +130,13 @@ pub struct ShallowWaterController {
     pub brush_input_active: bool,
     pub brush_radius: f32,
     pub brush_force: f32,
+    /// Manning roughness n on top of [`Self::friction`]. Zero turns it off.
+    pub manning_n: f32,
+    /// Fraction of the water depth that evaporates per second.
+    pub evaporation: f32,
+    /// Optional `Rgba32Float` source texture, one texel per cell. `.x` adds depth per second and
+    /// `.y` is a sink weight per step. See [`ShallowWaterInputs::source`].
+    pub source: Option<Handle<Image>>,
     pub pointer_sim: Vec2,
     pub pointer_prev_sim: Vec2,
     /// Terrain preset index for `loadPreset`. 0 to 3 are procedural, and
@@ -176,25 +191,23 @@ pub struct ShallowWaterController {
 
 impl ShallowWaterController {
     pub fn packed_border_mask(&self) -> u32 {
-        self.left_border.bits()
-            | (self.right_border.bits() << 3)
-            | (self.bottom_border.bits() << 6)
-            | (self.top_border.bits() << 9)
+        self.settings(0, Vec2::X).packed_border_mask()
     }
 
     /// Builds textures and returns a controller. `cells_*` should be multiples of 32.
     pub fn new(images: &mut Assets<Image>, cells_x: u32, cells_y: u32) -> Self {
+        let grid = ShallowWaterImages::new(images, cells_x, cells_y);
         Self {
             cells_x,
             cells_y,
-            bed_water: images.add(shallow_rg32_image(cells_x, cells_y)),
-            velocity: images.add(shallow_rg32_image(cells_x, cells_y)),
-            flow_x: images.add(shallow_r32_image(cells_x + 1, cells_y)),
-            flow_y: images.add(shallow_r32_image(cells_x, cells_y + 1)),
-            mac_u_temps: images.add(shallow_rg32_image(cells_x + 1, cells_y)),
-            mac_w_temps: images.add(shallow_rg32_image(cells_x, cells_y + 1)),
-            pml_state: images.add(shallow_rg32_image(cells_x, cells_y)),
-            ocean_eta: images.add(ocean_eta_image(cells_x, cells_y)),
+            bed_water: grid.bed_water,
+            velocity: grid.velocity,
+            flow_x: grid.flow_x,
+            flow_y: grid.flow_y,
+            mac_u_temps: grid.mac_u_temps,
+            mac_w_temps: grid.mac_w_temps,
+            pml_state: grid.pml_state,
+            ocean_eta: grid.ocean_eta,
             bed_source: images.add(bed_source_image(1, 1, &[0.0])),
             ocean_forcing: false,
             ocean_band_cells: 5.0,
@@ -215,6 +228,9 @@ impl ShallowWaterController {
             brush_input_active: false,
             brush_radius: 16.0,
             brush_force: 0.75,
+            manning_n: 0.0,
+            evaporation: 0.0,
+            source: None,
             pointer_sim: Vec2::ZERO,
             pointer_prev_sim: Vec2::ZERO,
             preset_index: 0,
@@ -231,17 +247,88 @@ impl ShallowWaterController {
 
     /// Recreate grid textures after a resolution change and schedule GPU re-init.
     pub fn rebuild_grid(&mut self, images: &mut Assets<Image>, cells_x: u32, cells_y: u32) {
+        let grid = ShallowWaterImages::new(images, cells_x, cells_y);
         self.cells_x = cells_x;
         self.cells_y = cells_y;
-        self.bed_water = images.add(shallow_rg32_image(cells_x, cells_y));
-        self.velocity = images.add(shallow_rg32_image(cells_x, cells_y));
-        self.flow_x = images.add(shallow_r32_image(cells_x + 1, cells_y));
-        self.flow_y = images.add(shallow_r32_image(cells_x, cells_y + 1));
-        self.mac_u_temps = images.add(shallow_rg32_image(cells_x + 1, cells_y));
-        self.mac_w_temps = images.add(shallow_rg32_image(cells_x, cells_y + 1));
-        self.pml_state = images.add(shallow_rg32_image(cells_x, cells_y));
-        self.ocean_eta = images.add(ocean_eta_image(cells_x, cells_y));
+        self.bed_water = grid.bed_water;
+        self.velocity = grid.velocity;
+        self.flow_x = grid.flow_x;
+        self.flow_y = grid.flow_y;
+        self.mac_u_temps = grid.mac_u_temps;
+        self.mac_w_temps = grid.mac_w_temps;
+        self.pml_state = grid.pml_state;
+        self.ocean_eta = grid.ocean_eta;
         self.sim_apply_serial = self.sim_apply_serial.wrapping_add(1);
+    }
+
+    /// Handles of the grid textures.
+    pub fn images(&self) -> ShallowWaterImages {
+        ShallowWaterImages {
+            bed_water: self.bed_water.clone(),
+            velocity: self.velocity.clone(),
+            flow_x: self.flow_x.clone(),
+            flow_y: self.flow_y.clone(),
+            mac_u_temps: self.mac_u_temps.clone(),
+            mac_w_temps: self.mac_w_temps.clone(),
+            pml_state: self.pml_state.clone(),
+            ocean_eta: self.ocean_eta.clone(),
+        }
+    }
+
+    /// Step parameters for the solver at step `timestamp`.
+    pub fn settings(&self, timestamp: u32, wind_dir: Vec2) -> ShallowWaterSettings {
+        ShallowWaterSettings {
+            dt: self.dt,
+            cell_size: self.cell_size(),
+            gravity: self.gravity,
+            friction: self.friction,
+            manning_n: self.manning_n,
+            evaporation: self.evaporation,
+            left_border: self.left_border,
+            right_border: self.right_border,
+            bottom_border: self.bottom_border,
+            top_border: self.top_border,
+            pml_width: self.pml_width,
+            pml_eta_rest: self.pml_eta_rest,
+            pml_sigma_exponent: self.pml_sigma_exponent,
+            pml_cosine_blend: self.pml_cosine_blend,
+            ocean_band_cells: self.ocean_band_cells,
+            ocean_forcing: self.ocean_forcing,
+            overshoot_limiter: true,
+            wind_dir,
+            timestamp,
+        }
+    }
+}
+
+/// Main-world handles of the grid textures a [`ShallowWaterSolver`] steps. See
+/// [`ShallowWaterTextures`] for the sizes and formats, and [`ShallowWaterTextures::from_images`]
+/// for the render-world views.
+#[derive(Clone, Debug, Reflect)]
+pub struct ShallowWaterImages {
+    pub bed_water: Handle<Image>,
+    pub velocity: Handle<Image>,
+    pub flow_x: Handle<Image>,
+    pub flow_y: Handle<Image>,
+    pub mac_u_temps: Handle<Image>,
+    pub mac_w_temps: Handle<Image>,
+    pub pml_state: Handle<Image>,
+    pub ocean_eta: Handle<Image>,
+}
+
+impl ShallowWaterImages {
+    /// Adds zeroed grid images for `cells_x × cells_y` cells. `ocean_eta` starts unset.
+    pub fn new(images: &mut Assets<Image>, cells_x: u32, cells_y: u32) -> Self {
+        Self {
+            bed_water: images.add(shallow_rg32_image(cells_x, cells_y)),
+            velocity: images.add(shallow_rg32_image(cells_x, cells_y)),
+            flow_x: images.add(shallow_r32_image(cells_x + 1, cells_y)),
+            flow_y: images.add(shallow_r32_image(cells_x, cells_y + 1)),
+            mac_u_temps: images.add(shallow_rg32_image(cells_x + 1, cells_y)),
+            mac_w_temps: images.add(shallow_rg32_image(cells_x, cells_y + 1)),
+            pml_state: images.add(shallow_rg32_image(cells_x, cells_y)),
+            ocean_eta: images.add(ocean_eta_image(cells_x, cells_y)),
+        }
     }
 }
 
@@ -258,8 +345,10 @@ pub fn shallow_rg32_image(width: u32, height: u32) -> Image {
         TextureFormat::Rgba32Float,
         RenderAssetUsages::default(),
     );
-    image.texture_descriptor.usage =
-        TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    image.texture_descriptor.usage = TextureUsages::STORAGE_BINDING
+        | TextureUsages::TEXTURE_BINDING
+        | TextureUsages::COPY_SRC
+        | TextureUsages::COPY_DST;
     image
 }
 
@@ -275,8 +364,10 @@ pub fn shallow_r32_image(width: u32, height: u32) -> Image {
         TextureFormat::R32Float,
         RenderAssetUsages::default(),
     );
-    image.texture_descriptor.usage =
-        TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    image.texture_descriptor.usage = TextureUsages::STORAGE_BINDING
+        | TextureUsages::TEXTURE_BINDING
+        | TextureUsages::COPY_SRC
+        | TextureUsages::COPY_DST;
     image
 }
 
@@ -331,7 +422,7 @@ pub struct GpuSimulationUniform {
     pub border_mask: u32,
     pub pml_width: u32,
     /// Bit 0 enables overshoot reduction. Bit 1 reads the target surface from the ocean target
-    /// texture instead of `pml_eta_rest`.
+    /// texture instead of `pml_eta_rest`. Bit 2 applies the source texture.
     pub flags: u32,
     pub pml_eta_rest: f32,
     pub vel_clamp_alpha: f32,
@@ -345,6 +436,10 @@ pub struct GpuSimulationUniform {
     pub pml_sigma_exponent: f32,
     pub pml_cosine_blend: f32,
     pub ocean_band_cells: f32,
+    /// Manning roughness squared. Zero turns Manning friction off.
+    pub manning_n2: f32,
+    /// Fraction of the water depth that evaporates per second.
+    pub evaporation: f32,
     /// Unit wind direction on XZ. The reset seed points column velocity along it.
     pub wind_dir: Vec2,
 }
@@ -412,6 +507,7 @@ pub type ShallowWaterSurfaceMaterial =
 pub struct ShallowWaterSurfaceTag;
 
 pub mod shaders {
+    pub const SHALLOW_WATER_SIMULATOR: &str = "embedded://bevy_fft/shallow_water/simulator.wesl";
     pub const SHALLOW_WATER_SURFACE: &str = "embedded://bevy_fft/shallow_water/surface.wesl";
     pub const SHALLOW_WATER_LOD_WRITE: &str = "embedded://bevy_fft/shallow_water/lod_write.wesl";
 }
@@ -432,10 +528,31 @@ fn sync_shallow_water_mesh_material(
     mat.extension.bed_water = sim.bed_water.clone();
 }
 
+/// Registers the solver shader and queues [`ShallowWaterPipelines`] in the render world, for
+/// callers that build and step a [`ShallowWaterSolver`] themselves. [`ShallowWaterPlugin`] adds it.
+pub struct ShallowWaterSolverPlugin;
+
+impl Plugin for ShallowWaterSolverPlugin {
+    fn build(&self, app: &mut App) {
+        embedded_asset!(app, "simulator.wesl");
+    }
+
+    fn finish(&self, app: &mut App) {
+        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            render_app.init_resource::<ShallowWaterPipelines>();
+        }
+    }
+}
+
+/// The controller-driven simulation: presets, brush, particles, PML, ocean forcing, and the water
+/// LOD blend, stepped once per frame from [`ShallowWaterController`].
 pub struct ShallowWaterPlugin;
 
 impl Plugin for ShallowWaterPlugin {
     fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<ShallowWaterSolverPlugin>() {
+            app.add_plugins(ShallowWaterSolverPlugin);
+        }
         embedded_asset!(app, "surface.wesl");
         embedded_asset!(app, "lod_write.wesl");
 
