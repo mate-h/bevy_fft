@@ -1,0 +1,186 @@
+// Terrain-aware optical composition over the opaque scene, in exposed linear HDR.
+import bevy_pbr::render::mesh_view_bindings::{view, view_transmission_texture, view_transmission_sampler};
+import bevy_fft::water::underside::{downwelling_irradiance, environment_radiance, underwater_lighting};
+import bevy_pbr::render::pbr_types::PbrInput;
+import bevy_pbr::render::pbr_functions::apply_pbr_lighting;
+import bevy_pbr::render::view_transformations::position_ndc_to_world;
+
+struct WaterOpticsUniform {
+    extinction: vec3<f32>,
+    refraction_strength: f32,
+    scattering: vec3<f32>,
+    contact_fade: f32,
+    max_distance: f32,
+    ssr_strength: f32,
+    debug_view: u32,
+    enabled: u32,
+}
+@group(constants::MATERIAL_BIND_GROUP) @binding(106) var opaque_depth: texture_depth_2d;
+@group(constants::MATERIAL_BIND_GROUP) @binding(107) var<uniform> optics: WaterOpticsUniform;
+
+/// Reflectance of dense foam. Matches `FOAM_ALBEDO` in `surface.wesl`.
+const FOAM_ALBEDO: f32 = 0.55;
+/// Reflectance of the bubble cloud that breaking drives under active foam, before the water above
+/// it absorbs. An appearance choice, since the sources here give no measured value.
+const BUBBLE_REFLECTANCE: f32 = 0.2;
+/// Depth in meters of the bubble cloud, which sets how much the water tints its light on the way
+/// down and back up.
+const BUBBLE_DEPTH: f32 = 0.5;
+
+struct Receiver { position: vec3<f32>, valid: bool }
+struct RayHit { uv: vec2<f32>, distance: f32, confidence: f32, position: vec3<f32> }
+
+fn receiver_at(uv: vec2<f32>) -> Receiver {
+    var result: Receiver;
+    if any(uv <= vec2<f32>(0.0)) || any(uv >= vec2<f32>(1.0)) { return result; }
+    let size = vec2<f32>(textureDimensions(opaque_depth));
+    let pixel = vec2<i32>(uv * size);
+    let depth = textureLoad(opaque_depth, pixel, 0);
+    if depth <= 0.0 { return result; }
+    let viewport_uv = ((vec2<f32>(pixel) + 0.5) - view.viewport.xy) / view.viewport.zw;
+    let ndc = vec3<f32>(viewport_uv * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), depth);
+    result.position = position_ndc_to_world(ndc);
+    result.valid = true;
+    return result;
+}
+
+// Screen UV and reverse-Z depth of a clip-space point. Clip space is linear along a world ray,
+// so the march interpolates two clip positions instead of transforming every sample.
+fn clip_to_uv_depth(clip: vec4<f32>) -> vec3<f32> {
+    if clip.w <= 0.0 { return vec3<f32>(-1.0); }
+    let viewport_uv = clip.xy / clip.w * vec2<f32>(0.5, -0.5) + 0.5;
+    let uv = (viewport_uv * view.viewport.zw + view.viewport.xy) / vec2<f32>(textureDimensions(opaque_depth));
+    return vec3<f32>(uv, clip.z / clip.w);
+}
+
+// True where the opaque surface at the projected point is at or in front of it. Sky never is.
+fn behind_scene(projected: vec3<f32>) -> bool {
+    if any(projected.xy <= vec2<f32>(0.0)) || any(projected.xy >= vec2<f32>(1.0)) { return false; }
+    let pixel = vec2<i32>(projected.xy * vec2<f32>(textureDimensions(opaque_depth)));
+    let depth = textureLoad(opaque_depth, pixel, 0);
+    return depth > 0.0 && depth >= projected.z;
+}
+
+/// March and bisection steps of the screen-space traces.
+const TRACE_STEPS: u32 = 12u;
+const TRACE_REFINE_STEPS: u32 = 5u;
+
+// Bracket a crossing of the opaque depth surface, then refine it. Hits outside the screen,
+// across a depth discontinuity, or on the wrong side of the water interface are rejected.
+fn trace_scene(origin: vec3<f32>, direction: vec3<f32>, limit: f32, reflection: bool) -> RayHit {
+    var result: RayHit;
+    let clip_origin = view.clip_from_world * vec4<f32>(origin, 1.0);
+    let clip_direction = view.clip_from_world * vec4<f32>(direction, 0.0);
+    var previous = 0.025;
+    for (var i = 1u; i <= TRACE_STEPS; i++) {
+        let fraction = f32(i) / f32(TRACE_STEPS);
+        let distance = 0.025 + fraction * fraction * limit;
+        let projected = clip_to_uv_depth(clip_origin + clip_direction * distance);
+        if projected.z < 0.0 || any(projected.xy <= vec2<f32>(0.0)) || any(projected.xy >= vec2<f32>(1.0)) { break; }
+        if behind_scene(projected) {
+            var lo = previous;
+            var hi = distance;
+            for (var j = 0u; j < TRACE_REFINE_STEPS; j++) {
+                let mid = (lo + hi) * 0.5;
+                if behind_scene(clip_to_uv_depth(clip_origin + clip_direction * mid)) { hi = mid; }
+                else { lo = mid; }
+            }
+            let ray_point = origin + direction * hi;
+            let hit_uv = clip_to_uv_depth(clip_origin + clip_direction * hi).xy;
+            let hit = receiver_at(hit_uv);
+            if !hit.valid { return result; }
+            let tolerance = max(0.08, distance - previous);
+            if length(hit.position - ray_point) > tolerance { return result; }
+            if reflection && hit.position.y < origin.y + 0.025 { return result; }
+            if !reflection && hit.position.y > origin.y - 0.001 { return result; }
+            let edge = min(min(hit_uv.x, 1.0 - hit_uv.x), min(hit_uv.y, 1.0 - hit_uv.y));
+            result.uv = hit_uv;
+            result.position = hit.position;
+            result.distance = length(hit.position - origin);
+            result.confidence = smoothstep(0.0, 0.04, edge);
+            return result;
+        }
+        previous = distance;
+    }
+    return result;
+}
+
+fn scene_color(uv: vec2<f32>) -> vec3<f32> {
+    return textureSampleLevel(view_transmission_texture, view_transmission_sampler, uv, 0.0).rgb;
+}
+
+/// Water over the opaque scene. `foam` is the opacity of the foam layer on top and `bubbles` the
+/// coverage of active foam, whose bubble cloud brightens the water below it. `surface_y` is the
+/// height of the undisplaced surface. Beds below it fade with depth and take the caustic map.
+fn shade_water(input: PbrInput, solver_depth: f32, foam: f32, bubbles: f32, surface_y: f32) -> vec4<f32> {
+    if any(textureDimensions(opaque_depth) != textureDimensions(view_transmission_texture)) {
+        return apply_pbr_lighting(input);
+    }
+    let full_size = vec2<f32>(textureDimensions(opaque_depth));
+    let uv = input.frag_coord.xy / full_size;
+    let receiver = receiver_at(uv);
+    let background = scene_color(uv);
+    var path = optics.max_distance;
+    var column = solver_depth;
+    if receiver.valid {
+        path = length(receiver.position - input.world_position.xyz);
+        column = max(0.0, input.world_position.y - receiver.position.y);
+    }
+    let contact_width = max(optics.contact_fade, min(fwidth(path), 0.25));
+    let wet_width = max(fwidth(solver_depth), 0.0001);
+    let coverage = smoothstep(0.0, contact_width, path) * smoothstep(0.0, wet_width, solver_depth);
+    if solver_depth <= 0.0 || coverage <= 0.0 { discard; }
+    // The scene was lit as if no water were above it, so the bed takes the light that reaches its
+    // depth, with the caustic pattern of the sun's refracted beam on the sun's share.
+    let e0 = downwelling_irradiance();
+    var bottom = background;
+    if receiver.valid {
+        bottom *= underwater_lighting(receiver.position, e0, surface_y, surface_y - receiver.position.y);
+    }
+    let direct = bottom;
+    var refraction_confidence = 0.0;
+    let thin_fade = smoothstep(0.0, 0.3, min(column, solver_depth));
+    if receiver.valid && optics.refraction_strength > 0.0 && thin_fade > 0.0 {
+        let ray = refract(-input.V, input.N, 1.0 / max(input.material.ior, 1.0));
+        let hit = trace_scene(input.world_position.xyz, ray, min(optics.max_distance, path * 1.5 + 1.0), false);
+        refraction_confidence = hit.confidence;
+        let weight = clamp(optics.refraction_strength, 0.0, 1.0) * thin_fade * hit.confidence;
+        if weight > 0.0 {
+            let refracted = scene_color(hit.uv)
+                * underwater_lighting(hit.position, e0, surface_y, surface_y - hit.position.y);
+            bottom = mix(direct, refracted, weight);
+            path = mix(path, hit.distance, weight);
+        }
+    }
+    let transmittance = exp(-max(optics.extinction, vec3<f32>(0.0)) * min(path, optics.max_distance));
+    let f0 = 0.16 * input.material.reflectance * input.material.reflectance;
+    let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - clamp(dot(input.N, input.V), 0.0, 1.0), 5.0);
+    var reflection_input = input;
+    reflection_input.material.specular_transmission = 0.0;
+    reflection_input.material.base_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    // Lighting the scattering body also yields the environment reflection as its specular part.
+    // A screen-space hit replaces that reflection, estimated from one environment map sample.
+    var body_input = reflection_input;
+    let extinction = max(optics.extinction, vec3<f32>(0.0));
+    let bubble = saturate(bubbles) * BUBBLE_REFLECTANCE * exp(-2.0 * extinction * BUBBLE_DEPTH);
+    let body = optics.scattering * (1.0 - transmittance) + bubble;
+    body_input.material.base_color = vec4<f32>(mix(body, vec3<f32>(FOAM_ALBEDO), foam), 1.0);
+    var lit = apply_pbr_lighting(body_input).rgb;
+    if optics.ssr_strength > 0.0 && foam < 0.95 {
+        let R = reflect(-input.V, input.N);
+        let hit = trace_scene(input.world_position.xyz, R, optics.max_distance, true);
+        let weight = hit.confidence * optics.ssr_strength * (1.0 - foam);
+        if weight > 0.0 {
+            let environment_reflection = environment_radiance(input.N, R, reflection_input.material.perceptual_roughness)
+                * fresnel * view.exposure;
+            lit += (scene_color(hit.uv) * fresnel - environment_reflection) * weight;
+        }
+    }
+    let transmitted = (vec3<f32>(1.0) - fresnel) * transmittance * bottom * (1.0 - foam);
+    var color = mix(background, lit + transmitted, coverage);
+    if optics.debug_view == 1u { color = vec3<f32>(clamp(path / 5.0, 0.0, 1.0)); }
+    if optics.debug_view == 2u { color = transmittance; }
+    if optics.debug_view == 3u { color = vec3<f32>(coverage); }
+    if optics.debug_view == 4u { color = vec3<f32>(refraction_confidence); }
+    return vec4<f32>(color, 1.0);
+}
