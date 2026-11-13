@@ -5,3 +5,11 @@
 /assets/terrains
 
 /assets/beach_materials
+
+# Beads issue tracker, kept local
+/.beads/
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
