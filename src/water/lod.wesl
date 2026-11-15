@@ -68,19 +68,59 @@ fn bilinear_clamp_layer(tex: texture_2d_array<f32>, uv: vec2<f32>, layer: u32) -
 /// slice. Closer points read one slice only.
 const LOD_BLEND_BAND: f32 = 0.3;
 
+/// The slices a read at one point blends, found once and shared by every texture read there.
+struct LodPick {
+    /// The finer slice and its UV.
+    s0: u32,
+    uv0: vec2<f32>,
+    /// The coarser slice and its UV, and how much of it to take.
+    s1: u32,
+    uv1: vec2<f32>,
+    alpha: f32,
+    /// `lod_coverage` at the point.
+    coverage: f32,
+}
+
+/// Picks the two slices `lod_level` chooses for `xz`, blending into the next one near the far end
+/// of each level.
+fn lod_pick(lod: WaterLodSlices, xz: vec2<f32>, bias: f32) -> LodPick {
+    var pick: LodPick;
+    let level = lod_level(lod, xz, bias);
+    pick.s0 = u32(floor(level));
+    pick.s1 = min(pick.s0 + 1u, max(lod.count, 1u) - 1u);
+    pick.alpha = select(saturate((level - floor(level) - (1.0 - LOD_BLEND_BAND)) / LOD_BLEND_BAND), 0.0, pick.s1 == pick.s0);
+    pick.uv0 = lod_uv(lod, xz, pick.s0);
+    pick.uv1 = lod_uv(lod, xz, pick.s1);
+    pick.coverage = lod_coverage(lod, xz);
+    return pick;
+}
+
+/// Reads `tex` at a pick with a bilinear fetch per slice. Slice `s` lives in layer
+/// `s * layers_per_slice + layer`.
+fn sample_pick(tex: texture_2d_array<f32>, pick: LodPick, layers_per_slice: u32, layer: u32) -> vec4<f32> {
+    let a = bilinear_clamp_layer(tex, pick.uv0, pick.s0 * layers_per_slice + layer);
+    if pick.alpha <= 0.0 {
+        return a;
+    }
+    let b = bilinear_clamp_layer(tex, pick.uv1, pick.s1 * layers_per_slice + layer);
+    return mix(a, b, pick.alpha);
+}
+
+/// Reads `tex` at a pick with one hardware bilinear fetch per slice through `samp`, which must be
+/// linear and clamp to edge. Needs a filterable texture format.
+fn sample_pick_filtered(tex: texture_2d_array<f32>, samp: sampler, pick: LodPick) -> vec4<f32> {
+    let a = textureSampleLevel(tex, samp, pick.uv0, pick.s0, 0.0);
+    if pick.alpha <= 0.0 {
+        return a;
+    }
+    let b = textureSampleLevel(tex, samp, pick.uv1, pick.s1, 0.0);
+    return mix(a, b, pick.alpha);
+}
+
 /// Samples `tex` at world `xz`, blending the two slices chosen by `lod_level` near the far end of
 /// each level.
 fn sample_lod(tex: texture_2d_array<f32>, lod: WaterLodSlices, xz: vec2<f32>, bias: f32) -> vec4<f32> {
-    let level = lod_level(lod, xz, bias);
-    let s0 = u32(floor(level));
-    let s1 = min(s0 + 1u, max(lod.count, 1u) - 1u);
-    let alpha = saturate((level - floor(level) - (1.0 - LOD_BLEND_BAND)) / LOD_BLEND_BAND);
-    let a = bilinear_clamp_layer(tex, lod_uv(lod, xz, s0), s0);
-    if alpha <= 0.0 || s1 == s0 {
-        return a;
-    }
-    let b = bilinear_clamp_layer(tex, lod_uv(lod, xz, s1), s1);
-    return mix(a, b, alpha);
+    return sample_pick(tex, lod_pick(lod, xz, bias), 1u, 0u);
 }
 
 /// Same as `sample_lod`, with one hardware bilinear fetch per slice through `samp`, which must be
@@ -92,16 +132,7 @@ fn sample_lod_filtered(
     xz: vec2<f32>,
     bias: f32,
 ) -> vec4<f32> {
-    let level = lod_level(lod, xz, bias);
-    let s0 = u32(floor(level));
-    let s1 = min(s0 + 1u, max(lod.count, 1u) - 1u);
-    let alpha = saturate((level - floor(level) - (1.0 - LOD_BLEND_BAND)) / LOD_BLEND_BAND);
-    let a = textureSampleLevel(tex, samp, lod_uv(lod, xz, s0), s0, 0.0);
-    if alpha <= 0.0 || s1 == s0 {
-        return a;
-    }
-    let b = textureSampleLevel(tex, samp, lod_uv(lod, xz, s1), s1, 0.0);
-    return mix(a, b, alpha);
+    return sample_pick_filtered(tex, samp, lod_pick(lod, xz, bias));
 }
 
 /// Samples the finest slice that contains `xz`, for physics queries that want full detail.

@@ -5,14 +5,13 @@ import bevy_pbr::render::mesh_functions::{
 };
 import bevy_pbr::render::view_transformations::position_world_to_clip;
 import bevy_fft::water::lod::{
-    LOD_BLEND_BAND,
+    LodPick,
     WaterLodSlices,
-    bilinear_clamp_layer,
     lod_coverage,
-    lod_level,
-    lod_uv,
-    sample_lod,
+    lod_pick,
     sample_lod_filtered,
+    sample_pick,
+    sample_pick_filtered,
 };
 import bevy_fft::water::foam_flow::{
     FOAM_FLOW_LAYERS_PER_SLICE,
@@ -230,20 +229,20 @@ fn water_displace_surface(instance_index: u32, position_local: vec3<f32>, spacin
     return out;
 }
 
-/// Per-pixel normal from the LOD data at undisplaced position `xz`.
-fn water_pixel_normal(xz: vec2<f32>) -> vec3<f32> {
-    return water_normal_from_slopes(water_sample(xz, 0.0));
+/// Per-pixel normal from the LOD data at the pixel's pick.
+fn water_pixel_normal(pick: LodPick) -> vec3<f32> {
+    return water_normal_from_slopes(sample_pick_filtered(lod_displacement, lod_sampler, pick) * pick.coverage);
 }
 
 /// Depth reported past the coarsest slice, deep enough that no bed shows through.
 const OPEN_WATER_DEPTH: f32 = 1000.0;
 
 /// Active foam in `.x`, residual foam in `.y` and water depth in meters in `.z` at undisplaced
-/// position `xz`. Foam fades out past the coarsest slice.
-fn water_foam_and_depth(xz: vec2<f32>) -> vec3<f32> {
-    let f = sample_lod_filtered(lod_foam, lod_sampler, water_lod, xz, 0.0);
-    let state = sample_lod(lod_foam_state, water_lod, xz, 0.0);
-    let c = lod_coverage(water_lod, xz);
+/// position `xz`, read at its pick. Foam fades out past the coarsest slice.
+fn water_foam_and_depth(pick: LodPick) -> vec3<f32> {
+    let f = sample_pick_filtered(lod_foam, lod_sampler, pick);
+    let state = sample_pick(lod_foam_state, pick, 1u, 0u);
+    let c = pick.coverage;
     return vec3<f32>(state.rg * c, mix(OPEN_WATER_DEPTH, f.g, c));
 }
 
@@ -311,32 +310,15 @@ struct WaterFoamFlow {
 }
 
 /// One flow array layer of the slice pair `sample_lod` would pick at `xz`.
-fn water_foam_flow_layer(xz: vec2<f32>, layer: u32) -> vec4<f32> {
-    let level = lod_level(water_lod, xz, 0.0);
-    let s0 = u32(floor(level));
-    let s1 = min(s0 + 1u, max(water_lod.count, 1u) - 1u);
-    let alpha = saturate((level - floor(level) - (1.0 - LOD_BLEND_BAND)) / LOD_BLEND_BAND);
-    let a = bilinear_clamp_layer(
-        lod_foam_flow,
-        lod_uv(water_lod, xz, s0),
-        s0 * FOAM_FLOW_LAYERS_PER_SLICE + layer,
-    );
-    if alpha <= 0.0 || s1 == s0 {
-        return a;
-    }
-    let b = bilinear_clamp_layer(
-        lod_foam_flow,
-        lod_uv(water_lod, xz, s1),
-        s1 * FOAM_FLOW_LAYERS_PER_SLICE + layer,
-    );
-    return mix(a, b, alpha);
+fn water_foam_flow_layer(pick: LodPick, layer: u32) -> vec4<f32> {
+    return sample_pick(lod_foam_flow, pick, FOAM_FLOW_LAYERS_PER_SLICE, layer);
 }
 
-fn water_foam_flow(xz: vec2<f32>) -> WaterFoamFlow {
+fn water_foam_flow(pick: LodPick) -> WaterFoamFlow {
     var out: WaterFoamFlow;
-    out.short = water_foam_flow_layer(xz, 0u);
-    out.long = water_foam_flow_layer(xz, 1u);
-    out.long_weight = foam_flow_long_weight(water_foam_flow_layer(xz, 2u));
+    out.short = water_foam_flow_layer(pick, 0u);
+    out.long = water_foam_flow_layer(pick, 1u);
+    out.long_weight = foam_flow_long_weight(water_foam_flow_layer(pick, 2u));
     return out;
 }
 
@@ -385,7 +367,7 @@ fn water_quad_any(v: f32) -> bool {
 /// Foam at undisplaced position `xz` from the sim's active and residual coverage. Foam edges are
 /// one pixel wide. Where a pixel spans several texels of a pattern sample, that sample would
 /// alias, so the finer sample drops out first and the foam then fades to its mean opacity.
-fn water_foam_surface(xz: vec2<f32>, foam: vec2<f32>) -> WaterFoamSurface {
+fn water_foam_surface(xz: vec2<f32>, pick: LodPick, foam: vec2<f32>) -> WaterFoamSurface {
     var out: WaterFoamSurface;
     let total = foam.x + foam.y;
     if !water_quad_any(select(total, 0.0, total <= FOAM_SKIP_TOTAL)) {
@@ -399,7 +381,7 @@ fn water_foam_surface(xz: vec2<f32>, foam: vec2<f32>) -> WaterFoamSurface {
     let detail_fade = smoothstep(1.0, 4.0, footprint / detail_texel);
     let fade = smoothstep(1.0, 4.0, footprint / texel);
     let step = mix(detail_texel, texel, detail_fade);
-    let flow = water_foam_flow(xz);
+    let flow = water_foam_flow(pick);
     let t = water_foam_flow_pattern(xz, flow, detail_fade);
     let width = max(fwidth(t), 1e-4);
     let here = water_foam_layers(t, foam, width);
@@ -524,8 +506,9 @@ fn water_flat_xz(in: FragVertexOutput) -> vec2<f32> {
 @fragment
 fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     let xz = water_flat_xz(in);
-    let foam_depth = water_foam_and_depth(xz);
-    let foam = water_foam_surface(xz, foam_depth.xy);
+    let pick = lod_pick(water_lod, xz, 0.0);
+    let foam_depth = water_foam_and_depth(pick);
+    let foam = water_foam_surface(xz, pick, foam_depth.xy);
     if water_is_dry(foam_depth.z) {
         discard;
     }
@@ -537,7 +520,7 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     );
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
-    let wave_normal = water_pixel_normal(xz);
+    let wave_normal = water_pixel_normal(pick);
     let n_world = water_foam_normal(wave_normal, foam);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
@@ -580,7 +563,8 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
 @fragment
 fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     let xz = water_flat_xz(in);
-    let foam_depth = water_foam_and_depth(xz);
+    let pick = lod_pick(water_lod, xz, 0.0);
+    let foam_depth = water_foam_and_depth(pick);
     if water_is_dry(foam_depth.z) {
         discard;
     }
@@ -598,8 +582,8 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     );
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
-    let foam = water_foam_surface(xz, foam_depth.xy);
-    let n_world = water_foam_normal(water_pixel_normal(xz), foam);
+    let foam = water_foam_surface(xz, pick, foam_depth.xy);
+    let n_world = water_foam_normal(water_pixel_normal(pick), foam);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = water_mix_foam_into_material(foam.opacity, pbr_input.material.base_color);
