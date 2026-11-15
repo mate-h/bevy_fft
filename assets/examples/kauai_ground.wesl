@@ -161,7 +161,9 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     let i0 = vec2<i32>(floor(grid));
     let f = fract(grid);
     let wet = mix(mix(moisture_at(i0), moisture_at(i0 + vec2<i32>(1, 0)), f.x), mix(moisture_at(i0 + vec2<i32>(0, 1)), moisture_at(i0 + vec2<i32>(1, 1)), f.x), f.y);
-    let class_grid = grid + class_warp(world.xz);
+    // The class map has its own resolution, independent of the wetness grid's cell size.
+    let class_size = vec2<f32>(textureDimensions(surface_classes));
+    let class_grid = (world.xz / settings.domain.x + 0.5) * class_size - 0.5 + class_warp(world.xz);
     let c0 = vec2<i32>(floor(class_grid));
     let cf = fract(class_grid);
     let ida = class_at(c0);

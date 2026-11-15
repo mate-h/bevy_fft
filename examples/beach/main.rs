@@ -17,6 +17,9 @@
 //! the band has nothing to do. A PML behind the band absorbs the backwash. The panel switches the
 //! edges to walls or drains for comparison. Drag with the left mouse button to add water.
 //!
+//! `BEACH_CELL_SIZE=2` runs the grid with 2 m cells. At 2560x1440 on an M5 that takes the frame
+//! from about 43 to 33 ms, with softer detail in the surf.
+//!
 //! The elevation and class rasters come from the matching 1 m shoreline square in
 //! `~/Downloads/hawaii_topobathy`. Prepare the CC0 texture arrays, class map, sand capillary mask,
 //! and planar height tiles with the neighboring bevy_terrain processor:
@@ -80,10 +83,24 @@ const TERRAIN_SIDE: f32 = 2048.0;
 /// Finest LOD in the tile set.
 const TERRAIN_VIEW_LOD: u32 = 3;
 
-/// Shallow water cell width in meters.
-const CELL_SIZE: f32 = 1.0;
+/// Shallow water cell width in meters, 1 unless `BEACH_CELL_SIZE` sets it. Two meter cells run
+/// the solver and everything sized by its grid on a quarter of the cells, at the cost of shorter
+/// waves in the surf.
+fn cell_size() -> f32 {
+    static CELL: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| {
+        std::env::var("BEACH_CELL_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| *v >= 0.25 && *v <= 8.0)
+            .unwrap_or(1.0)
+    })
+}
+
 /// Shallow water cells per edge. The grid covers the terrain square, centred on the origin.
-const GRID: u32 = (TERRAIN_SIDE / CELL_SIZE) as u32;
+fn grid() -> u32 {
+    (TERRAIN_SIDE / cell_size()).round() as u32
+}
 /// Depth in meters of the solver's zero level below sea level. It sits under the deepest bed in
 /// the data, so solver heights stay positive, and the still sea is at this solver height.
 const SEA_LEVEL: f32 = 30.0;
@@ -275,24 +292,25 @@ fn setup(
         ));
     }
 
-    let mut controller = ShallowWaterController::new(&mut images, GRID, GRID);
+    let grid = grid();
+    let mut controller = ShallowWaterController::new(&mut images, grid, grid);
     let placement = ShallowWaterPlacement {
         center: Vec2::ZERO,
-        cell_size: CELL_SIZE,
+        cell_size: cell_size(),
         datum: -SEA_LEVEL,
         blend_cells: 16.0,
     };
     let bed = TerrainBed::load().expect(
         "Kauai terrain tiles are missing. Bake them with the command in this example's docs.",
     );
-    let heights: Vec<f32> = (0..GRID * GRID)
+    let heights: Vec<f32> = (0..grid * grid)
         .map(|i| {
-            let cell = Vec2::new((i % GRID) as f32, (i / GRID) as f32) + 0.5;
-            let xz = placement.center + (cell - 0.5 * GRID as f32) * CELL_SIZE;
+            let cell = Vec2::new((i % grid) as f32, (i / grid) as f32) + 0.5;
+            let xz = placement.center + (cell - 0.5 * grid as f32) * cell_size();
             bed.height(xz) + SEA_LEVEL
         })
         .collect();
-    controller.bed_source = images.add(bed_source_image(GRID, GRID, &heights));
+    controller.bed_source = images.add(bed_source_image(grid, grid, &heights));
     controller.placement = Some(placement);
     controller.preset_index = SHALLOW_WATER_PRESET_BED_SOURCE;
     controller.fill_level = SEA_LEVEL;

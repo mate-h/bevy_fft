@@ -57,7 +57,7 @@ pub fn load_ground(
     buffers: &mut Assets<ShaderBuffer>,
 ) -> KauaiGroundMaterial {
     let wetness = buffers.add(ShaderBuffer::new(
-        vec![0.0_f32; (super::GRID * super::GRID) as usize],
+        vec![0.0_f32; (super::grid() * super::grid()) as usize],
         default(),
     ));
     let baseline = server
@@ -71,7 +71,7 @@ pub fn load_ground(
         wetness: wetness.clone(),
         baseline,
         params: WetnessParams {
-            grid: UVec4::new(super::GRID, super::GRID, 0, 0),
+            grid: UVec4::new(super::grid(), super::grid(), 0, 0),
             timing: Vec4::new(0.0, 120.0, 0.0, 0.0),
         },
     });
@@ -112,7 +112,7 @@ pub fn load_ground(
             repeat_b: Vec4::new(3.0, 1.3, 2.0, 3.0),
             domain: Vec4::new(
                 super::TERRAIN_SIDE,
-                super::GRID as f32,
+                super::grid() as f32,
                 match std::env::var("BEVY_FFT_GROUND_VIEW").as_deref() {
                     Ok("classes") => 1.0,
                     Ok("wetness") => 2.0,
