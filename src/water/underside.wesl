@@ -60,13 +60,13 @@ fn environment_radiance(N: vec3<f32>, R: vec3<f32>, perceptual_roughness: f32) -
     return radiance;
 }
 
-/// Irradiance the sky sends onto a horizontal surface, from the view's diffuse environment map.
-/// Bevy stores that map as irradiance over pi.
-fn environment_irradiance_down() -> vec3<f32> {
+/// Diffuse environment map sample along `N`, as Bevy's lighting reads it: irradiance on a surface
+/// facing `N`, over pi.
+fn environment_irradiance(N: vec3<f32>) -> vec3<f32> {
     var irradiance = vec3<f32>(0.0);
     @if(ENVIRONMENT_MAP) {
         if light_probes.view_cubemap_index >= 0 {
-            var direction = quat_rotate(light_probes.view_rotation, vec3<f32>(0.0, 1.0, 0.0));
+            var direction = quat_rotate(light_probes.view_rotation, N);
             direction.z = -direction.z;
             @if(MULTIPLE_LIGHT_PROBES_IN_ARRAY) {
                 irradiance = textureSampleLevel(view_bindings::diffuse_environment_maps[light_probes.view_cubemap_index], view_bindings::environment_map_sampler, direction, 0.0).rgb;
@@ -74,10 +74,15 @@ fn environment_irradiance_down() -> vec3<f32> {
             @if(!MULTIPLE_LIGHT_PROBES_IN_ARRAY) {
                 irradiance = textureSampleLevel(view_bindings::diffuse_environment_map, view_bindings::environment_map_sampler, direction, 0.0).rgb;
             }
-            irradiance *= PI * light_probes.intensity_for_view;
+            irradiance *= light_probes.intensity_for_view;
         }
     }
     return irradiance;
+}
+
+/// Irradiance the sky sends onto a horizontal surface, from the view's diffuse environment map.
+fn environment_irradiance_down() -> vec3<f32> {
+    return PI * environment_irradiance(vec3<f32>(0.0, 1.0, 0.0));
 }
 
 /// Unpolarized Fresnel reflectance for light arriving at `cos_i` inside a medium of relative index
