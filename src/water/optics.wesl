@@ -8,7 +8,6 @@ import bevy_fft::water::underside::{
     underwater_lighting,
 };
 import bevy_pbr::render::pbr_types::PbrInput;
-import bevy_pbr::render::pbr_functions::apply_pbr_lighting;
 import bevy_pbr::render::mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT;
 import bevy_pbr::render::mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT;
 import bevy_pbr::render::pbr_lighting::{D_GGX, F_AB, V_SmithGGXCorrelated};
@@ -39,6 +38,42 @@ const BUBBLE_REFLECTANCE: f32 = 0.2;
 /// Depth in meters of the bubble cloud, which sets how much the water tints its light on the way
 /// down and back up.
 const BUBBLE_DEPTH: f32 = 0.5;
+
+/// The part of Bevy's `PbrInput` the water optics read. Passing the whole `PbrInput` kept its
+/// material and lighting fields live through the traces, and the program spilled them.
+struct WaterPoint {
+    N: vec3<f32>,
+    V: vec3<f32>,
+    world_position: vec4<f32>,
+    world_normal: vec3<f32>,
+    frag_coord: vec4<f32>,
+    base_color: vec3<f32>,
+    reflectance: vec3<f32>,
+    perceptual_roughness: f32,
+    ior: f32,
+    flags: u32,
+    diffuse_occlusion: vec3<f32>,
+    specular_occlusion: f32,
+    directional_shadow_factor: f32,
+}
+
+fn water_point(input: PbrInput) -> WaterPoint {
+    var p: WaterPoint;
+    p.N = input.N;
+    p.V = input.V;
+    p.world_position = input.world_position;
+    p.world_normal = input.world_normal;
+    p.frag_coord = input.frag_coord;
+    p.base_color = input.material.base_color.rgb;
+    p.reflectance = input.material.reflectance;
+    p.perceptual_roughness = input.material.perceptual_roughness;
+    p.ior = input.material.ior;
+    p.flags = input.flags;
+    p.diffuse_occlusion = input.diffuse_occlusion;
+    p.specular_occlusion = input.specular_occlusion;
+    p.directional_shadow_factor = input.directional_shadow_factor;
+    return p;
+}
 
 struct Receiver { position: vec3<f32>, valid: bool }
 struct RayHit { uv: vec2<f32>, distance: f32, confidence: f32, position: vec3<f32> }
@@ -149,14 +184,14 @@ struct SurfaceLight { color: vec3<f32>, environment_specular: vec3<f32> }
 /// view environment map, and ambient light. Point, spot and area lights and reflection probes do
 /// not light the water. The full function holds so much state for those that the water program
 /// ran out of registers.
-fn surface_light(input: PbrInput, albedo: vec3<f32>) -> SurfaceLight {
+fn surface_light(input: WaterPoint, albedo: vec3<f32>) -> SurfaceLight {
     let N = input.N;
     let V = input.V;
-    let perceptual_roughness = input.material.perceptual_roughness;
+    let perceptual_roughness = input.perceptual_roughness;
     let clamped_roughness = clamp(perceptual_roughness, 0.089, 1.0);
     let roughness = clamped_roughness * clamped_roughness;
     let NdotV = max(dot(N, V), 0.0001);
-    let F0 = 0.16 * input.material.reflectance * input.material.reflectance;
+    let F0 = 0.16 * input.reflectance * input.reflectance;
     let F_ab = F_AB(perceptual_roughness, NdotV);
     // Fresnel at grazing angles, which Bevy also uses as its baked specular occlusion.
     let f90 = saturate(dot(F0, vec3<f32>(50.0 * 0.33)));
@@ -226,9 +261,9 @@ fn scene_color(uv: vec2<f32>) -> vec3<f32> {
 /// Water over the opaque scene. `foam` is the opacity of the foam layer on top and `bubbles` the
 /// coverage of active foam, whose bubble cloud brightens the water below it. `surface_y` is the
 /// height of the undisplaced surface. Beds below it fade with depth and take the caustic map.
-fn shade_water(input: PbrInput, solver_depth: f32, foam: f32, bubbles: f32, surface_y: f32) -> vec4<f32> {
+fn shade_water(input: WaterPoint, solver_depth: f32, foam: f32, bubbles: f32, surface_y: f32) -> vec4<f32> {
     if any(textureDimensions(opaque_depth) != textureDimensions(view_transmission_texture)) {
-        return apply_pbr_lighting(input);
+        return vec4<f32>(surface_light(input, input.base_color).color, 1.0);
     }
     let full_size = vec2<f32>(textureDimensions(opaque_depth));
     let uv = input.frag_coord.xy / full_size;
@@ -255,7 +290,7 @@ fn shade_water(input: PbrInput, solver_depth: f32, foam: f32, bubbles: f32, surf
     var refraction_confidence = 0.0;
     let thin_fade = smoothstep(0.0, 0.3, min(column, solver_depth));
     if receiver.valid && optics.refraction_strength > 0.0 && thin_fade > 0.0 {
-        let ray = refract(-input.V, input.N, 1.0 / max(input.material.ior, 1.0));
+        let ray = refract(-input.V, input.N, 1.0 / max(input.ior, 1.0));
         let hit = trace_scene(input.world_position.xyz, ray, min(optics.max_distance, path * 1.5 + 1.0), false);
         refraction_confidence = hit.confidence;
         let weight = clamp(optics.refraction_strength, 0.0, 1.0) * thin_fade * hit.confidence;
@@ -267,7 +302,7 @@ fn shade_water(input: PbrInput, solver_depth: f32, foam: f32, bubbles: f32, surf
         }
     }
     let transmittance = exp(-max(optics.extinction, vec3<f32>(0.0)) * min(path, optics.max_distance));
-    let f0 = 0.16 * input.material.reflectance * input.material.reflectance;
+    let f0 = 0.16 * input.reflectance * input.reflectance;
     let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - clamp(dot(input.N, input.V), 0.0, 1.0), 5.0);
     // Lighting the scattering body also yields the environment reflection as its specular part,
     // which a screen-space hit replaces.

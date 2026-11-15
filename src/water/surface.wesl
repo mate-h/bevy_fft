@@ -70,7 +70,7 @@ import bevy_pbr::deferred::functions::deferred_output;
 import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT;
 
 @if(!PREPASS_PIPELINE && VIEW_TRANSMISSION_TEXTURE)
-import bevy_fft::water::optics::{optics, shade_water};
+import bevy_fft::water::optics::{optics, shade_water, water_point};
 @if(!PREPASS_PIPELINE)
 import bevy_fft::water::underside::shade_underside;
 @if(!PREPASS_PIPELINE)
@@ -545,7 +545,7 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     }
 @if(VIEW_TRANSMISSION_TEXTURE) {
     if optics.enabled != 0u {
-        out.color = shade_water(pbr_input, foam_depth.z, foam.opacity, foam_depth.x, surface.plane_height);
+        out.color = shade_water(water_point(pbr_input), foam_depth.z, foam.opacity, foam_depth.x, surface.plane_height);
         out.color = main_pass_post_lighting_processing(pbr_input, out.color);
         return out;
     }
