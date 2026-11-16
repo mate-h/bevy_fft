@@ -279,8 +279,9 @@ fn a_circling_boat_in_deep_mode_keeps_a_bounded_wake() {
         total += eta;
     }
     let mean = total / (SIDE * SIDE) as f32;
-    // The deepest point is the 0.6 m dent under the boat; the wake stays below it.
-    assert!(highest < 1.0, "waves reached {highest} m");
+    // The linear steady wake of this brush towed straight reaches -1.18 m and +0.84 m, cusp waves
+    // included, so the wake stays bounded near that.
+    assert!(highest < 1.5, "waves reached {highest} m");
     assert!(highest > 0.3, "no wake: {highest} m");
     // The brush presses the surface instead of adding water.
     assert!(mean.abs() < 1e-3, "mean level moved {mean} m");

@@ -75,7 +75,8 @@ fn directional_spread_D(diff_from_wind: f32, spread: f32) -> f32 {
 
 /// Horvath (2015) swell spread `|cos(Δθ/2)|^(2 s_ξ)` with `s_ξ = 16 tanh(ω_p/ω) ξ²`.
 fn swell_spread(diff_from_wind: f32, omega: f32, omega_p: f32, swell: f32) -> f32 {
-    let s_xi = 16.0 * tanh(omega_p / max(omega, 1e-6)) * swell * swell;
+    // tanh is 1 past 10, and its exp overflows to NaN past about 44 on Metal.
+    let s_xi = 16.0 * tanh(min(omega_p / max(omega, 1e-6), 10.0)) * swell * swell;
     return pow(abs(cos(0.5 * diff_from_wind)), 2.0 * s_xi);
 }
 

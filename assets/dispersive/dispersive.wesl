@@ -939,7 +939,10 @@ fn beta_num(k: f32, dx: f32) -> f32 {
 fn omega_disp(g: f32, k: f32, hbar: f32, dx: f32) -> f32 {
     if (k < 1e-10) { return 0.0; }
     let b = beta_num(k, dx);
-    let raw = sqrt(max(g * k * tanh(k * hbar), 0.0));
+    // tanh is 1 to f32 precision past k h = 10. Metal evaluates it through exp(2 k h), which
+    // overflows past about 44 and returns NaN, so deep water lost every wave shorter than
+    // 2π h / 44: 14 m at 100 m deep, the Kelvin cusp waves of a 5 m/s boat among them.
+    let raw = sqrt(max(g * k * tanh(min(k * hbar, 10.0)), 0.0));
     // Eq. 27 β is a wavenumber (≈ k at long waves). The dimensionless factor is β/k, so
     // ω_corr = ω_phys / (β/k) = ω_phys * k / β. Using ω_phys/β fed phase speed into cos/sin
     // and made (ω/k²) explode by ~1/k², which NaNs the Airy IFFT within a few steps.
