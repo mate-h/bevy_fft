@@ -27,6 +27,7 @@ mod blend;
 mod caustics;
 mod foam;
 mod foam_texture;
+mod fronts;
 mod heightfield;
 mod lod_data;
 mod medium;
@@ -45,6 +46,7 @@ pub use foam::{
     WATER_FOAM_SHADER, WATER_FOAM_STATE_FORMAT, WaterFoamFrame, WaterFoamParams, WaterFoamSettings,
 };
 pub use foam_texture::{WATER_FOAM_TEXTURE_SIZE, WaterFoamTexture, foam_texture_image};
+pub use fronts::{FrontLine, FrontPoint, WaterBreakingFronts};
 pub use heightfield::{WATER_HEIGHTFIELD_SHADER, WaterHeightfield, WaterHeightfieldDry};
 pub use lod_data::{
     WATER_FOAM_FLOW_FORMAT, WATER_FOAM_FLOW_LAYERS_PER_SLICE, WATER_LOD_DRIFT_FORMAT,
@@ -119,6 +121,7 @@ impl Plugin for WaterPlugin {
             .register_type::<WaterViewer>()
             .register_type::<WaterHeightfield>()
             .register_type::<WaterHeightfieldDry>()
+            .register_type::<WaterBreakingFronts>()
             .register_type::<WaterSurfaceUniform>()
             .register_type::<WaterOpticsUniform>()
             .register_type::<WaterMediumUniform>()
@@ -135,6 +138,8 @@ impl Plugin for WaterPlugin {
             .add_plugins(ExtractResourcePlugin::<WaterLodData>::default())
             .add_plugins(ExtractResourcePlugin::<WaterLodClear>::default())
             .add_plugins(ExtractComponentPlugin::<WaterHeightfield>::default())
+            .add_plugins(ExtractComponentPlugin::<WaterBreakingFronts>::default())
+            .add_observer(fronts::accept_front_cells)
             .add_plugins(MaterialPlugin::<WaterSurfaceMaterial>::default())
             .add_observer(quadtree::read_quadtree_stats)
             .add_systems(
@@ -146,6 +151,7 @@ impl Plugin for WaterPlugin {
                 ),
             )
             .add_systems(Update, quadtree::build_water_quadtrees)
+            .add_systems(PostUpdate, fronts::prepare_breaking_fronts)
             .add_systems(
                 PostUpdate,
                 (
@@ -168,6 +174,7 @@ impl Plugin for WaterPlugin {
                 .init_resource::<WaterLodScratch>()
                 .init_resource::<foam::WaterFoamSim>()
                 .init_resource::<heightfield::WaterHeightfieldPasses>()
+                .init_resource::<fronts::WaterFrontsPasses>()
                 .add_systems(
                     Render,
                     (
@@ -182,6 +189,7 @@ impl Plugin for WaterPlugin {
                     (
                         foam::prepare_water_foam,
                         heightfield::prepare_water_heightfields,
+                        fronts::prepare_water_fronts,
                     )
                         .in_set(RenderSystems::PrepareBindGroups),
                 )
@@ -204,6 +212,7 @@ impl Plugin for WaterPlugin {
                         lod_data::clear_water_lod.in_set(WaterLodGraphSystems::Clear),
                         heightfield::run_water_heightfields.in_set(WaterLodGraphSystems::Blend),
                         foam::run_water_foam.in_set(WaterLodGraphSystems::Simulate),
+                        fronts::run_water_fronts.in_set(WaterLodGraphSystems::Read),
                     ),
                 )
                 .add_systems(
@@ -220,7 +229,8 @@ impl Plugin for WaterPlugin {
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
                 .init_resource::<foam::WaterFoamPipeline>()
-                .init_resource::<heightfield::WaterHeightfieldPipeline>();
+                .init_resource::<heightfield::WaterHeightfieldPipeline>()
+                .init_resource::<fronts::WaterFrontsPipeline>();
         }
         underwater::finish(app);
         caustics::finish(app);

@@ -15,6 +15,7 @@ bevy_fft runs 2D Fast Fourier Transforms in compute shaders on Bevy's render gra
 - **eWave.** Tessendorf's iWave evolved in Fourier space on a periodic grid.
 - **Shared water surface.** Every solver writes into the same camera-centred LOD textures, so one material draws them all and they blend at their edges. The mesh is a GPU-selected quadtree or a clipmap.
 - **Water optics.** Terrain-aware transmission and refraction, screen-space reflection, caustics, foam that advects with the flow, an underwater view and the waterline.
+- **Breaking fronts.** Breaking wave fronts in shallow water traced as tracked lines along the crest (Thuerey et al. 2007), for spray, foam and breakers to follow.
 - **Queries.** Read the water height and velocity back on the CPU, for buoys and floating objects.
 
 ## Gallery
@@ -78,6 +79,7 @@ These environment variables change the beach:
 | `BEACH_CELL_SIZE` | Solver cell size in meters, 2 by default. `1` matches the terrain data, at about a third more GPU time per frame. |
 | `BEACH_TRACE_STEPS` | Steps in the water's screen-space traces, 6 by default. The panel has a slider too. |
 | `BEACH_CAMERA` | Start camera as `x,y,z,tx,ty,tz`: position, then target. |
+| `BEACH_FRONTS` | Draw the traced breaking fronts from the start. The panel toggles them too. |
 
 To bake another bay or river, [`tools/bake_topobathy.py`](tools/bake_topobathy.py) fetches heights from Esri TopoBathy, carves river channels along splines, and writes terrain tiles and a sea-floor depth texture. It needs an ArcGIS API key in `ARCGIS_API_KEY`.
 

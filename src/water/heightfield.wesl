@@ -281,3 +281,90 @@ fn water_heightfield(@builtin(global_invocation_id) gid: vec3<u32>) {
     let base_d = textureLoad(base_drift, gid.xy, slice, 0).xy;
     textureStore(drift_out, gid.xy, slice, vec4<f32>(mix(base_d, current, w), 0.0, 0.0));
 }
+
+// Breaking front cells for `WaterBreakingFronts`. One thread per grid cell appends the cells of
+// steep fronts to `front_cells`, which is read back and linked into lines on the CPU. A cell
+// qualifies where the LOD writer's front breaking is strong and the flow runs against the
+// surface gradient, which is the wave's front face and not its back (Thuerey et al. 2007, eq. 4).
+
+struct FrontCell {
+    /// Grid cell, x in the low 16 bits and y in the high 16.
+    cell: u32,
+    intensity: f32,
+    /// Free-surface gradient `(∂η/∂x, ∂η/∂z)`.
+    gradient: vec2<f32>,
+    /// Depth-averaged velocity in m/s.
+    velocity: vec2<f32>,
+    /// Free-surface height in meters above the source's zero level.
+    eta: f32,
+    depth: f32,
+}
+
+struct FrontCells {
+    frame: u32,
+    count: atomic<u32>,
+    capacity: u32,
+    _pad: u32,
+    cells: array<FrontCell>,
+}
+
+struct FrontParams {
+    frame: u32,
+    capacity: u32,
+    min_intensity: f32,
+    _pad: f32,
+}
+
+@group(0) @binding(20) var<storage, read_write> front_cells: FrontCells;
+@group(0) @binding(21) var<uniform> front_params: FrontParams;
+
+fn cell_eta(p: vec2<i32>) -> f32 {
+    return render_eta(load_bed_water(p));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn water_front_cells(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if all(gid.xy == vec2(0u)) {
+        front_cells.frame = front_params.frame;
+        front_cells.capacity = front_params.capacity;
+    }
+    if any(gid.xy >= params.cells) {
+        return;
+    }
+    let p = vec2<i32>(gid.xy);
+    let bw = load_bed_water(p);
+    if bw.y <= BREAK_MIN_DEPTH {
+        return;
+    }
+    let e = render_eta(bw);
+    let ex = vec2<f32>(cell_eta(p + vec2(1, 0)), cell_eta(p - vec2(1, 0)));
+    let ez = vec2<f32>(cell_eta(p + vec2(0, 1)), cell_eta(p - vec2(0, 1)));
+    let h = params.cell_size;
+    let gradient = vec2<f32>(ex.x - ex.y, ez.x - ez.y) / (2.0 * h);
+    let u = load_velocity(p);
+    if dot(gradient, u) >= 0.0 {
+        return;
+    }
+    let banks = min(
+        min(load_bed_water(p + vec2(1, 0)).y, load_bed_water(p - vec2(1, 0)).y),
+        min(load_bed_water(p + vec2(0, 1)).y, load_bed_water(p - vec2(0, 1)).y),
+    );
+    let wet = smoothstep(BREAK_MIN_DEPTH, 2.0 * BREAK_MIN_DEPTH, banks);
+    let flux_x = load_bed_water(p + vec2(1, 0)).y * load_velocity(p + vec2(1, 0)).x
+        - load_bed_water(p - vec2(1, 0)).y * load_velocity(p - vec2(1, 0)).x;
+    let flux_z = load_bed_water(p + vec2(0, 1)).y * load_velocity(p + vec2(0, 1)).y
+        - load_bed_water(p - vec2(0, 1)).y * load_velocity(p - vec2(0, 1)).y;
+    let rise = -(flux_x + flux_z) / (2.0 * h);
+    let steepest = length(vec2<f32>(max_abs(ex.x - e, e - ex.y), max_abs(ez.x - e, e - ez.y))) / h;
+    let curvature = (ex.x + ex.y + ez.x + ez.y - 4.0 * e) / (h * h);
+    let intensity = breaking_front(steepest, rise, curvature) * wet
+        * (1.0 - smoothstep(BREAK_FADE_START, BREAK_FADE_END, bw.y));
+    if intensity < front_params.min_intensity {
+        return;
+    }
+    let i = atomicAdd(&front_cells.count, 1u);
+    if i >= front_params.capacity {
+        return;
+    }
+    front_cells.cells[i] = FrontCell(gid.x | (gid.y << 16u), intensity, gradient, u, e, bw.y);
+}

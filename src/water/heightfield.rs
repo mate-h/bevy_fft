@@ -111,7 +111,7 @@ impl ExtractComponent<RenderApp> for WaterHeightfield {
 
 /// Uniform for `heightfield.wesl`.
 #[derive(Clone, Copy, Default, ShaderType)]
-struct WaterHeightfieldParams {
+pub(super) struct WaterHeightfieldParams {
     center: Vec2,
     cell_size: f32,
     datum: f32,
@@ -127,6 +127,30 @@ struct WaterHeightfieldParams {
     dry_mode: u32,
     height_scale: f32,
     velocity_scale: f32,
+}
+
+impl WaterHeightfieldParams {
+    /// The grid's placement and units, without ocean cascades. Enough for passes that read only
+    /// the grid's own cells, such as the breaking front detection.
+    pub(super) fn grid(heightfield: &WaterHeightfield) -> Self {
+        let (dry_mode, dry_level) = match heightfield.dry {
+            WaterHeightfieldDry::Level(level) => (0, level * heightfield.height_scale),
+            WaterHeightfieldDry::Bed => (1, 0.0),
+        };
+        Self {
+            center: heightfield.center,
+            cell_size: heightfield.cell_size,
+            datum: heightfield.datum,
+            cells: heightfield.cells,
+            blend_cells: heightfield.blend_cells,
+            dry_level,
+            cascade_tile_sizes: Vec4::ONE,
+            dry_mode,
+            height_scale: heightfield.height_scale,
+            velocity_scale: heightfield.velocity_scale,
+            ..default()
+        }
+    }
 }
 
 #[derive(Resource)]
@@ -276,29 +300,17 @@ pub(super) fn prepare_water_heightfields(
                 vec![&bed_water.texture_view; OCEAN_MAX_CASCADES],
             ),
         };
-        let (dry_mode, dry_level) = match heightfield.dry {
-            WaterHeightfieldDry::Level(level) => (0, level * heightfield.height_scale),
-            WaterHeightfieldDry::Bed => (1, 0.0),
-        };
         let index = state.passes.len();
         if state.params.len() <= index {
             state.params.push(default());
         }
         let params = &mut state.params[index];
         params.set(WaterHeightfieldParams {
-            center: heightfield.center,
-            cell_size: heightfield.cell_size,
-            datum: heightfield.datum,
-            cells: heightfield.cells,
-            blend_cells: heightfield.blend_cells,
-            dry_level,
             cascade_tile_sizes: tiles,
             amplitude,
             choppiness,
             cascade_count,
-            dry_mode,
-            height_scale: heightfield.height_scale,
-            velocity_scale: heightfield.velocity_scale,
+            ..WaterHeightfieldParams::grid(heightfield)
         });
         params.write_buffer(&device, &queue);
         let Some(params) = params.binding() else {

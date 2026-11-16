@@ -158,13 +158,16 @@ fn main() {
             EguiPlugin::default(),
             screenshot::ScreenshotOnEnvPlugin,
         ))
-        .add_systems(Startup, setup)
+        .insert_resource(ShowFronts(std::env::var_os("BEACH_FRONTS").is_some()))
+        .add_systems(Startup, (setup, draw_gizmos_on_top))
         .add_systems(
             Update,
             (
                 spawn_surface_when_ready.after(FftSystemSet::PrepareTextures),
                 float_buoys,
                 pan_camera_for_lag_repro,
+                trace_breaking_fronts,
+                draw_breaking_fronts,
             ),
         )
         .add_systems(EguiPrimaryContextPass, beach_panel)
@@ -537,10 +540,57 @@ fn pointer_to_sim_space(
     controller.brush_input_active = paint;
 }
 
+/// Draws the traced breaking fronts over the water.
+#[derive(Resource)]
+struct ShowFronts(bool);
+
+/// Traces the breaking fronts of the shallow water grid.
+fn trace_breaking_fronts(
+    mut commands: Commands,
+    heightfields: Query<Entity, (With<WaterHeightfield>, Without<WaterBreakingFronts>)>,
+) {
+    for entity in &heightfields {
+        commands
+            .entity(entity)
+            .insert(WaterBreakingFronts::default());
+    }
+}
+
+/// Draws gizmos over the water, which would otherwise hide front lines in the wave troughs.
+fn draw_gizmos_on_top(mut config: ResMut<GizmoConfigStore>) {
+    config.config_mut::<DefaultGizmoConfigGroup>().0.depth_bias = -1.0;
+}
+
+fn draw_breaking_fronts(
+    show: Res<ShowFronts>,
+    fronts: Query<&WaterBreakingFronts>,
+    mut gizmos: Gizmos,
+) {
+    if !show.0 {
+        return;
+    }
+    for line in fronts.iter().flat_map(|f| &f.lines) {
+        // A hue per line id, so tracking shows as a line keeping its colour.
+        let color = Color::hsl((line.id as f32 * 137.5) % 360.0, 0.9, 0.55);
+        let lift = Vec3::Y * 0.3;
+        let mut points: Vec<Vec3> = line.points.iter().map(|p| p.position + lift).collect();
+        if line.closed {
+            points.push(points[0]);
+        }
+        gizmos.linestrip(points, color);
+        for p in line.points.iter().step_by(6) {
+            let ahead = Vec3::new(p.direction.x, 0.0, p.direction.y) * 2.0;
+            gizmos.arrow(p.position + lift, p.position + lift + ahead, color);
+        }
+    }
+}
+
 fn beach_panel(
     mut contexts: EguiContexts,
     mut controller: ResMut<ShallowWaterController>,
     mut caustics: ResMut<WaterCausticsSettings>,
+    mut show_fronts: ResMut<ShowFronts>,
+    fronts: Query<&WaterBreakingFronts>,
     mut ground_materials: ResMut<Assets<KauaiGroundMaterial>>,
     mut water_materials: ResMut<Assets<WaterSurfaceMaterial>>,
 ) {
@@ -613,6 +663,8 @@ fn beach_panel(
             }
         }
         ui.checkbox(&mut caustics.enabled, "Caustics");
+        let lines: usize = fronts.iter().map(|f| f.lines.len()).sum();
+        ui.checkbox(&mut show_fronts.0, format!("Breaking fronts ({lines})"));
         ui.add(
             egui::Slider::new(&mut caustics.receiver_depth, 0.25..=8.0).text("Caustic depth (m)"),
         );
