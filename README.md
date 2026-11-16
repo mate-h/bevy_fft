@@ -1,70 +1,137 @@
 # bevy_fft
 
-This crate is a small GPU FFT library for [Bevy](https://bevyengine.org). Use it when you want to filter or synthesize data in the frequency domain on the GPU, then turn it back into something you can show on screen or feed into a mesh, for example a height field from an ocean-style spectrum. It plugs into Bevy’s render graph and works with square power-of-two grids.
+GPU FFT and real-time water simulation for [Bevy](https://bevyengine.org).
 
-The fft example applies a radial band-pass in that spectrum stage. The ocean example runs an inverse-only path each frame and displaces a mesh from the resolved spatial height and slopes.
+bevy_fft runs 2D Fast Fourier Transforms in compute shaders on Bevy's render graph. On top of that it builds an FFT ocean, shallow water and dispersive wave solvers, and one water surface that draws all of them together.
 
-<img src="./assets/showcase.jpg" alt="FFT ocean simulation demo showcase" width="600"/>
+<img src="./assets/readme/beach.jpg" alt="Surf on the Lumahaʻi shoreline of Kauai: the FFT ocean and a shallow water grid over LiDAR terrain" width="800"/>
 
-<img src="./assets/showcase2.jpg" alt="FFT round-trip band pass filter demo showcase" width="600"/>
+## Features
 
-## What it includes
+- **GPU FFT.** Forward and inverse 2D FFTs on square power-of-two grids up to 4096 × 4096, with a hook for your own compute pass on the spectrum between them.
+- **FFT ocean.** Tessendorf-style ocean cascades with finite-depth dispersion, TMA spectra, swell, choppy horizontal displacement and whitecap foam.
+- **Shallow water.** A staggered-grid solver on the GPU, with a terrain bed, wetting and drying, ocean-forced open borders and absorbing edges.
+- **Dispersive waves.** Bulk shallow water combined with Airy surface waves (Jeschke and Wojtan), for boat wakes and ripples.
+- **eWave.** Tessendorf's iWave evolved in Fourier space on a periodic grid.
+- **Shared water surface.** Every solver writes into the same camera-centred LOD textures, so one material draws them all and they blend at their edges. The mesh is a GPU-selected quadtree or a clipmap.
+- **Water optics.** Terrain-aware transmission and refraction, screen-space reflection, caustics, foam that advects with the flow, an underwater view and the waterline.
+- **Queries.** Read the water height and velocity back on the CPU, for buoys and floating objects.
 
-The stock pipeline uses your chosen grid edge length as long as it is a non-zero power of two. Helpers such as `FftSource::square_forward_then_inverse(n)` and `square_inverse_only(n)` set `FftTextures` and schedule work. After the graph finishes, resolved images `spatial_output` and `power_spectrum` are available for sampling. The Rust API exposes `FftPlugin`, `FftSource`, `FftSchedule`, `FftInputTexture`, `FftInputDomain`, and `FftPatternTarget`. Run `cargo doc --open` for generated API documentation, or open [`src/fft/mod.rs`](src/fft/mod.rs) as the source of truth.
+## Gallery
 
-FFT compute registers as systems on Bevy’s root [`RenderGraph`](https://docs.rs/bevy_render/latest/bevy_render/renderer/struct.RenderGraph.html) schedule, ordered before `camera_driver`. Each frame the stock chain runs forward FFT, an optional spectrum pass, spectrum resolve, inverse FFT, and spatial resolve (`run_fft_forward` → spectrum slot → `run_fft_resolve_spectrum` → `run_fft_inverse` → `run_fft_resolve_outputs`). The spectrum slot is a no-op until something replaces it. From plugin `finish`, call `disable_spectrum_passthrough`, then add your compute system on the same schedule with `.after(FftNode::ComputeFFT).before(FftNode::ResolveSpectrum)`. Reuse `FftBindGroupLayouts::common` so bindings match the FFT passes. The `band_pass` example shows the pattern.
+| <img src="./assets/readme/ocean.jpg" alt="FFT ocean with buoys" width="270"/> | <img src="./assets/readme/shallow_water.jpg" alt="Shallow water around islands" width="270"/> | <img src="./assets/showcase2.jpg" alt="FFT band-pass filter" width="270"/> |
+|---|---|---|
+| `ocean`: FFT ocean cascades with buoys | `shallow_water`: the staggered solver around islands | `fft`: a radial band-pass in the frequency domain |
 
-There is also an [ocean](src/ocean/mod.rs) entry point. `OceanPlugin` registers ocean spectrum compute on that schedule, writes its FFT cascades into the shared water LOD data in [src/water](src/water/mod.rs), and the water module ships `WaterSurfaceMaterial`, which displaces a mesh from that data. Shallow water and dispersive patches write into the same data, so one surface draws all of them. Register `FftPlugin` before `OceanPlugin` so plugin `finish` ordering is valid. It is a building block, not a complete water renderer.
+## Getting started
 
-The [shallow_water](src/shallow_water/mod.rs) module is separate from the bulk FFT entity path: GPU staggered shallow water (see [docs/shallow_water.md](docs/shallow_water.md)) with a PBR surface example. Give the grid a world placement and it blends into the shared water LOD data, so the ocean surface draws it and it fades into the ocean waves at its edges. The `beach` example puts a grid over the Lumahaʻi shoreline on Kauai, with ground from 1 m LiDAR drawn by [bevy_terrain](https://github.com/mate-h/bevy_terrain). The terrain tiles and Poly Haven material arrays are prepared locally and kept out of git. Run `python3 tools/prepare_beach_materials.py --bake-terrain` with the Hawaii dataset in `~/Downloads/hawaii_topobathy`. For other bays and rivers, `tools/bake_topobathy.py` fetches heights from Esri TopoBathy (it needs an ArcGIS API key in `ARCGIS_API_KEY`), carves river channels along splines, and writes a sea-floor depth texture next to the terrain tiles. The [material notes](assets/examples/beach_materials.md) describe the source classes, real-world texture scale, and persistent sand wetness.
+bevy_fft targets **Bevy 0.20** and Rust **1.97.1** or newer. The water modules aren't on crates.io yet, so depend on the repository until the next release:
 
-The [ewave](src/ewave/mod.rs) module runs Tessendorf-style iWave in k-space with its own FFT buffers; `cargo run --example ewave` shows a periodic heightfield next to the same stock graph path. Register `FftPlugin` before `EwavePlugin` for the same reason.
-
-The [dispersive](src/dispersive/mod.rs) module combines bulk shallow water with Airy surface waves (Jeschke and Wojtan). See [docs/dispersive.md](docs/dispersive.md) for the hybrid split and the NumPy reference. The `dispersive` example leaves boat-wake style ripples under a mouse drag, and the `wake` example adds such a patch onto the FFT ocean through the shared water LOD data. Register `FftPlugin` before `DispersivePlugin`. Do not enable `EwavePlugin` in the same app.
-
-For a surface that follows the camera, `WaterQuadtree` selects and morphs tiles on the GPU and submits only selected tiles through indirect draws. It shares the material, depth, deferred, and shadow passes with other meshes. The `ocean` example switches between it and `OceanClipmap`, shows selected vertex counts and frame time, and includes a CPU selection toggle. Set `BEVY_FFT_OCEAN_MESH=quadtree` or `cpu_quadtree` to choose a quadtree at startup. Backends or cameras without indirect drawing retain the fixed tile pool and collapse unused vertices outside the clip volume. See [the quadtree implementation](src/water/quadtree.rs).
-
-The beach uses [terrain-aware water transmission](docs/water_rendering.md). It preserves the actual ground color through shallow water, measures optical thickness from opaque scene depth, and combines attenuation, refraction, and reflection. The Beach panel includes optical-distance, transmission, and coverage views.
-
-### FFT and k-space indexing
-
-The stock FFT places DC at index `(0,0)` on each axis, with the usual positive-then-wrapped-negative frequency order. If you add a per-texel multiply in frequency space, map each `(i, j)` to `(k_x, k_y)` with that same layout. A centered `2π (i - N/2) / L` style grid only matches the buffers if the spectrum is explicitly shifted, which the ocean path does when writing to buffer C. The eWave shader entry `ewave_k_step` in [`assets/ewave/ewave.wgsl`](assets/ewave/ewave.wgsl) and dispersive `k_xy` in [`assets/dispersive/dispersive.wgsl`](assets/dispersive/dispersive.wgsl) follow the FFT-aligned convention. Misaligned `k` has caused grid lattices in both paths before.
-
-Ambitious extras such as a full ocean sim or FFT bloom are sketched in [`ROADMAP.md`](ROADMAP.md).
-
-## Try it
-
-Generate optional test patterns if you like.
-
-```bash
-pip install numpy matplotlib pillow
-python assets/generate_test_patterns.py
+```toml
+[dependencies]
+bevy_fft = { git = "https://github.com/mate-h/bevy_fft" }
 ```
 
-Then run the demo. The `file_watcher` feature hot-reloads WGSL while you iterate.
+Add `FftPlugin` before any plugin built on it. Their `finish` steps need the FFT's render resources, and the app panics at startup if the order is reversed.
 
-```bash
-cargo run --example fft --features file_watcher
-cargo run --example ocean --features free_camera
-cargo run --example shallow_water --features free_camera
-cargo run --example beach --features free_camera
-cargo run --example ewave --features free_camera
-cargo run --example dispersive --features free_camera
-cargo run --example wake --features free_camera
+```rust
+use bevy::prelude::*;
+use bevy_fft::prelude::*;
+
+fn main() {
+    App::new()
+        .add_plugins((DefaultPlugins, FftPlugin, OceanPlugin))
+        .run();
+}
 ```
 
-The `beach` example runs its shallow water grid with 2 m cells. Set `BEACH_CELL_SIZE=1` for the 1 m grid that matches the terrain data, at about a third more GPU time per frame. `BEACH_TRACE_STEPS` sets the water's screen-space trace steps, and `BEACH_CAMERA=x,y,z,tx,ty,tz` starts the camera elsewhere on the map.
+The examples are the best starting point for each feature. `bevy_fft::prelude` exports what they use, and `cargo doc --open` builds the API docs.
 
-The `fft` example drives `FftSchedule::ForwardThenInverse`. Data starts in spatial A, moves to spectrum C for a radial band-pass tuned with the sliders at the top-left, then returns through IFFT to B. The `ocean` example uses `FftSchedule::Inverse` with `OceanPlugin`: a compute pass fills spectrum C each frame, then the same IFFT and resolve path writes `spatial_output` for the ocean material.
+## Examples
 
-## A few types worth knowing
+| Example | What it shows | Run |
+|---|---|---|
+| `fft` | Forward FFT, a band-pass on the spectrum, and inverse FFT on an image | `cargo run --example fft` |
+| `ocean` | FFT ocean cascades, with a quadtree or clipmap surface | `cargo run --example ocean --features free_camera` |
+| `shallow_water` | The shallow water solver with a brush on a PBR plane | `cargo run --example shallow_water --features free_camera` |
+| `dispersive` | Dispersive waves on their own, with mouse-drawn wakes | `cargo run --example dispersive --features free_camera` |
+| `wake` | A dispersive patch on the FFT ocean, with a scripted boat | `cargo run --example wake --features free_camera` |
+| `ewave` | A periodic eWave height field | `cargo run --example ewave --features free_camera` |
+| `beach` | Surf over real terrain: the ocean, a shallow water grid and terrain-aware optics | `cargo run --release --example beach --features free_camera` |
 
-Pick `FftSchedule` to control how much runs each frame. `Forward` stops after the transform into C. `Inverse` assumes C is already filled and writes B. `ForwardThenInverse` runs both passes so spectrum buffer C can be edited on the GPU between them.
+Add the `file_watcher` feature to hot-reload shaders while you edit them.
 
-`FftInputDomain` steers where `FftInputTexture` lands on the CPU each update, either spatial A in `Spatial` mode or spectrum C in `Spectrum` mode. `FftPatternTarget` tells procedural shaders whether to write A or C, in line with the uniform in [`bindings.wgsl`](src/fft/bindings.wgsl). `bevy_fft::prelude` re-exports what the in-repo examples use, including `FftInputTexture` and `prepare_fft_bind_groups`. Deeper or rarely used symbols remain on `bevy_fft::fft` and `bevy_fft::fft::resources`.
+### The beach example
 
-Workspace buffers use Rgba32Float real and imaginary textures. Radix-2 butterfly stages use `256 × 1` workgroups and a 2D dispatch over half-width butterflies and full grid lines. The WGSL [`c32`](src/complex/c32.wgsl) helpers can pack one complex as two f16 in a single `u32`, but the stock FFT graph is still wired to float storage only. 1D or 3D FFTs, packed uint buffers, and related layout work stay in [`ROADMAP.md`](ROADMAP.md).
+The beach puts a shallow water grid over a 2 km square of the Lumahaʻi shoreline on Kauai, with ground from 1 m LiDAR drawn by [bevy_terrain](https://github.com/mate-h/bevy_terrain). The terrain tiles and texture arrays are generated locally and kept out of git:
 
-### How large can the grid be?
+```bash
+python3 tools/prepare_beach_materials.py --bake-terrain
+```
 
-Today the twiddle table in Rust and WGSL is a fixed `8192` complex table filled for butterfly bases up through `2^12`, which matches a full radix-2 pass schedule for `4096 × 4096` rows and columns. On top of that, the GPU enforces its own max texture dimension. This is commonly 8192 or 16384 on many desktop adapters for 2D storage textures.
+The script needs NumPy and GDAL, the Hawaii topobathy dataset in `~/Downloads/hawaii_topobathy`, and the bevy_terrain processor built in a neighboring checkout. The [material notes](assets/examples/beach_materials.md) describe the texture sources, their real-world scale and the sand wetness.
+
+These environment variables change the beach:
+
+| Variable | Effect |
+|---|---|
+| `BEACH_CELL_SIZE` | Solver cell size in meters, 2 by default. `1` matches the terrain data, at about a third more GPU time per frame. |
+| `BEACH_TRACE_STEPS` | Steps in the water's screen-space traces, 6 by default. The panel has a slider too. |
+| `BEACH_CAMERA` | Start camera as `x,y,z,tx,ty,tz`: position, then target. |
+
+To bake another bay or river, [`tools/bake_topobathy.py`](tools/bake_topobathy.py) fetches heights from Esri TopoBathy, carves river channels along splines, and writes terrain tiles and a sea-floor depth texture. It needs an ArcGIS API key in `ARCGIS_API_KEY`.
+
+## Modules
+
+| Module | Contents |
+|---|---|
+| [`fft`](src/fft/mod.rs) | `FftPlugin`, `FftSource`, `FftSchedule` and the render graph passes |
+| [`ocean`](src/ocean/mod.rs) | `OceanPlugin`, ocean cascades and spectra, clipmaps and `OceanQueries` |
+| [`water`](src/water/mod.rs) | The shared LOD data, `WaterSurfaceMaterial`, `WaterQuadtree`, foam, caustics, transmission and the underwater view |
+| [`shallow_water`](src/shallow_water/mod.rs) | The staggered shallow water solver |
+| [`dispersive`](src/dispersive/mod.rs) | Hybrid shallow water and Airy waves |
+| [`ewave`](src/ewave/mod.rs) | eWave in Fourier space |
+| [`complex`](src/complex/mod.rs) | Complex number helpers for WESL shaders |
+
+Don't add `EwavePlugin` and `DispersivePlugin` to the same app: both insert their passes right after the FFT resolve.
+
+## Using the FFT
+
+Spawn an `FftSource` and choose how much runs each frame with `FftSchedule`:
+
+- `Forward` transforms spatial buffer A into spectrum buffer C and stops.
+- `Inverse` assumes C is already filled and transforms it into spatial buffer B.
+- `ForwardThenInverse` runs both, so you can edit C on the GPU between them.
+
+`FftSource::square_forward_then_inverse(n)` and `FftSource::square_inverse_only(n)` set up the common cases. After the graph runs, `FftTextures::spatial_output` holds the spatial result and `FftTextures::power_spectrum` a displayable spectrum. `FftInputTexture` uploads an image from the CPU, and `FftInputDomain` picks whether it lands in A or C.
+
+### Editing the spectrum
+
+Each frame the passes run in this order on Bevy's root render graph schedule, before `camera_driver`:
+
+`run_fft_forward` → spectrum slot → `run_fft_resolve_spectrum` → `run_fft_inverse` → `run_fft_resolve_outputs`
+
+The spectrum slot passes C through unchanged until you replace it. In your plugin's `finish`, call `disable_spectrum_passthrough`, then add your compute system on the same schedule with `.after(FftNode::ComputeFFT).before(FftNode::ResolveSpectrum)`. Use `FftBindGroupLayouts::common` so your bindings match the FFT passes. The `fft` example's band-pass shows the pattern.
+
+### Frequency layout
+
+The FFT puts the zero frequency at index `(0, 0)`, with positive frequencies first and negative ones wrapped to the end of each axis. A per-texel multiply in frequency space must map each `(i, j)` to `(k_x, k_y)` in that same order. A centred `2π (i - N/2) / L` grid matches only if you shift the spectrum, which the ocean does when it writes C. A mismatched `k` shows up as a lattice pattern over the result.
+
+### Limits
+
+- Grids are square, with a power-of-two side.
+- The twiddle table covers sides up to 4096. Your GPU's maximum texture size also applies, commonly 8192 or 16384.
+- Buffers are `Rgba32Float` real and imaginary textures. The [`c32`](src/complex/c32.wesl) helpers can pack a complex number into two f16 values, but the FFT passes use float storage only.
+- All `FftSource` entities share one twiddle table, so every active transform must use the same layout.
+
+## Documentation
+
+- [Water rendering](docs/water_rendering.md): transmission over coastal terrain and how to set it up.
+- [Shallow water](docs/shallow_water.md): the solver, its borders and its coupling to the ocean.
+- [Dispersive waves](docs/dispersive.md): the hybrid split and the NumPy reference.
+- [Roadmap](ROADMAP.md): planned and research directions.
+- [Changelog](CHANGELOG.md)
+
+## License
+
+MIT. See [LICENSE-MIT](LICENSE-MIT).
