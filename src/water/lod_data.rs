@@ -77,7 +77,9 @@ pub struct WaterLodSlices {
 /// 1, in its red channel, which the foam sim in [`super::WaterFoamSettings`] turns into lasting
 /// foam. Its green channel holds the depth of the water column in meters and its blue channel the
 /// horizontal displacement along Z in meters. `flow` stores the water velocity at the surface in meters per second: X in red, Z
-/// in green, and vertical in blue. `drift` stores the mean horizontal velocity that carries floating
+/// in green, and vertical in blue. Its alpha holds the pressure head in meters by which floating
+/// bodies press the surface down, so the height plus alpha is the surface the water would have
+/// without them. `drift` stores the mean horizontal velocity that carries floating
 /// matter such as foam, in meters per second along X and Z. Unlike `flow` it leaves out the orbital
 /// motion of waves, which the displacement lanes already hold, and keeps the currents of the
 /// solvers plus the Stokes drift of the ocean waves. `displacement` and `foam` use

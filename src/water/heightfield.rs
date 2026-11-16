@@ -72,6 +72,12 @@ pub struct WaterHeightfield {
     /// Meters per second per unit of velocity.
     pub velocity_scale: f32,
     pub dry: WaterHeightfieldDry,
+    /// Optional `R32Float` pressure head per cell in the source's height units, the depth that
+    /// floating bodies press the water down by. The blend adds it to the flow lane `.w` of the
+    /// LOD data, so readers such as the body forces see the surface the water would have without
+    /// the bodies, and [`FloatingBodyPlugin`](crate::bodies::FloatingBodyPlugin) writes the bodies'
+    /// footprints into it.
+    pub pressure_head: Option<Handle<Image>>,
 }
 
 impl WaterHeightfield {
@@ -89,6 +95,7 @@ impl WaterHeightfield {
             height_scale: 1.0,
             velocity_scale: 1.0,
             dry: WaterHeightfieldDry::Bed,
+            pressure_head: None,
         }
     }
 }
@@ -127,6 +134,8 @@ pub(super) struct WaterHeightfieldParams {
     dry_mode: u32,
     height_scale: f32,
     velocity_scale: f32,
+    /// 1 when the pressure head texture is bound.
+    has_pressure: u32,
 }
 
 impl WaterHeightfieldParams {
@@ -190,6 +199,7 @@ impl FromWorld for WaterHeightfieldPipeline {
                 texture_2d(unfiltered),
                 texture_storage_2d_array(WATER_LOD_DRIFT_FORMAT, StorageTextureAccess::WriteOnly),
                 texture_2d_array(unfiltered),
+                texture_2d(unfiltered),
             ),
         );
         let layout = BindGroupLayoutDescriptor::new("water_heightfield_layout", &entries);
@@ -282,6 +292,13 @@ pub(super) fn prepare_water_heightfields(
         ) else {
             continue;
         };
+        let pressure = match &heightfield.pressure_head {
+            Some(handle) => match images.get(handle) {
+                Some(image) => Some(&image.texture_view),
+                None => continue,
+            },
+            None => None,
+        };
         let (tiles, amplitude, choppiness, cascade_count, disp, foam) = match &cascades {
             Some((params, disp, foam)) => (
                 params.cascade_tile_sizes,
@@ -310,6 +327,7 @@ pub(super) fn prepare_water_heightfields(
             amplitude,
             choppiness,
             cascade_count,
+            has_pressure: u32::from(pressure.is_some()),
             ..WaterHeightfieldParams::grid(heightfield)
         });
         params.write_buffer(&device, &queue);
@@ -340,6 +358,7 @@ pub(super) fn prepare_water_heightfields(
                 foam[3],
                 &drift_out.texture_view,
                 drift_in,
+                pressure.unwrap_or(&bed_water.texture_view),
             )),
         );
         state.passes.push(HeightfieldPass { group, dispatch });

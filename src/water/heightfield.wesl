@@ -35,6 +35,8 @@ struct WaterHeightfieldParams {
     height_scale: f32,
     /// Meters per second per unit of the source's velocity.
     velocity_scale: f32,
+    /// 1 when `pressure_head` is bound.
+    has_pressure: u32,
 }
 
 /// Depth at or below this, in meters, is treated as dry for the mesh height.
@@ -73,6 +75,28 @@ const BREAK_FADE_END: f32 = 3.0;
 @group(0) @binding(17) var foam_3: texture_2d<f32>;
 @group(0) @binding(18) var drift_out: texture_storage_2d_array<rg32float, write>;
 @group(0) @binding(19) var base_drift: texture_2d_array<f32>;
+/// Pressure head per cell in `.x`, in units of `params.height_scale`, when `has_pressure` is 1.
+@group(0) @binding(20) var pressure_head: texture_2d<f32>;
+
+fn load_pressure(p: vec2<i32>) -> f32 {
+    let hi = vec2<i32>(params.cells) - 1;
+    return textureLoad(pressure_head, clamp(p, vec2(0), hi), 0).x * params.height_scale;
+}
+
+/// Bilinear pressure head in meters at grid coordinate `g`.
+fn pressure_at(g: vec2<f32>) -> f32 {
+    if params.has_pressure == 0u {
+        return 0.0;
+    }
+    let x = g - 0.5;
+    let i0 = vec2<i32>(floor(x));
+    let f = x - floor(x);
+    let a = load_pressure(i0);
+    let b = load_pressure(i0 + vec2(1, 0));
+    let c = load_pressure(i0 + vec2(0, 1));
+    let d = load_pressure(i0 + vec2(1, 1));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
 
 fn wrap_texel(p: vec2<i32>, dims: vec2<i32>) -> vec2<i32> {
     return ((p % dims) + dims) % dims;
@@ -276,7 +300,8 @@ fn water_heightfield(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(foam_out, gid.xy, slice, foam);
     let base_v = textureLoad(base_flow, gid.xy, slice, 0);
     let current = velocity_at(g);
-    let flow = vec4<f32>(current, rise, 0.0);
+    // The flow lane `.w` carries the pressure head, so readers can add it back to the surface.
+    let flow = vec4<f32>(current, rise, pressure_at(g));
     textureStore(flow_out, gid.xy, slice, mix(base_v, flow, w));
     let base_d = textureLoad(base_drift, gid.xy, slice, 0).xy;
     textureStore(drift_out, gid.xy, slice, vec4<f32>(mix(base_d, current, w), 0.0, 0.0));
@@ -315,8 +340,8 @@ struct FrontParams {
     _pad: f32,
 }
 
-@group(0) @binding(20) var<storage, read_write> front_cells: FrontCells;
-@group(0) @binding(21) var<uniform> front_params: FrontParams;
+@group(0) @binding(21) var<storage, read_write> front_cells: FrontCells;
+@group(0) @binding(22) var<uniform> front_params: FrontParams;
 
 fn cell_eta(p: vec2<i32>) -> f32 {
     return render_eta(load_bed_water(p));

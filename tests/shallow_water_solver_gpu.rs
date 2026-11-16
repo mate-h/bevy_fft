@@ -157,6 +157,7 @@ fn prepare_driver(
                 inputs: ShallowWaterInputs {
                     bed: Some(bed.create_view(&TextureViewDescriptor::default())),
                     source: Some(source.create_view(&TextureViewDescriptor::default())),
+                    pressure_head: None,
                 },
                 particle_count: 0,
             },

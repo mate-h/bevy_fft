@@ -119,6 +119,16 @@ fn perlinNoise(point : vec2f, gridSize : f32, seed : u32) -> f32 {
 /// Water sources per cell when flag bit 2 is set. `.x` is depth added per second and `.y` the
 /// fraction of the depth drained each step.
 @group(1) @binding(3) var sourceTexture : texture_2d<f32>;
+/// External pressure head per cell when flag bit 4 is set, in height units. Bodies on the water
+/// press it down this way (Kellomäki 2014).
+@group(1) @binding(4) var pressureHeadTexture : texture_2d<f32>;
+
+/// The surface plus the pressure head, whose gradient drives the flow.
+fn pressure_surface_at(ic : i32, jc : i32) -> f32 {
+    let eta = eta_at(ic, jc);
+    if ((simulationSettings.flags & 16u) == 0u) { return eta; }
+    return eta + textureLoad(pressureHeadTexture, cell_ij_clamped(ic, jc), 0).x;
+}
 
 fn nx() -> i32 { return i32(simulationSettings.size.x); }
 fn ny() -> i32 { return i32(simulationSettings.size.y); }
@@ -775,8 +785,8 @@ fn integrateVelocityU(@builtin(global_invocation_id) id: vec3u) {
     let g = simulationSettings.gravity;
     let dx = simulationSettings.dx;
     let dt = simulationSettings.dt;
-    let eta_l = eta_at(fi - 1, jc);
-    let eta_r = eta_at(fi, jc);
+    let eta_l = pressure_surface_at(fi - 1, jc);
+    let eta_r = pressure_surface_at(fi, jc);
     var u = textureLoad(faceUTexture, id.xy).r;
     u += (-g / dx * (eta_r - eta_l)) * dt;
     u = clamp_face_vel(u);
@@ -794,8 +804,8 @@ fn integrateVelocityW(@builtin(global_invocation_id) id: vec3u) {
     let g = simulationSettings.gravity;
     let dx = simulationSettings.dx;
     let dt = simulationSettings.dt;
-    let eta_d = eta_at(ic, fj - 1);
-    let eta_u = eta_at(ic, fj);
+    let eta_d = pressure_surface_at(ic, fj - 1);
+    let eta_u = pressure_surface_at(ic, fj);
     var wv = textureLoad(faceWTexture, id.xy).r;
     wv += (-g / dx * (eta_u - eta_d)) * dt;
     wv = clamp_face_vel(wv);

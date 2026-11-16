@@ -100,6 +100,7 @@ impl FromWorld for ShallowWaterPipelines {
                     uniform_buffer::<GpuSimulationUniform>(false),
                     texture_2d(TextureSampleType::Float { filterable: false }),
                     texture_2d(TextureSampleType::Float { filterable: false }),
+                    texture_2d(TextureSampleType::Float { filterable: false }),
                 ),
             ),
         );
@@ -339,13 +340,18 @@ pub struct ShallowWaterInputs {
     /// to remove water. `.y` is a sink weight from 0 to 1, the fraction of the depth drained each
     /// step, so 1 drains the cell dry. `.zw` are unused.
     pub source: Option<TextureView>,
+    /// External pressure on the water surface per cell, as a head in the solver's height unit,
+    /// `R32Float`. Water accelerates down the gradient of the surface plus this head, which is
+    /// how floating bodies push water aside (Kellomäki 2014).
+    pub pressure_head: Option<TextureView>,
 }
 
 impl ShallowWaterInputs {
-    fn ids(&self) -> [Option<TextureViewId>; 2] {
+    fn ids(&self) -> [Option<TextureViewId>; 3] {
         [
             self.bed.as_ref().map(|v| v.id()),
             self.source.as_ref().map(|v| v.id()),
+            self.pressure_head.as_ref().map(|v| v.id()),
         ]
     }
 }
@@ -429,13 +435,14 @@ impl ShallowWaterSettings {
             | (self.top_border.bits() << 9)
     }
 
-    fn uniform(&self, cells: UVec2, has_source: bool) -> GpuSimulationUniform {
+    fn uniform(&self, cells: UVec2, has_source: bool, has_pressure: bool) -> GpuSimulationUniform {
         let dx = self.cell_size;
         let friction_factor = (1.0 - self.friction.clamp(0.0, 1.0)).powf(self.dt);
         let flags = u32::from(self.overshoot_limiter)
             | (u32::from(self.ocean_forcing) << 1)
             | (u32::from(has_source) << 2)
-            | (u32::from(self.second_order_depth) << 3);
+            | (u32::from(self.second_order_depth) << 3)
+            | (u32::from(has_pressure) << 4);
         GpuSimulationUniform {
             size: cells,
             dt: self.dt,
@@ -600,6 +607,11 @@ impl ShallowWaterSolver {
                     .source
                     .as_ref()
                     .unwrap_or(&fallback_source),
+                descriptor
+                    .inputs
+                    .pressure_head
+                    .as_ref()
+                    .unwrap_or(&fallback_bed),
             )),
         );
 
@@ -641,7 +653,7 @@ impl ShallowWaterSolver {
         self.particle_count
     }
 
-    /// Rebinds the bed and source textures.
+    /// Rebinds the bed, source and pressure head textures.
     pub fn set_inputs(&mut self, device: &RenderDevice, inputs: ShallowWaterInputs) {
         self.settings_group = device.create_bind_group(
             "shallow_water_settings",
@@ -651,6 +663,7 @@ impl ShallowWaterSolver {
                 self.simulation.as_entire_buffer_binding(),
                 inputs.bed.as_ref().unwrap_or(&self.fallback_bed),
                 inputs.source.as_ref().unwrap_or(&self.fallback_source),
+                inputs.pressure_head.as_ref().unwrap_or(&self.fallback_bed),
             )),
         );
         self.inputs = inputs;
@@ -658,7 +671,11 @@ impl ShallowWaterSolver {
 
     /// Writes the step parameters. Sources apply only when [`ShallowWaterInputs::source`] is set.
     pub fn write_settings(&self, queue: &RenderQueue, settings: &ShallowWaterSettings) {
-        let uniform = settings.uniform(self.cells, self.inputs.source.is_some());
+        let uniform = settings.uniform(
+            self.cells,
+            self.inputs.source.is_some(),
+            self.inputs.pressure_head.is_some(),
+        );
         write_uniform(queue, &self.simulation, &uniform);
     }
 

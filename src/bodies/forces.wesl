@@ -38,6 +38,8 @@ struct Body {
     angular_velocity: vec4<f32>,
     /// First voxel, voxel count, first surface patch and patch count.
     ranges: vec4<u32>,
+    /// 1 in `.x` when the body presses the water of shallow water grids down.
+    flags: vec4<u32>,
 }
 
 struct BodyForce {
@@ -116,9 +118,11 @@ fn water_at(target_xz: vec2<f32>) -> Water {
         let dz = sample_lod_finest(lod_foam, lod, xz).b;
         xz = target_xz - vec2<f32>(dx, dz);
     }
-    let height = params.surface_y + sample_lod_finest(lod_displacement, lod, xz).b;
-    // Flow lanes are velocity along X, along Z, then vertical.
+    // Flow lanes are velocity along X, along Z, vertical, then the pressure head that bodies
+    // press the surface down by. Adding it back gives the surface the water would have without
+    // the bodies, so a body doesn't sink into its own dent.
     let flow = sample_lod_finest(lod_flow, lod, xz);
+    let height = params.surface_y + sample_lod_finest(lod_displacement, lod, xz).b + flow.w;
     return Water(height, vec3<f32>(flow.x, flow.z, flow.y));
 }
 
@@ -260,4 +264,79 @@ fn body_forces(
             vec4<f32>(water, 0.0),
         );
     }
+}
+
+// Footprints of the bodies on one shallow water grid, as a pressure head (Kellomäki 2014): the
+// volume each body has below the surface plus the head, spread over the cells under it, divided
+// by the cell area. At rest the water under a body meets its hull and the head is its draft. `body_footprints` adds each voxel's submerged volume into its cell with integer atomics,
+// and `resolve_pressure` turns the sums into the head.
+
+struct Grid {
+    /// World X and Z of the grid centre in meters.
+    center: vec2<f32>,
+    cells: vec2<u32>,
+    cell_size: f32,
+    /// Meters per unit of the grid's heights.
+    height_scale: f32,
+    /// Share of the way the head moves toward its new value each frame.
+    relaxation: f32,
+    _pad: f32,
+}
+
+/// Fixed-point unit of the volume sums, in cubic meters.
+const VOLUME_UNIT: f32 = 1.0e-6;
+
+@group(1) @binding(0) var<uniform> grid: Grid;
+@group(1) @binding(1) var<storage, read_write> displaced: array<atomic<u32>>;
+@group(1) @binding(2) var pressure_out: texture_storage_2d<r32float, write>;
+/// The head of the previous frame per cell, in the grid's height units.
+@group(1) @binding(3) var<storage, read_write> previous_head: array<f32>;
+
+@compute @workgroup_size(64, 1, 1)
+fn body_footprints(
+    @builtin(workgroup_id) group: vec3<u32>,
+    @builtin(local_invocation_index) lane: u32,
+) {
+    let b = group.x;
+    if b >= params.body_count {
+        return;
+    }
+    let body = bodies[b];
+    if body.flags.x == 0u {
+        return;
+    }
+    let s = body.position.w;
+    let n = vec2<f32>(grid.cells);
+    for (var i = lane; i < body.ranges.y; i += WORKGROUP) {
+        let voxel = voxels[body.ranges.x + i];
+        let p = body.position.xyz + rotate(body.rotation, voxel.xyz);
+        let g = (p.xz - grid.center) / grid.cell_size + 0.5 * n;
+        if any(g < vec2(0.0)) || any(g >= n) {
+            continue;
+        }
+        let water = water_at(p.xz);
+        let fraction = clamp((water.height - (p.y - 0.5 * s)) / s, 0.0, 1.0);
+        let volume = voxel.w * fraction;
+        if volume <= 0.0 {
+            continue;
+        }
+        let cell = vec2<u32>(g);
+        atomicAdd(&displaced[cell.y * grid.cells.x + cell.x], u32(round(volume / VOLUME_UNIT)));
+    }
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn resolve_pressure(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if any(gid.xy >= grid.cells) {
+        return;
+    }
+    let index = gid.y * grid.cells.x + gid.x;
+    let volume = f32(atomicLoad(&displaced[index])) * VOLUME_UNIT;
+    let target_head = volume / (grid.cell_size * grid.cell_size) / grid.height_scale;
+    // The volume is measured against the surface plus last frame's head, which the head itself
+    // just moved. Taken whole, the head swings between none and the full draft from frame to
+    // frame, so it only moves part of the way.
+    let head = mix(previous_head[index], target_head, grid.relaxation);
+    previous_head[index] = head;
+    textureStore(pressure_out, gid.xy, vec4<f32>(head, 0.0, 0.0, 0.0));
 }

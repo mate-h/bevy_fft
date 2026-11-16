@@ -138,6 +138,11 @@ pub struct ShallowWaterController {
     /// Optional `Rgba32Float` source texture, one texel per cell. `.x` adds depth per second and
     /// `.y` is a sink weight per step. See [`ShallowWaterInputs::source`].
     pub source: Option<Handle<Image>>,
+    /// Optional `R32Float` pressure head per cell, such as [`shallow_r32_image`] makes. Floating
+    /// bodies press the water down through it: [`FloatingBodyPlugin`](crate::bodies::FloatingBodyPlugin)
+    /// writes their footprints into it, and the solver drives the flow with the gradient of the
+    /// surface plus this head. See [`ShallowWaterInputs::pressure_head`].
+    pub pressure_head: Option<Handle<Image>>,
     pub pointer_sim: Vec2,
     pub pointer_prev_sim: Vec2,
     /// Terrain preset index for `loadPreset`. 0 to 3 are procedural, and
@@ -232,6 +237,7 @@ impl ShallowWaterController {
             manning_n: 0.0,
             evaporation: 0.0,
             source: None,
+            pressure_head: None,
             pointer_sim: Vec2::ZERO,
             pointer_prev_sim: Vec2::ZERO,
             preset_index: 0,
@@ -547,6 +553,7 @@ fn sync_shallow_water_heightfield(
         return;
     };
     let heightfield = WaterHeightfield {
+        pressure_head: sim.pressure_head.clone(),
         center: placement.center,
         cell_size: placement.cell_size,
         datum: placement.datum,

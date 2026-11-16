@@ -70,13 +70,17 @@ pub fn prepare_shallow_water_gpu(
     let textures = ShallowWaterTextures::from_images(&controller.images(), &gpu_images);
     let bed = view(&controller.bed_source);
     let source = controller.source.as_ref().map(view);
-    let (Some(textures), Some(bed), None | Some(Some(_))) = (textures, bed, &source) else {
+    let pressure_head = controller.pressure_head.as_ref().map(view);
+    let (Some(textures), Some(bed), None | Some(Some(_)), None | Some(Some(_))) =
+        (textures, bed, &source, &pressure_head)
+    else {
         gpu.solver = None;
         return;
     };
     let inputs = ShallowWaterInputs {
         bed: Some(bed),
         source: source.flatten(),
+        pressure_head: pressure_head.flatten(),
     };
 
     if !gpu

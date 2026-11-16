@@ -1,6 +1,6 @@
 //! Water forces on voxelized floating bodies, evaluated on the GPU.
 //!
-//! Add [`FloatingBodyPlugin`] after [`WaterPlugin`](crate::water::WaterPlugin) and spawn
+//! Add [`FloatingBodyPlugin`] and spawn
 //! [`FloatingBody`] on entities with a [`GlobalTransform`]. Each frame one compute pass samples the
 //! shared water LOD data at every voxel of every body, so currents, wakes and surf push bodies
 //! along with the waves, and sums the forces per body. Bevy's [`Readback`] returns them a few
@@ -28,7 +28,9 @@ use bevy::{
 };
 
 use super::VoxelizedMesh;
-use crate::water::{WaterLodData, WaterLodGpu, WaterLodGraphSystems, WaterLodSlices};
+use crate::water::{
+    WaterHeightfield, WaterLodData, WaterLodGpu, WaterLodGraphSystems, WaterLodSlices,
+};
 
 pub const FLOATING_BODY_SHADER: &str = "embedded://bevy_fft/bodies/forces.wesl";
 
@@ -36,7 +38,7 @@ pub const FLOATING_BODY_SHADER: &str = "embedded://bevy_fft/bodies/forces.wesl";
 const VOXEL_BYTES: usize = 16;
 const PATCH_BYTES: usize = 32;
 /// Bytes of one `Body` in `forces.wesl`.
-const BODY_BYTES: usize = 96;
+const BODY_BYTES: usize = 112;
 /// Bytes of the output header and of one `BodyForce` in `forces.wesl`.
 const OUTPUT_HEADER_BYTES: usize = 16;
 const OUTPUT_BODY_BYTES: usize = 80;
@@ -77,6 +79,10 @@ pub struct FloatingBodySettings {
     pub slam_rate_max: f32,
     /// Exponent applied to the slamming strength below that rate.
     pub slam_power: f32,
+    /// Share of the way the pressure head under bodies moves toward its new value each frame,
+    /// from 0 to 1. The head is measured against the surface plus the previous head, so taking
+    /// it whole makes it swing from frame to frame.
+    pub pressure_relaxation: f32,
 }
 
 impl Default for FloatingBodySettings {
@@ -94,6 +100,7 @@ impl Default for FloatingBodySettings {
             suction_falloff: 0.5,
             slam_rate_max: 0.0,
             slam_power: 2.0,
+            pressure_relaxation: 0.25,
         }
     }
 }
@@ -122,6 +129,10 @@ pub struct FloatingBody {
     pub angular_velocity: Vec3,
     /// Estimate the velocities from how the [`GlobalTransform`] moves between frames.
     pub estimate_velocity: bool,
+    /// Press the water of shallow water grids down under the body, so it pushes water aside,
+    /// splashes when it drops in and leaves a wake. It takes a [`WaterHeightfield`] with a
+    /// [`WaterHeightfield::pressure_head`].
+    pub displaces_water: bool,
     /// Latest water force in newtons: [`Self::buoyancy`] plus [`Self::drag`].
     pub force: Vec3,
     /// Latest torque about the centre of mass in newton meters.
@@ -172,6 +183,7 @@ impl FloatingBody {
             linear_velocity: Vec3::ZERO,
             angular_velocity: Vec3::ZERO,
             estimate_velocity: true,
+            displaces_water: true,
             force: Vec3::ZERO,
             torque: Vec3::ZERO,
             buoyancy: Vec3::ZERO,
@@ -236,12 +248,15 @@ impl FloatingBody {
     }
 }
 
-/// Registers [`FloatingBody`] and its force pass. Add it after
-/// [`WaterPlugin`](crate::water::WaterPlugin).
+/// Registers [`FloatingBody`] and its force pass, and adds
+/// [`WaterPlugin`](crate::water::WaterPlugin) if it isn't there yet.
 pub struct FloatingBodyPlugin;
 
 impl Plugin for FloatingBodyPlugin {
     fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<crate::water::WaterPlugin>() {
+            app.add_plugins(crate::water::WaterPlugin);
+        }
         bevy::asset::embedded_asset!(app, "forces.wesl");
         app.register_type::<FloatingBody>()
             .register_type::<FloatingBodySettings>()
@@ -379,6 +394,7 @@ fn read_f32(bytes: &[u8], offset: usize) -> f32 {
 #[extract_app(RenderApp)]
 pub struct FloatingBodyFrame {
     body_count: u32,
+    pressure_relaxation: f32,
     params: ForceParams,
     voxels: Handle<ShaderBuffer>,
     patches: Handle<ShaderBuffer>,
@@ -527,7 +543,8 @@ fn submit_floating_bodies(
             first[i].1,
             body.hull.surface.len() as u32,
         ];
-        for v in ranges {
+        let flags = [u32::from(body.displaces_water), 0, 0, 0];
+        for v in ranges.into_iter().chain(flags) {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
     }
@@ -550,6 +567,7 @@ fn submit_floating_bodies(
     let s = *settings;
     *frame_out = FloatingBodyFrame {
         body_count: list.len() as u32,
+        pressure_relaxation: s.pressure_relaxation,
         params: ForceParams {
             gravity: s.gravity,
             density: s.density,
@@ -588,6 +606,11 @@ fn submit_floating_bodies(
 struct FloatingBodyPipeline {
     layout: BindGroupLayoutDescriptor,
     pipeline: CachedComputePipelineId,
+    /// Group 1 of the footprint kernels: one shallow water grid.
+    grid_layout: BindGroupLayoutDescriptor,
+    empty_layout: BindGroupLayoutDescriptor,
+    footprints: CachedComputePipelineId,
+    resolve: CachedComputePipelineId,
 }
 
 impl FromWorld for FloatingBodyPipeline {
@@ -611,24 +634,89 @@ impl FromWorld for FloatingBodyPipeline {
             ),
         );
         let layout = BindGroupLayoutDescriptor::new("floating_body_layout", &entries);
-        let pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("floating_body_forces".into()),
-            layout: vec![layout.clone()],
-            immediate_size: 0,
-            shader: asset_server.load(FLOATING_BODY_SHADER),
-            shader_defs: vec![],
-            entry_point: Some("body_forces".into()),
-            zero_initialize_workgroup_memory: false,
-            constants: vec![],
-        });
-        Self { layout, pipeline }
+        let grid_layout = BindGroupLayoutDescriptor::new(
+            "floating_body_grid_layout",
+            &BindGroupLayoutEntries::sequential(
+                ShaderStages::COMPUTE,
+                (
+                    uniform_buffer::<GridParams>(false),
+                    storage_buffer_sized(false, None),
+                    texture_storage_2d(TextureFormat::R32Float, StorageTextureAccess::WriteOnly),
+                    storage_buffer_sized(false, None),
+                ),
+            ),
+        );
+        let empty_layout = BindGroupLayoutDescriptor::new("floating_body_empty_layout", &[]);
+        let shader = asset_server.load(FLOATING_BODY_SHADER);
+        let queue =
+            |label: &'static str, entry: &'static str, layout: Vec<BindGroupLayoutDescriptor>| {
+                pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                    label: Some(label.into()),
+                    layout,
+                    immediate_size: 0,
+                    shader: shader.clone(),
+                    shader_defs: vec![],
+                    entry_point: Some(entry.into()),
+                    zero_initialize_workgroup_memory: false,
+                    constants: vec![],
+                })
+            };
+        let pipeline = queue("floating_body_forces", "body_forces", vec![layout.clone()]);
+        let footprints = queue(
+            "floating_body_footprints",
+            "body_footprints",
+            vec![layout.clone(), grid_layout.clone()],
+        );
+        let resolve = queue(
+            "floating_body_pressure",
+            "resolve_pressure",
+            vec![empty_layout.clone(), grid_layout.clone()],
+        );
+        Self {
+            layout,
+            pipeline,
+            grid_layout,
+            empty_layout,
+            footprints,
+            resolve,
+        }
     }
+}
+
+/// Uniform `Grid` in `forces.wesl`.
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GridParams {
+    center: Vec2,
+    cells: UVec2,
+    cell_size: f32,
+    height_scale: f32,
+    relaxation: f32,
+    _pad: f32,
+}
+
+/// One shallow water grid that bodies press down, with its volume sums.
+struct GridPass {
+    group: BindGroup,
+    displaced: Buffer,
+    cells: UVec2,
+}
+
+/// Buffers of one grid: its size, the volume sums, the previous head, and its uniform.
+struct GridBuffers {
+    cells: UVec2,
+    displaced: Buffer,
+    previous: Buffer,
+    params: UniformBuffer<GridParams>,
 }
 
 #[derive(Resource, Default)]
 struct FloatingBodyBindGroup {
     group: Option<BindGroup>,
     params: UniformBuffer<ForceParams>,
+    empty: Option<BindGroup>,
+    grids: Vec<GridPass>,
+    /// Volume sum buffers and grid uniforms, kept per grid entity while its size stays.
+    grid_buffers: std::collections::HashMap<Entity, GridBuffers>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -641,13 +729,87 @@ fn prepare_floating_bodies(
     buffers: Res<RenderAssets<GpuShaderBuffer>>,
     images: Res<RenderAssets<GpuImage>>,
     lod_gpu: Res<WaterLodGpu>,
+    heightfields: Query<(Entity, &WaterHeightfield)>,
     mut bind_group: ResMut<FloatingBodyBindGroup>,
 ) {
     let state = &mut *bind_group;
     state.group = None;
+    state.grids.clear();
     let Some(pipeline) = pipeline else {
         return;
     };
+
+    // Grids with a pressure head get their footprints rebuilt every frame, even without bodies,
+    // so a body that leaves takes its dent with it.
+    let grid_layout = pipeline_cache.get_bind_group_layout(&pipeline.grid_layout);
+    state.grid_buffers.retain(|e, _| heightfields.contains(*e));
+    for (entity, heightfield) in &heightfields {
+        let Some(pressure) = heightfield
+            .pressure_head
+            .as_ref()
+            .and_then(|handle| images.get(handle))
+        else {
+            continue;
+        };
+        let cells = heightfield.cells;
+        let per_cell = |label: &'static str| {
+            device.create_buffer(&BufferDescriptor {
+                label: Some(label),
+                size: (cells.x * cells.y).max(1) as u64 * 4,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let stale = state
+            .grid_buffers
+            .get(&entity)
+            .is_none_or(|buffers| buffers.cells != cells);
+        if stale {
+            state.grid_buffers.insert(
+                entity,
+                GridBuffers {
+                    cells,
+                    displaced: per_cell("floating_body_displaced_volume"),
+                    previous: per_cell("floating_body_previous_head"),
+                    params: UniformBuffer::default(),
+                },
+            );
+        }
+        let buffers = state.grid_buffers.get_mut(&entity).unwrap();
+        buffers.params.set(GridParams {
+            center: heightfield.center,
+            cells,
+            cell_size: heightfield.cell_size,
+            height_scale: heightfield.height_scale,
+            relaxation: frame.pressure_relaxation,
+            _pad: 0.0,
+        });
+        buffers.params.write_buffer(&device, &queue);
+        let Some(params) = buffers.params.binding() else {
+            continue;
+        };
+        let group = device.create_bind_group(
+            "floating_body_grid_bind_group",
+            &grid_layout,
+            &BindGroupEntries::sequential((
+                params,
+                buffers.displaced.as_entire_binding(),
+                &pressure.texture_view,
+                buffers.previous.as_entire_binding(),
+            )),
+        );
+        state.grids.push(GridPass {
+            group,
+            displaced: buffers.displaced.clone(),
+            cells,
+        });
+    }
+    if state.empty.is_none() {
+        let empty_layout = pipeline_cache.get_bind_group_layout(&pipeline.empty_layout);
+        state.empty =
+            Some(device.create_bind_group("floating_body_empty_bind_group", &empty_layout, &[]));
+    }
+
     if frame.body_count == 0 {
         return;
     }
@@ -699,21 +861,47 @@ fn run_floating_bodies(
     frame: Res<FloatingBodyFrame>,
     bind_group: Res<FloatingBodyBindGroup>,
 ) {
-    let (Some(pipeline), Some(group)) = (pipeline, &bind_group.group) else {
+    let Some(pipeline) = pipeline else {
         return;
     };
-    let Some(compute) = cache.get_compute_pipeline(pipeline.pipeline) else {
-        return;
-    };
-    let mut pass = ctx
-        .command_encoder()
-        .begin_compute_pass(&ComputePassDescriptor {
+    let encoder = ctx.command_encoder();
+    if let (Some(group), Some(compute)) = (
+        &bind_group.group,
+        cache.get_compute_pipeline(pipeline.pipeline),
+    ) {
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("floating_body_forces_pass"),
             timestamp_writes: None,
         });
-    pass.set_pipeline(compute);
-    pass.set_bind_group(0, group, &[]);
-    pass.dispatch_workgroups(frame.body_count, 1, 1);
+        pass.set_pipeline(compute);
+        pass.set_bind_group(0, group, &[]);
+        pass.dispatch_workgroups(frame.body_count, 1, 1);
+    }
+
+    let (Some(empty), Some(footprints), Some(resolve)) = (
+        &bind_group.empty,
+        cache.get_compute_pipeline(pipeline.footprints),
+        cache.get_compute_pipeline(pipeline.resolve),
+    ) else {
+        return;
+    };
+    for grid in &bind_group.grids {
+        encoder.clear_buffer(&grid.displaced, 0, None);
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("floating_body_footprints_pass"),
+            timestamp_writes: None,
+        });
+        if let Some(group) = &bind_group.group {
+            pass.set_pipeline(footprints);
+            pass.set_bind_group(0, group, &[]);
+            pass.set_bind_group(1, &grid.group, &[]);
+            pass.dispatch_workgroups(frame.body_count, 1, 1);
+        }
+        pass.set_pipeline(resolve);
+        pass.set_bind_group(0, empty, &[]);
+        pass.set_bind_group(1, &grid.group, &[]);
+        pass.dispatch_workgroups(grid.cells.x.div_ceil(8), grid.cells.y.div_ceil(8), 1);
+    }
 }
 
 #[cfg(test)]
