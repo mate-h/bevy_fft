@@ -7,7 +7,8 @@
 // where the drift converges. It then adds foam and decays both quantities with the exact solution
 // of da/dt = b / t_f - la a, dr/dt = k la a - lr r over the step, which makes the result
 // independent of the frame rate. The breaking intensity `b` is what the writers stored in the LOD
-// foam lane this frame, from 0 to 1.
+// foam lane this frame, from 0 to 1. Foam deposited this frame, by water particles landing, adds
+// straight to the active foam.
 //
 // Last frame's foam sits on last frame's slice placement. A lookup that leaves its own slice there
 // falls back to the next coarser slice, as Crest's foam sim does, and returns no foam past the
@@ -60,6 +61,12 @@ struct WaterFoamParams {
 /// `params.previous`, with `FOAM_FLOW_LAYERS_PER_SLICE` layers per slice.
 @group(0) @binding(7) var previous_flow: texture_2d_array<f32>;
 @group(0) @binding(8) var flow_out: texture_storage_2d_array<rgba32float, write>;
+/// Active foam deposited this frame, such as by water particles landing, per texel in units of
+/// `1 / FOAM_DEPOSIT_UNIT`, with slice `s` texel `(x, y)` at `(s * resolution + y) * resolution + x`.
+@group(0) @binding(9) var<storage, read> deposit: array<u32>;
+
+/// Fixed-point scale of `deposit`.
+const FOAM_DEPOSIT_UNIT: f32 = 65536.0;
 
 fn slice_uv(slices: WaterLodSlices, xz: vec2<f32>, i: u32) -> vec2<f32> {
     let s = slices.slices[i];
@@ -153,7 +160,9 @@ fn foam_correct(@builtin(global_invocation_id) gid: vec3<u32>) {
     foam *= exp(-params.dt * divergence);
 
     let breaking = saturate(textureLoad(lod_foam, texel, slice, 0).r);
-    let fresh = foam.x * params.active_decay + breaking * params.source_active;
+    let deposited = f32(deposit[(slice * lod.resolution + gid.y) * lod.resolution + gid.x])
+        / FOAM_DEPOSIT_UNIT;
+    let fresh = foam.x * params.active_decay + breaking * params.source_active + deposited;
     let residual = foam.y * params.residual_decay + foam.x * params.residual_gain
         + breaking * params.source_residual;
     let result = saturate(vec2<f32>(fresh, residual));

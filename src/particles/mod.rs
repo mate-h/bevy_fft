@@ -7,6 +7,11 @@
 //! camera-facing quads with premultiplied alpha in the transparent pass, one quad per slot, read
 //! by vertex index. Free slots collapse to nothing.
 //!
+//! With [`WaterParticleSettings::collide`] on, a particle that falls through the water surface in
+//! the [`WaterLodData`] dies there and leaves active foam in the foam sim's
+//! [`WaterFoamDeposit`](crate::water::WaterFoamDeposit), which it adds that same frame. The
+//! simulation runs in [`WaterLodGraphSystems::Simulate`], before the foam sim.
+//!
 //! Spawns come from [`WaterParticleSpawns`], which anything can push to during the frame, and
 //! from [`WaterParticleEmitter`] components, a CPU emitter for tests and examples. Later emitters
 //! spawn from the water data on the GPU.
@@ -14,7 +19,6 @@
 use bevy::{
     asset::{RenderAssetUsages, embedded_asset},
     camera::visibility::NoFrustumCulling,
-    core_pipeline::schedule::camera_driver,
     ecs::world::{FromWorld, World},
     mesh::{Indices, PrimitiveTopology},
     prelude::*,
@@ -24,14 +28,22 @@ use bevy::{
         render_asset::RenderAssets,
         render_resource::{
             AsBindGroup,
-            binding_types::{storage_buffer, storage_buffer_read_only, uniform_buffer},
+            binding_types::{
+                storage_buffer, storage_buffer_read_only, texture_2d_array, uniform_buffer,
+            },
             encase::internal::{WriteInto, Writer},
             *,
         },
-        renderer::{RenderContext, RenderDevice, RenderGraph, RenderGraphSystems, RenderQueue},
+        renderer::{RenderContext, RenderDevice, RenderGraph, RenderQueue},
         storage::{GpuShaderBuffer, ShaderBuffer},
+        texture::GpuImage,
     },
     shader::ShaderRef,
+};
+
+use crate::water::{
+    WaterFoamDepositSystems, WaterFoamSim, WaterLodData, WaterLodGpu, WaterLodGraphSystems,
+    WaterLodSlices, WaterPlugin,
 };
 
 pub const WATER_PARTICLES_SIMULATE_SHADER: &str = "embedded://bevy_fft/particles/simulate.wesl";
@@ -74,6 +86,15 @@ pub struct WaterParticleSettings {
     pub fade: f32,
     /// Runs the simulation. Off holds every particle where it is.
     pub enabled: bool,
+    /// Tests particles against the water surface in the [`WaterLodData`].
+    /// A particle that falls through it dies there and leaves foam, and one past the data's reach
+    /// dies too.
+    pub collide: bool,
+    /// Height of the water surface mesh plane in meters, which the LOD heights are relative to.
+    pub surface_y: f32,
+    /// Active foam a landing particle leaves over its own footprint, from 0 to 1. A particle as
+    /// wide as an LOD texel with 1 foams that texel fully.
+    pub foam_per_drop: f32,
 }
 
 impl Default for WaterParticleSettings {
@@ -86,6 +107,9 @@ impl Default for WaterParticleSettings {
             color: LinearRgba::new(0.8, 0.85, 0.9, 0.9),
             fade: 0.3,
             enabled: true,
+            collide: true,
+            surface_y: 0.0,
+            foam_per_drop: 1.0,
         }
     }
 }
@@ -193,6 +217,9 @@ pub struct WaterParticlesPlugin;
 
 impl Plugin for WaterParticlesPlugin {
     fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<WaterPlugin>() {
+            app.add_plugins(WaterPlugin);
+        }
         embedded_asset!(app, "simulate.wesl");
         embedded_asset!(app, "draw.wesl");
         app.init_resource::<WaterParticleSettings>()
@@ -230,8 +257,8 @@ impl Plugin for WaterParticlesPlugin {
             .add_systems(
                 RenderGraph,
                 run_water_particles
-                    .before(camera_driver)
-                    .in_set(RenderGraphSystems::Render),
+                    .in_set(WaterLodGraphSystems::Simulate)
+                    .in_set(WaterFoamDepositSystems),
             );
     }
 }
@@ -378,7 +405,10 @@ struct GpuParticleParams {
     drag: f32,
     capacity: u32,
     spawn_count: u32,
-    _pad: UVec2,
+    collide: u32,
+    surface_y: f32,
+    foam_per_drop: f32,
+    _pad: UVec3,
 }
 
 #[derive(Resource)]
@@ -404,6 +434,10 @@ impl FromWorld for WaterParticlePipeline {
                     storage_buffer::<[u32; 4]>(false),
                     storage_buffer_read_only::<WaterParticle>(false),
                     uniform_buffer::<GpuParticleParams>(false),
+                    uniform_buffer::<WaterLodSlices>(false),
+                    texture_2d_array(TextureSampleType::Float { filterable: false }),
+                    texture_2d_array(TextureSampleType::Float { filterable: false }),
+                    storage_buffer::<u32>(false),
                 ),
             ),
         );
@@ -449,14 +483,26 @@ fn prepare_water_particles(
     settings: Res<WaterParticleSettings>,
     spawns: Res<WaterParticleSpawns>,
     frame: Res<WaterParticleFrame>,
+    lod: Option<Res<WaterLodData>>,
+    lod_gpu: Res<WaterLodGpu>,
+    foam: Res<WaterFoamSim>,
+    images: Res<RenderAssets<GpuImage>>,
     mut gpu: ResMut<WaterParticleGpu>,
 ) {
     gpu.group = None;
-    let Some(pool) = pool else {
+    let (Some(pool), Some(lod)) = (pool, lod) else {
         return;
     };
     let (Some(particles), Some(state)) = (buffers.get(&pool.particles), buffers.get(&pool.state))
     else {
+        return;
+    };
+    let (Some(displacement), Some(foam_lane), Some(slices), Some(deposit)) = (
+        images.get(&lod.displacement),
+        images.get(&lod.foam),
+        lod_gpu.slices.binding(),
+        foam.deposit.buffer.as_ref(),
+    ) else {
         return;
     };
     let spawn_buffer = gpu
@@ -492,7 +538,10 @@ fn prepare_water_particles(
         drag: settings.drag.max(0.0),
         capacity: pool.capacity,
         spawn_count: count as u32,
-        _pad: UVec2::ZERO,
+        collide: u32::from(settings.collide),
+        surface_y: settings.surface_y,
+        foam_per_drop: settings.foam_per_drop.max(0.0),
+        _pad: UVec3::ZERO,
     };
     let mut bytes = Vec::new();
     params.write_into(&mut Writer::new(&params, &mut bytes, 0).unwrap());
@@ -507,6 +556,10 @@ fn prepare_water_particles(
             state.buffer.as_entire_buffer_binding(),
             spawn_buffer.as_entire_buffer_binding(),
             params_buffer.as_entire_buffer_binding(),
+            slices,
+            &displacement.texture_view,
+            &foam_lane.texture_view,
+            deposit.as_entire_buffer_binding(),
         )),
     ));
 }

@@ -191,6 +191,7 @@ impl FromWorld for WaterFoamPipeline {
                 texture_storage_2d_array(WATER_FOAM_STATE_FORMAT, StorageTextureAccess::WriteOnly),
                 texture_2d_array(unfiltered),
                 texture_storage_2d_array(WATER_FOAM_FLOW_FORMAT, StorageTextureAccess::WriteOnly),
+                storage_buffer_read_only::<u32>(false),
             ),
         );
         let layout = BindGroupLayoutDescriptor::new("water_foam_layout", &entries);
@@ -235,6 +236,19 @@ pub struct WaterFoamSim {
     params: UniformBuffer<WaterFoamParams>,
     groups: Option<[BindGroup; 2]>,
     dispatch: UVec3,
+    /// See [`WaterFoamDeposit`].
+    pub deposit: WaterFoamDeposit,
+}
+
+/// Active foam that other passes add per LOD texel during
+/// [`WaterFoamDepositSystems`](super::WaterFoamDepositSystems), as `atomic<u32>` in units of
+/// `1 / 65536`. Slice `s` texel `(x, y)` is at `(s * resolution + y) * resolution + x`. The foam
+/// sim adds it to the active foam and clears it after its pass.
+#[derive(Default, Clone)]
+pub struct WaterFoamDeposit {
+    pub buffer: Option<Buffer>,
+    /// Texels in the buffer.
+    pub len: u64,
 }
 
 fn foam_array(
@@ -311,6 +325,19 @@ pub(super) fn prepare_water_foam(
         sim.flow_size = flow_size;
         sim.flow_seeded = false;
     }
+    let deposit_len =
+        (size.width as u64) * (size.height as u64) * size.depth_or_array_layers as u64;
+    if sim.deposit.buffer.is_none() || sim.deposit.len != deposit_len {
+        sim.deposit = WaterFoamDeposit {
+            buffer: Some(device.create_buffer(&BufferDescriptor {
+                label: Some("water_foam_deposit"),
+                size: deposit_len * 4,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })),
+            len: deposit_len,
+        };
+    }
     let ready = [pipeline.forward, pipeline.correct, pipeline.flow]
         .iter()
         .all(|id| pipeline_cache.get_compute_pipeline(*id).is_some());
@@ -324,7 +351,9 @@ pub(super) fn prepare_water_foam(
     let Some(params) = sim.params.binding() else {
         return;
     };
-    let (Some([forward, corrected]), Some(flow_out)) = (&sim.arrays, &sim.flow) else {
+    let (Some([forward, corrected]), Some(flow_out), Some(deposit)) =
+        (&sim.arrays, &sim.flow, &sim.deposit.buffer)
+    else {
         return;
     };
     let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
@@ -344,6 +373,7 @@ pub(super) fn prepare_water_foam(
                 out,
                 &flow.texture_view,
                 &flow_out.view,
+                deposit.as_entire_buffer_binding(),
             )),
         )
     };
@@ -409,6 +439,9 @@ pub(super) fn run_water_foam(
         flow_state.texture.as_image_copy(),
         sim.flow_size,
     );
+    if let Some(deposit) = &sim.deposit.buffer {
+        encoder.clear_buffer(deposit, 0, None);
+    }
     time_span.end(encoder);
 }
 

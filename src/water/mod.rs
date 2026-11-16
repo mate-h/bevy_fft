@@ -43,7 +43,8 @@ pub use caustics::{
     WaterCaustics, WaterCausticsSettings,
 };
 pub use foam::{
-    WATER_FOAM_SHADER, WATER_FOAM_STATE_FORMAT, WaterFoamFrame, WaterFoamParams, WaterFoamSettings,
+    WATER_FOAM_SHADER, WATER_FOAM_STATE_FORMAT, WaterFoamDeposit, WaterFoamFrame, WaterFoamParams,
+    WaterFoamSettings, WaterFoamSim,
 };
 pub use foam_texture::{WATER_FOAM_TEXTURE_SIZE, WaterFoamTexture, foam_texture_image};
 pub use fronts::{FrontLine, FrontPoint, WaterBreakingFronts};
@@ -85,6 +86,11 @@ pub struct WaterLodSystems;
 
 /// Render graph stages for passes that touch [`WaterLodData`]. They run in this order, before the
 /// cameras draw.
+/// Passes in [`WaterLodGraphSystems::Simulate`] that add to the foam sim's
+/// [`WaterFoamDeposit`] before it runs.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WaterFoamDepositSystems;
+
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WaterLodGraphSystems {
     /// Empties the slices when [`WaterLodClear`] is present.
@@ -211,7 +217,9 @@ impl Plugin for WaterPlugin {
                     (
                         lod_data::clear_water_lod.in_set(WaterLodGraphSystems::Clear),
                         heightfield::run_water_heightfields.in_set(WaterLodGraphSystems::Blend),
-                        foam::run_water_foam.in_set(WaterLodGraphSystems::Simulate),
+                        foam::run_water_foam
+                            .in_set(WaterLodGraphSystems::Simulate)
+                            .after(WaterFoamDepositSystems),
                         fronts::run_water_fronts.in_set(WaterLodGraphSystems::Read),
                     ),
                 )

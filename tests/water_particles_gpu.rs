@@ -8,13 +8,16 @@ use bevy::{
     window::ExitCondition,
     winit::WinitPlugin,
 };
-use bevy_fft::particles::*;
+use bevy_fft::{particles::*, water::*};
 use std::{
     thread,
     time::{Duration, Instant},
 };
 
 const G: f32 = 9.81;
+/// The LOD data's one slice: 64 texels of 0.5 m around the origin.
+const RES: u32 = 64;
+const TEXEL: f32 = 0.5;
 
 #[derive(Resource, Default)]
 struct Capture {
@@ -31,6 +34,13 @@ fn step(app: &mut App) {
 
 fn particle_app(settings: WaterParticleSettings) -> App {
     let mut app = App::new();
+    // Still water at height 0: no writer fills the LOD data, so it starts each frame empty.
+    app.insert_resource(WaterLodClear)
+        .insert_resource(WaterLodSettings {
+            slice_count: 1,
+            resolution: RES,
+            base_texel_size: TEXEL,
+        });
     app.add_plugins(
         DefaultPlugins
             .build()
@@ -111,6 +121,7 @@ fn particles_without_drag_follow_ballistic_arcs() {
     let mut app = particle_app(WaterParticleSettings {
         capacity: 256,
         drag: 0.0,
+        collide: false,
         ..default()
     });
     let launches = [
@@ -157,6 +168,7 @@ fn particles_without_drag_follow_ballistic_arcs() {
 fn spawned_minus_died_is_alive() {
     let mut app = particle_app(WaterParticleSettings {
         capacity: 64,
+        collide: false,
         ..default()
     });
     // Five frames of 40 long-lived particles overrun the 64 slots, so the ring overwrites live
@@ -191,4 +203,81 @@ fn spawned_minus_died_is_alive() {
     // The last 64 spawns hold the pool: 40 long-lived from the fifth frame and 24 short-lived
     // from the fourth, which have all died since.
     assert_eq!(alive, 40);
+}
+
+#[derive(Resource, Default)]
+struct FoamCapture {
+    bytes: Vec<u8>,
+    serial: u32,
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn a_particle_lands_on_still_water_and_foams_its_texel() {
+    let mut app = particle_app(WaterParticleSettings {
+        capacity: 64,
+        drag: 0.0,
+        ..default()
+    });
+    let drop_at = Vec2::new(1.3, 2.7);
+    spawn(
+        &mut app,
+        &[WaterParticle {
+            position: Vec3::new(drop_at.x, 1.0, drop_at.y),
+            size: TEXEL,
+            velocity: Vec3::ZERO,
+            life: 100.0,
+        }],
+    );
+    // A drop from 1 m lands after 0.45 s, 27 frames. Read the foam a few frames after.
+    for _ in 0..32 {
+        step(&mut app);
+    }
+    let foam_state = app.world().resource::<WaterLodData>().foam_state.clone();
+    app.init_resource::<FoamCapture>();
+    app.world_mut()
+        .spawn(Readback::texture(foam_state))
+        .observe(|event: On<ReadbackComplete>, mut c: ResMut<FoamCapture>| {
+            c.bytes = event.data.clone();
+            c.serial += 1;
+        });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while app.world().resource::<FoamCapture>().serial == 0 {
+        step(&mut app);
+        assert!(Instant::now() < deadline, "foam readback timed out");
+    }
+    let (particles, [_, spawned, died, alive]) = read(&mut app);
+    assert_eq!((spawned, died, alive), (1, 1, 0));
+    let p = particles[0];
+    assert!(p.life <= 0.0, "the particle is still alive: {p:?}");
+    // It falls about 7 cm per frame when it reaches the surface.
+    assert!(
+        p.position.y <= 0.0 && p.position.y > -0.1,
+        "it died at {}",
+        p.position
+    );
+
+    let bytes = &app.world().resource::<FoamCapture>().bytes;
+    let row = bytes.len() / RES as usize;
+    let active = |x: u32, y: u32| {
+        let o = y as usize * row + x as usize * 8;
+        f32::from_le_bytes(bytes[o..o + 4].try_into().unwrap())
+    };
+    let lod = app.world().resource::<WaterLodData>().slices;
+    let centre = lod.slices[0].truncate().truncate();
+    let texel = ((drop_at - centre) / TEXEL + 0.5 * RES as f32)
+        .floor()
+        .as_uvec2();
+    assert!(
+        active(texel.x, texel.y) > 0.5,
+        "texel {texel} holds {} active foam",
+        active(texel.x, texel.y)
+    );
+    for y in 0..RES {
+        for x in 0..RES {
+            if UVec2::new(x, y) != texel {
+                assert_eq!(active(x, y), 0.0, "foam at ({x}, {y})");
+            }
+        }
+    }
 }
