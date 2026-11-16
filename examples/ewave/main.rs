@@ -117,7 +117,7 @@ fn setup(
         .build();
     let material = EwaveSurfaceMaterial {
         base: StandardMaterial {
-            base_color: Color::srgb(0.05, 0.15, 0.28).into(),
+            base_color: Color::srgb(0.05, 0.15, 0.28),
             perceptual_roughness: 0.06,
             metallic: 0.0,
             opaque_render_method: OpaqueRendererMethod::Auto,

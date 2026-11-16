@@ -414,43 +414,45 @@ fn spawn_surface_when_ready(
             levels: 15,
             ..default()
         },
-        MeshMaterial3d(materials.add(WaterSurfaceMaterial {
-            base: StandardMaterial {
-                base_color: Color::WHITE,
-                specular_transmission: 1.0,
-                ior: 1.333,
-                reflectance: 0.356,
-                perceptual_roughness: 0.08,
-                metallic: 0.0,
-                opaque_render_method: OpaqueRendererMethod::Forward,
-                ..default()
-            },
-            extension: WaterSurfaceExtension {
-                optics: WaterOpticsUniform {
-                    enabled: 1,
-                    debug_view: match std::env::var("BEVY_FFT_WATER_VIEW").as_deref() {
-                        Ok("depth") => 1,
-                        Ok("transmission") => 2,
-                        Ok("coverage") => 3,
-                        Ok("refraction") => 4,
-                        _ => 0,
-                    },
-                    // Six march steps look the same as the default twelve from the surf view
-                    // and save about 1 ms of the water pass at 2560x1440. `BEACH_TRACE_STEPS`
-                    // overrides it, as does the panel.
-                    trace_steps: std::env::var("BEACH_TRACE_STEPS")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(6),
+        MeshMaterial3d(
+            materials.add(WaterSurfaceMaterial {
+                base: StandardMaterial {
+                    base_color: Color::WHITE,
+                    specular_transmission: 1.0,
+                    ior: 1.333,
+                    reflectance: 0.356,
+                    perceptual_roughness: 0.08,
+                    metallic: 0.0,
+                    opaque_render_method: OpaqueRendererMethod::Forward,
                     ..default()
                 },
-                settings: WaterSurfaceUniform {
-                    dry_depth: 0.0,
-                    ..WaterSurfaceExtension::default().settings
+                extension: WaterSurfaceExtension {
+                    optics: WaterOpticsUniform {
+                        enabled: 1,
+                        debug_view: match std::env::var("BEVY_FFT_WATER_VIEW").as_deref() {
+                            Ok("depth") => 1,
+                            Ok("transmission") => 2,
+                            Ok("coverage") => 3,
+                            Ok("refraction") => 4,
+                            _ => 0,
+                        },
+                        // Six march steps look the same as the default twelve from the surf view
+                        // and save about 1 ms of the water pass at 2560x1440. `BEACH_TRACE_STEPS`
+                        // overrides it, as does the panel.
+                        trace_steps: std::env::var("BEACH_TRACE_STEPS")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(6),
+                        ..default()
+                    },
+                    settings: WaterSurfaceUniform {
+                        dry_depth: 0.0,
+                        ..WaterSurfaceExtension::default().settings
+                    },
+                    ..default()
                 },
-                ..default()
-            },
-        })),
+            }),
+        ),
         WaterSurfaceTag,
         bevy::light::NotShadowCaster,
     ));

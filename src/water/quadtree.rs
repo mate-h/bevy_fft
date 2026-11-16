@@ -297,6 +297,7 @@ pub(super) fn create_water_quadtree_fallback(
 }
 
 /// Builds the tile pool for new or changed quadtrees.
+#[allow(clippy::type_complexity)]
 pub(super) fn build_water_quadtrees(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -503,7 +504,8 @@ mod tests {
                 }
             }
             // Gather vertices per line and compare where segments of two tiles overlap.
-            let mut lines: HashMap<(i64, bool), Vec<(Point, &HashSet<Point>)>> = HashMap::new();
+            type Segments<'a> = Vec<(Point, &'a HashSet<Point>)>;
+            let mut lines: HashMap<(i64, bool), Segments> = HashMap::new();
             for ((line, a, b, horizontal), set) in &edges {
                 lines
                     .entry((*line, *horizontal))

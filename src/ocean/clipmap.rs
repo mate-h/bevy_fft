@@ -166,6 +166,7 @@ impl MeshBuilder {
     }
 
     /// One row of the gutter along constant Z, from `x0` to `x1` in coarse steps.
+    #[allow(clippy::too_many_arguments)]
     fn span_x(
         &mut self,
         fine: u32,
@@ -208,6 +209,7 @@ impl MeshBuilder {
     }
 
     /// One row of the gutter along constant X, from `z0` to `z1` in coarse steps.
+    #[allow(clippy::too_many_arguments)]
     fn span_z(
         &mut self,
         fine: u32,
@@ -313,6 +315,7 @@ impl MeshBuilder {
 }
 
 /// Builds the mesh for new or changed clipmaps.
+#[allow(clippy::type_complexity)]
 pub(super) fn build_ocean_clipmaps(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,

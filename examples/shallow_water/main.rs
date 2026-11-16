@@ -98,7 +98,7 @@ fn setup(
         .build();
     let material = ShallowWaterSurfaceMaterial {
         base: StandardMaterial {
-            base_color: Color::srgb(0.04, 0.12, 0.22).into(),
+            base_color: Color::srgb(0.04, 0.12, 0.22),
             perceptual_roughness: 0.08,
             metallic: 0.0,
             opaque_render_method: OpaqueRendererMethod::Auto,
