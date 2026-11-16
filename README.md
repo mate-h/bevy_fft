@@ -93,6 +93,7 @@ To bake another bay or river, [`tools/bake_topobathy.py`](tools/bake_topobathy.p
 | [`shallow_water`](src/shallow_water/mod.rs) | The staggered shallow water solver |
 | [`dispersive`](src/dispersive/mod.rs) | Hybrid shallow water and Airy waves |
 | [`ewave`](src/ewave/mod.rs) | eWave in Fourier space |
+| [`bodies`](src/bodies/mod.rs) | Voxelizing floating bodies: volume per voxel, and normal and area on the hull surface |
 | [`complex`](src/complex/mod.rs) | Complex number helpers for WESL shaders |
 
 Don't add `EwavePlugin` and `DispersivePlugin` to the same app: both insert their passes right after the FFT resolve.

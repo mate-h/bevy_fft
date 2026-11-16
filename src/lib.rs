@@ -32,6 +32,7 @@
 //! must use the same roots layout (typical when all grids share the stock forward table for their `orders`).
 //! Broader ocean and bloom plans live in **`ROADMAP.md`**.
 
+pub mod bodies;
 pub mod complex;
 pub mod dispersive;
 pub mod ewave;
