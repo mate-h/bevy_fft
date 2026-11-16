@@ -789,16 +789,22 @@ fn stage_height(cell : vec2u, h : f32) {
     textureStore(pmlStateTexture, cell, p);
 }
 
+/// Outflow limit of the cell a flux leaves, 1 for water coming in over the grid's edge.
+fn upwind_limit(ic : i32, jc : i32) -> f32 {
+    if (ic < 0 || jc < 0 || ic >= nx() || jc >= ny()) { return 1.0; }
+    return outflow_limit(ic, jc);
+}
+
 /// `depth_flux_x` scaled by the outflow limit of the cell it leaves.
 fn limited_flux_x(fi : i32, jc : i32) -> f32 {
     let f = depth_flux_x(fi, jc);
-    return f * outflow_limit(select(fi, fi - 1, f > 0.0), jc);
+    return f * upwind_limit(select(fi, fi - 1, f > 0.0), jc);
 }
 
 /// `depth_flux_y` scaled by the outflow limit of the cell it leaves.
 fn limited_flux_y(ic : i32, fj : i32) -> f32 {
     let f = depth_flux_y(ic, fj);
-    return f * outflow_limit(ic, select(fj, fj - 1, f > 0.0));
+    return f * upwind_limit(ic, select(fj, fj - 1, f > 0.0));
 }
 
 /// Adds each vertical face's depth flux times dt to `mac_u_temps.z`, the volume per unit width
