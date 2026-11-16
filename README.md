@@ -17,6 +17,7 @@ bevy_fft runs 2D Fast Fourier Transforms in compute shaders on Bevy's render gra
 - **Water optics.** Terrain-aware transmission and refraction, screen-space reflection, caustics, foam that advects with the flow, an underwater view and the waterline.
 - **Breaking fronts.** Breaking wave fronts in shallow water traced as tracked lines along the crest (Thuerey et al. 2007), for spray, foam and breakers to follow.
 - **Queries.** Read the water height and velocity back on the CPU, for buoys and floating objects.
+- **Floating bodies.** Voxelized hulls whose buoyancy and drag come from the live water on the GPU, so currents and wakes push them, returned as one force and torque per body.
 
 ## Gallery
 
@@ -93,7 +94,7 @@ To bake another bay or river, [`tools/bake_topobathy.py`](tools/bake_topobathy.p
 | [`shallow_water`](src/shallow_water/mod.rs) | The staggered shallow water solver |
 | [`dispersive`](src/dispersive/mod.rs) | Hybrid shallow water and Airy waves |
 | [`ewave`](src/ewave/mod.rs) | eWave in Fourier space |
-| [`bodies`](src/bodies/mod.rs) | Voxelizing floating bodies: volume per voxel, and normal and area on the hull surface |
+| [`bodies`](src/bodies/mod.rs) | Floating bodies: voxelized hulls and GPU water forces (buoyancy, friction, pressure drag, slamming) per body |
 | [`complex`](src/complex/mod.rs) | Complex number helpers for WESL shaders |
 
 Don't add `EwavePlugin` and `DispersivePlugin` to the same app: both insert their passes right after the FFT resolve.

@@ -7,6 +7,9 @@
 //! Twiddle helpers, [`crate::fft::run_forward_fft`], [`crate::fft::run_inverse_fft`], and other
 //! internals remain on [`crate::fft`] and [`crate::fft::resources`].
 
+pub use crate::bodies::{
+    FloatingBody, FloatingBodyPlugin, FloatingBodySettings, VoxelizedMesh, voxelize,
+};
 pub use crate::dispersive::{
     DispersiveController, DispersiveGridImages, DispersiveLodBlend, DispersiveMaterialUniform,
     DispersivePlacement, DispersivePlugin, DispersiveSimRoot, DispersiveSurfaceExtension,

@@ -1,16 +1,23 @@
 //! Floating bodies as voxels.
 //!
-//! A body's hull is voxelized once on the CPU with [`voxelize`]. Each [`Voxel`] keeps the volume
+//! A body's hull is voxelized once on the CPU with [`voxelize`], and [`FloatingBodyPlugin`]
+//! evaluates the water's forces on its voxels on the GPU each frame. Each [`Voxel`] keeps the volume
 //! of the hull inside it, and voxels on the hull surface also keep the outward normal and area of
-//! the surface they hold. A force pass can then evaluate buoyancy from the submerged volume and
-//! drag and slamming from the surface voxels against the live water state, and sum them into one
-//! force and torque per body.
+//! the surface they hold. Buoyancy comes from the submerged volume, and friction, pressure drag
+//! and slamming from the surface voxels, all against the live water state.
 //!
 //! The volume comes from vertical rays through a grid of sample points in each voxel column. The
 //! inside of a closed mesh is where a ray has crossed an odd number of triangles, so the share of
 //! each voxel's height that lies inside is exact along the ray, and the samples average it over
 //! the column. The surface comes from spreading each triangle's area and normal over the voxels it
 //! passes through.
+
+mod forces;
+
+pub use forces::{
+    FLOATING_BODY_MAX, FLOATING_BODY_SHADER, FloatingBody, FloatingBodyFrame, FloatingBodyPlugin,
+    FloatingBodySettings,
+};
 
 use bevy::{
     mesh::{PrimitiveTopology, VertexAttributeValues},
@@ -30,18 +37,21 @@ pub struct Voxel {
     pub center: Vec3,
     /// Volume of the hull inside the voxel in cubic meters, up to the voxel's full volume.
     pub volume: f32,
-    /// Area-weighted mean outward normal of the hull surface in the voxel. Zero for voxels with no
-    /// surface.
-    pub normal: Vec3,
-    /// Area of the hull surface in the voxel in square meters.
-    pub area: f32,
 }
 
-impl Voxel {
-    /// The voxel holds part of the hull surface.
-    pub fn is_surface(&self) -> bool {
-        self.area > 0.0
-    }
+/// A piece of the hull surface inside one voxel, in the mesh's local space.
+///
+/// A voxel holds one patch per direction its surface faces, binned by the normal's dominant axis.
+/// A voxel on the edge of a box keeps its two faces apart, so pressure on the front face doesn't
+/// also push on the bottom.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Reflect)]
+pub struct SurfacePatch {
+    /// Area-weighted centroid of the patch.
+    pub position: Vec3,
+    /// Area-weighted mean outward normal.
+    pub normal: Vec3,
+    /// Area in square meters.
+    pub area: f32,
 }
 
 /// A mesh turned into voxels by [`voxelize`].
@@ -49,8 +59,10 @@ impl Voxel {
 pub struct VoxelizedMesh {
     /// Edge length of a voxel in meters.
     pub voxel_size: f32,
-    /// Voxels that hold some of the hull's volume or surface.
+    /// Voxels that hold some of the hull's volume.
     pub voxels: Vec<Voxel>,
+    /// The hull surface, in patches no larger than a voxel.
+    pub surface: Vec<SurfacePatch>,
 }
 
 impl VoxelizedMesh {
@@ -61,7 +73,7 @@ impl VoxelizedMesh {
 
     /// Area of the hull surface in square meters.
     pub fn area(&self) -> f32 {
-        self.voxels.iter().map(|v| v.area).sum()
+        self.surface.iter().map(|p| p.area).sum()
     }
 
     /// Centroid of the hull's volume, its centre of buoyancy when fully submerged.
@@ -146,7 +158,7 @@ pub fn voxelize_triangles(
     if triangles.is_empty() {
         return Ok(VoxelizedMesh {
             voxel_size: s,
-            voxels: Vec::new(),
+            ..default()
         });
     }
     let (lo, hi) = triangles
@@ -163,7 +175,9 @@ pub fn voxelize_triangles(
         (c.x + dims.x * (c.y + dims.y * c.z)) as usize
     };
     let mut volume = vec![0.0f32; (dims.x * dims.y * dims.z) as usize];
-    let mut surface = vec![(Vec3::ZERO, 0.0f32); volume.len()];
+    // Per voxel and per dominant normal axis (±X, ±Y, ±Z): area times normal, area times
+    // position, and area.
+    let mut surface = vec![(Vec3::ZERO, Vec3::ZERO, 0.0f32); volume.len() * 6];
 
     // Triangles binned by the voxel columns their XZ bounds touch.
     let mut columns: Vec<Vec<usize>> = vec![Vec::new(); (dims.x * dims.z) as usize];
@@ -251,28 +265,36 @@ pub fn voxelize_triangles(
             // Nudged inward, so a face on a voxel boundary lands in the voxel it bounds.
             let p = tri[0] + (tri[1] - tri[0]) * u + (tri[2] - tri[0]) * v - normal * (s * 1.0e-3);
             let c = (p / s).floor().as_ivec3().clamp(min, max);
-            let entry = &mut surface[cell(c)];
+            let entry = &mut surface[cell(c) * 6 + facing(normal)];
             entry.0 += normal * share;
-            entry.1 += share;
+            entry.1 += p * share;
+            entry.2 += share;
         }
     }
 
     let full = s * s * s;
     let mut voxels = Vec::new();
+    let mut patches = Vec::new();
     for z in min.z..=max.z {
         for y in min.y..=max.y {
             for x in min.x..=max.x {
                 let c = IVec3::new(x, y, z);
                 let i = cell(c);
-                let (normal, area) = surface[i];
                 let v = volume[i].min(full);
-                if v > full * 1.0e-6 || area > 0.0 {
+                if v > full * 1.0e-6 {
                     voxels.push(Voxel {
                         center: (c.as_vec3() + 0.5) * s,
                         volume: v,
-                        normal: normal.normalize_or_zero(),
-                        area,
                     });
+                }
+                for &(normal, position, area) in &surface[i * 6..i * 6 + 6] {
+                    if area > 0.0 {
+                        patches.push(SurfacePatch {
+                            position: position / area,
+                            normal: normal.normalize_or_zero(),
+                            area,
+                        });
+                    }
                 }
             }
         }
@@ -280,7 +302,21 @@ pub fn voxelize_triangles(
     Ok(VoxelizedMesh {
         voxel_size: s,
         voxels,
+        surface: patches,
     })
+}
+
+/// Which of ±X, ±Y and ±Z a normal faces most, as 0 to 5.
+fn facing(n: Vec3) -> usize {
+    let a = n.abs();
+    let axis = if a.x >= a.y && a.x >= a.z {
+        0
+    } else if a.y >= a.z {
+        1
+    } else {
+        2
+    };
+    axis * 2 + (n[axis] < 0.0) as usize
 }
 
 /// Height where the vertical ray through `ray` (X, Z) crosses the triangle, if it does.
@@ -336,9 +372,14 @@ mod tests {
         assert!(close(v.volume(), 1.0, 1e-3), "volume {}", v.volume());
         assert!(close(v.area(), 6.0, 1e-3), "area {}", v.area());
         assert!(v.centroid().length() < 1e-3, "centroid {:?}", v.centroid());
-        // The cube's faces lie on voxel boundaries, so it covers exactly 4³ voxels.
-        let filled = v.voxels.iter().filter(|x| x.volume > 0.0).count();
-        assert_eq!(filled, 64);
+        // The cube's faces lie on voxel boundaries, so it covers exactly 4³ voxels and each face
+        // splits into 4² patches, with a voxel on an edge holding one patch per face.
+        assert_eq!(v.voxels.len(), 64);
+        assert_eq!(v.surface.len(), 6 * 16);
+        for p in &v.surface {
+            assert!((p.normal.abs().max_element() - 1.0).abs() < 1e-5, "{p:?}");
+            assert!(close(p.area, 0.0625, 1e-3), "{p:?}");
+        }
         for x in &v.voxels {
             assert!(x.volume <= 0.25f32.powi(3) * 1.0001);
         }
@@ -371,14 +412,13 @@ mod tests {
             v.volume()
         );
         assert!(close(v.area(), area, 1e-4), "area {} of {area}", v.area());
-        for x in v.voxels.iter().filter(|x| x.is_surface()) {
-            assert!(x.normal.dot(x.center.normalize()) > 0.8, "{x:?}");
+        for p in &v.surface {
+            assert!(p.normal.dot(p.position.normalize()) > 0.95, "{p:?}");
+            assert!((p.position.length() - 1.0).abs() < 0.01, "{p:?}");
         }
-        // Surface samples are half a voxel apart, so a voxel the hull barely clips can miss them.
-        // Voxels without surface are full or nearly so.
-        let interior = v.voxels.iter().filter(|x| !x.is_surface());
-        for x in interior {
-            assert!(x.volume >= 0.99e-3, "{x:?}");
+        // Voxels well inside are full.
+        for x in v.voxels.iter().filter(|x| x.center.length() < 0.8) {
+            assert!(close(x.volume, 1e-3, 1e-3), "{x:?}");
         }
     }
 
