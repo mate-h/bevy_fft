@@ -59,7 +59,7 @@ fn resolve_power_spectrum_from_c(@builtin(global_invocation_id) gid: vec3<u32>) 
     textureStore(power_spectrum_out, pos, vec4<f32>(c, 1.0));
 }
 
-// Spatial output from **B** after inverse FFT. RGB is slopes and elevation; alpha is simulation data (e.g. ocean chop).
+// Spatial output from **B** after inverse FFT. RGB is slopes and elevation. Alpha is simulation data, such as ocean horizontal displacement.
 @compute
 @workgroup_size(16, 16, 1)
 fn resolve_spatial_from_b(@builtin(global_invocation_id) gid: vec3<u32>) {

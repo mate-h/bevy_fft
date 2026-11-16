@@ -220,8 +220,8 @@ pub enum FftPatternTarget {
 
 /// When present on the same entity as [`FftSource`] and [`crate::fft::resources::FftTextures`], the
 /// stock render-graph FFT and resolve passes skip that entity. Use this when a custom render node
-/// drives [`run_forward_fft`](crate::fft::run_forward_fft) and [`run_inverse_fft`](crate::fft::run_inverse_fft)
-/// on that entity’s buffers (for example eWave). Extraction and [`crate::fft::resources::prepare_fft_roots_buffer`]
+/// drives [`run_forward_fft`] and [`run_inverse_fft`]
+/// on that entity’s buffers (for example eWave). Extraction and `prepare_fft_roots_buffer`
 /// still run from [`FftSource`].
 #[derive(Component, Clone, Copy, Default, Reflect)]
 pub struct FftSkipStockPipeline;

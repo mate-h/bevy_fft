@@ -1,0 +1,303 @@
+use bevy::{
+    asset::RenderAssetUsages,
+    image::ImageSampler,
+    prelude::*,
+    render::{
+        RenderApp,
+        extract_resource::ExtractResource,
+        render_asset::RenderAssets,
+        render_resource::{
+            Extent3d, ImageSubresourceRange, ShaderType, TextureDimension, TextureFormat,
+            TextureUsages, TextureViewDescriptor, TextureViewDimension, UniformBuffer,
+        },
+        renderer::{RenderContext, RenderDevice, RenderQueue},
+        texture::GpuImage,
+    },
+};
+
+/// Most slices a [`WaterLodData`] can hold. Must match `WATER_LOD_MAX_SLICES` in `lod.wesl`.
+pub const WATER_LOD_MAX_SLICES: usize = 12;
+
+/// Size and reach of the LOD data. Read once at startup.
+#[derive(Resource, Clone, Copy, Debug, Reflect)]
+pub struct WaterLodSettings {
+    /// Number of slices, from 1 to [`WATER_LOD_MAX_SLICES`].
+    pub slice_count: u32,
+    /// Texels per slice edge.
+    pub resolution: u32,
+    /// Texel width of the finest slice in meters.
+    pub base_texel_size: f32,
+}
+
+impl Default for WaterLodSettings {
+    fn default() -> Self {
+        Self {
+            slice_count: 10,
+            resolution: 256,
+            base_texel_size: 1.0 / 32.0,
+        }
+    }
+}
+
+impl WaterLodSettings {
+    fn clamped_count(&self) -> u32 {
+        self.slice_count.clamp(1, WATER_LOD_MAX_SLICES as u32)
+    }
+
+    /// Texel width of slice `i` in meters.
+    pub fn texel_size(&self, i: u32) -> f32 {
+        self.base_texel_size * (1u32 << i) as f32
+    }
+
+    /// Edge length of slice `i` in meters.
+    pub fn slice_width(&self, i: u32) -> f32 {
+        self.texel_size(i) * self.resolution as f32
+    }
+}
+
+/// Slice placement shared with the GPU. Layout matches `WaterLodSlices` in `lod.wesl`.
+#[derive(Clone, Copy, Debug, Default, ShaderType, Reflect)]
+pub struct WaterLodSlices {
+    /// Per slice: snapped centre X, snapped centre Z, texel width, slice width (meters).
+    pub slices: [Vec4; WATER_LOD_MAX_SLICES],
+    pub count: u32,
+    pub resolution: u32,
+    /// Wind direction in radians on XZ. The base writer sets it, which for the FFT ocean is the
+    /// wind its spectrum was built for.
+    pub wind_direction: f32,
+    pub _pad1: u32,
+}
+
+/// Camera-centred LOD texture arrays and where each slice currently sits.
+///
+/// `displacement` stores, per texel, the height slope along X, the slope along Z, the height in
+/// meters above the surface mesh plane, and the horizontal displacement along X in meters. These
+/// are the same lanes as the FFT spatial output, already scaled, so contributions from several
+/// solvers add up linearly. `foam` stores how strongly each texel is breaking this frame, from 0 to
+/// 1, in its red channel, which the foam sim in [`super::WaterFoamSettings`] turns into lasting
+/// foam. Its green channel holds the depth of the water column in meters and its blue channel the
+/// horizontal displacement along Z in meters. `flow` stores the water velocity at the surface in meters per second: X in red, Z
+/// in green, and vertical in blue. `drift` stores the mean horizontal velocity that carries floating
+/// matter such as foam, in meters per second along X and Z. Unlike `flow` it leaves out the orbital
+/// motion of waves, which the displacement lanes already hold, and keeps the currents of the
+/// solvers plus the Stokes drift of the ocean waves. `displacement` and `foam` use
+/// [`WATER_LOD_SURFACE_FORMAT`] with a linear clamped sampler, and `drift` uses
+/// [`WATER_LOD_DRIFT_FORMAT`].
+///
+/// `foam_state` is not written by solvers. The foam sim in [`super::WaterFoamSettings`] keeps it,
+/// with active foam in its red channel and residual foam in green, carried over from frame to
+/// frame. It uses [`super::WATER_FOAM_STATE_FORMAT`]. The foam sim also keeps `foam_flow`, the
+/// advected texture coordinates of the foam pattern, with [`WATER_FOAM_FLOW_LAYERS_PER_SLICE`]
+/// layers per slice in [`WATER_FOAM_FLOW_FORMAT`]. `foam_flow.wesl` describes its layout.
+#[derive(Resource, Clone, ExtractResource)]
+#[extract_app(RenderApp)]
+pub struct WaterLodData {
+    pub displacement: Handle<Image>,
+    pub foam: Handle<Image>,
+    pub flow: Handle<Image>,
+    pub drift: Handle<Image>,
+    pub foam_state: Handle<Image>,
+    pub foam_flow: Handle<Image>,
+    pub slices: WaterLodSlices,
+}
+
+impl WaterLodData {
+    /// Index of the finest slice whose interior contains `xz`, if any.
+    pub fn finest_slice_containing(&self, xz: Vec2) -> Option<u32> {
+        (0..self.slices.count).find(|&i| {
+            let s = self.slices.slices[i as usize];
+            let half = s.w * 0.5 - s.z;
+            (xz.x - s.x).abs() <= half && (xz.y - s.y).abs() <= half
+        })
+    }
+}
+
+/// Empties the `displacement`, `foam`, `flow`, and `drift` arrays of the [`WaterLodData`] at the
+/// start of each frame, for scenes with no base writer such as the FFT ocean. Without a base, a
+/// texel that a regional writer left would keep a value written for last frame's slice placement.
+/// Empty texels hold a still surface on the mesh plane with no water under it.
+#[derive(Resource, Clone, Copy, Debug, Default, ExtractResource, Reflect)]
+#[extract_app(RenderApp)]
+pub struct WaterLodClear;
+
+pub(super) fn clear_water_lod(
+    mut ctx: RenderContext,
+    clear: Option<Res<WaterLodClear>>,
+    lod: Option<Res<WaterLodData>>,
+    images: Res<RenderAssets<GpuImage>>,
+) {
+    let (Some(_), Some(lod)) = (clear, lod) else {
+        return;
+    };
+    let encoder = ctx.command_encoder();
+    for handle in [&lod.displacement, &lod.foam, &lod.flow, &lod.drift] {
+        if let Some(image) = images.get(handle) {
+            encoder.clear_texture(&image.texture, &ImageSubresourceRange::default());
+        }
+    }
+}
+
+/// The camera whose position centres the [`WaterLodData`] and the ocean clipmap.
+/// Without it, the first [`Camera3d`] is used.
+#[derive(Component, Clone, Copy, Debug, Default, Reflect)]
+pub struct WaterViewer;
+
+/// Format of the `displacement` and `foam` arrays of [`WaterLodData`]. Half floats keep the
+/// surface reads cheap and filterable on every backend. `flow` stays at full precision.
+pub const WATER_LOD_SURFACE_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+
+/// Format of the `drift` array of [`WaterLodData`]. Two full-precision lanes, which every backend
+/// can bind as a storage texture.
+pub const WATER_LOD_DRIFT_FORMAT: TextureFormat = TextureFormat::Rg32Float;
+
+/// Format of the `foam_flow` array of [`WaterLodData`]. Texture offsets grow by the drift over a
+/// whole latency, so they stay at full precision.
+pub const WATER_FOAM_FLOW_FORMAT: TextureFormat = TextureFormat::Rgba32Float;
+
+/// Layers of the `foam_flow` array of [`WaterLodData`] per slice. Matches
+/// `FOAM_FLOW_LAYERS_PER_SLICE` in `foam_flow.wesl`.
+pub const WATER_FOAM_FLOW_LAYERS_PER_SLICE: u32 = 3;
+
+fn lod_array_image(settings: &WaterLodSettings, format: TextureFormat) -> Image {
+    lod_layers_image(settings, format, 1)
+}
+
+fn lod_layers_image(settings: &WaterLodSettings, format: TextureFormat, per_slice: u32) -> Image {
+    let mut image = Image::new_fill(
+        Extent3d {
+            width: settings.resolution,
+            height: settings.resolution,
+            depth_or_array_layers: settings.clamped_count() * per_slice,
+        },
+        TextureDimension::D2,
+        &vec![0; format.block_copy_size(None).unwrap_or(16) as usize],
+        format,
+        RenderAssetUsages::default(),
+    );
+    image.sampler = ImageSampler::linear();
+    image.texture_descriptor.usage = TextureUsages::STORAGE_BINDING
+        | TextureUsages::TEXTURE_BINDING
+        | TextureUsages::COPY_DST
+        | TextureUsages::COPY_SRC;
+    image.texture_view_descriptor = Some(TextureViewDescriptor {
+        dimension: Some(TextureViewDimension::D2Array),
+        ..default()
+    });
+    image
+}
+
+pub(super) fn create_water_lod_data(
+    mut commands: Commands,
+    settings: Res<WaterLodSettings>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let slices = WaterLodSlices {
+        count: settings.clamped_count(),
+        resolution: settings.resolution,
+        ..default()
+    };
+    commands.insert_resource(WaterLodData {
+        displacement: images.add(lod_array_image(&settings, WATER_LOD_SURFACE_FORMAT)),
+        foam: images.add(lod_array_image(&settings, WATER_LOD_SURFACE_FORMAT)),
+        flow: images.add(lod_array_image(&settings, TextureFormat::Rgba32Float)),
+        drift: images.add(lod_array_image(&settings, WATER_LOD_DRIFT_FORMAT)),
+        foam_state: images.add(lod_array_image(&settings, super::WATER_FOAM_STATE_FORMAT)),
+        foam_flow: images.add(lod_layers_image(
+            &settings,
+            WATER_FOAM_FLOW_FORMAT,
+            WATER_FOAM_FLOW_LAYERS_PER_SLICE,
+        )),
+        slices,
+    });
+}
+
+/// Snaps each slice centre to a two-texel grid under the viewer. Moving in whole texel pairs
+/// keeps every texel on the same world position as before, so the data never swims.
+pub(super) fn update_water_lod_slices(
+    settings: Res<WaterLodSettings>,
+    viewers: Query<&GlobalTransform, With<WaterViewer>>,
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    mut data: ResMut<WaterLodData>,
+) {
+    let eye = viewers
+        .iter()
+        .next()
+        .or_else(|| cameras.iter().next())
+        .map_or(Vec3::ZERO, |t| t.translation());
+    let count = settings.clamped_count();
+    let mut slices = data.slices;
+    for i in 0..count {
+        let texel = settings.texel_size(i);
+        let step = 2.0 * texel;
+        let center = (eye.xz() / step).round() * step;
+        slices.slices[i as usize] = Vec4::new(center.x, center.y, texel, settings.slice_width(i));
+    }
+    slices.count = count;
+    slices.resolution = settings.resolution;
+    data.slices = slices;
+}
+
+/// Render-world uniform buffer holding the current [`WaterLodSlices`].
+#[derive(Resource, Default)]
+pub struct WaterLodGpu {
+    pub slices: UniformBuffer<WaterLodSlices>,
+}
+
+pub(super) fn prepare_water_lod_gpu(
+    data: Option<Res<WaterLodData>>,
+    device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
+    mut gpu: ResMut<WaterLodGpu>,
+) {
+    let Some(data) = data else {
+        return;
+    };
+    gpu.slices.set(data.slices);
+    gpu.slices.write_buffer(&device, &queue);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slices_double_in_width() {
+        let s = WaterLodSettings::default();
+        assert_eq!(s.slice_width(1), 2.0 * s.slice_width(0));
+        assert_eq!(s.slice_width(0), 256.0 / 32.0);
+    }
+
+    #[test]
+    fn finest_slice_prefers_inner_slices() {
+        let settings = WaterLodSettings {
+            slice_count: 3,
+            resolution: 16,
+            base_texel_size: 1.0,
+        };
+        let mut slices = WaterLodSlices {
+            count: 3,
+            resolution: 16,
+            ..default()
+        };
+        for i in 0..3 {
+            slices.slices[i] = Vec4::new(
+                0.0,
+                0.0,
+                settings.texel_size(i as u32),
+                settings.slice_width(i as u32),
+            );
+        }
+        let data = WaterLodData {
+            displacement: Handle::default(),
+            foam: Handle::default(),
+            flow: Handle::default(),
+            drift: Handle::default(),
+            foam_state: Handle::default(),
+            foam_flow: Handle::default(),
+            slices,
+        };
+        assert_eq!(data.finest_slice_containing(Vec2::new(3.0, 0.0)), Some(0));
+        assert_eq!(data.finest_slice_containing(Vec2::new(10.0, 0.0)), Some(1));
+        assert_eq!(data.finest_slice_containing(Vec2::new(100.0, 0.0)), None);
+    }
+}

@@ -13,7 +13,6 @@ use bevy::{
         VolumetricLight, atmosphere::ScatteringMedium, light_consts::lux,
     },
     material::OpaqueRendererMethod,
-    math::primitives::InfinitePlane3d,
     mesh::Meshable,
     pbr::{AtmosphereSettings, DefaultOpaqueRendererMethod, StandardMaterial},
     post_process::bloom::Bloom,
@@ -23,6 +22,7 @@ use bevy::{
         render_resource::WgpuFeatures,
         settings::{RenderCreation, WgpuSettings},
     },
+    shape::InfinitePlane3d,
     transform::TransformSystems,
 };
 use bevy_egui::{
@@ -117,7 +117,7 @@ fn setup(
         .build();
     let material = DispersiveSurfaceMaterial {
         base: StandardMaterial {
-            base_color: Color::srgb(0.05, 0.2, 0.35).into(),
+            base_color: Color::srgb(0.05, 0.2, 0.35),
             perceptual_roughness: 0.08,
             metallic: 0.0,
             opaque_render_method: OpaqueRendererMethod::Auto,

@@ -1,5 +1,5 @@
 //! eWave: Tessendorf exponential iWave integrator in k-space (FFT) with periodic boundary.
-//! Register [`FftPlugin`](crate::fft::FftPlugin) **before** [`EwavePlugin`]. Otherwise `EwavePlugin::finish`
+//! Register [`FftPlugin`] **before** [`EwavePlugin`]. Otherwise `EwavePlugin::finish`
 //! runs too early and the render world does not have [`crate::fft::resources::FftBindGroupLayouts`] yet.
 //!
 //! FFT bin layout: forward and inverse passes use the usual stock layout (DC at index `(0,0)` on
