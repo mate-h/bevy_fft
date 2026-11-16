@@ -25,7 +25,7 @@ pub struct DispersiveLodParams {
     pub cells: u32,
     pub blend_cells: f32,
     pub blend: u32,
-    pub _pad: u32,
+    pub has_pressure: u32,
     /// Hull position this frame and last frame, in cells.
     pub hull: Vec2,
     pub hull_prev: Vec2,
@@ -66,6 +66,7 @@ impl FromWorld for DispersiveLodPipeline {
                 texture_2d(unfiltered),
                 texture_storage_2d_array(WATER_LOD_DRIFT_FORMAT, StorageTextureAccess::WriteOnly),
                 texture_2d_array(unfiltered),
+                texture_2d(unfiltered),
             ),
         );
         let layout = BindGroupLayoutDescriptor::new("dispersive_lod_write_layout", &entries);
@@ -139,6 +140,14 @@ pub(super) fn prepare_dispersive_lod_write(
     ) else {
         return;
     };
+    // The head only presses the water in deep mode, so only there is it part of the surface.
+    let pressure = match (&controller.body_maps, controller.deep_water_depth) {
+        (Some(maps), Some(_)) => match images.get(&maps.pressure_head) {
+            Some(image) => Some(&image.texture_view),
+            None => return,
+        },
+        _ => None,
+    };
     let dt = time.delta_secs();
     let hull_speed = if controller.brush_active && dt > 0.0 {
         controller.pointer.distance(controller.pointer_prev) * controller.cell_size() / dt
@@ -155,7 +164,7 @@ pub(super) fn prepare_dispersive_lod_write(
             DispersiveLodBlend::Add => 0,
             DispersiveLodBlend::Replace => 1,
         },
-        _pad: 0,
+        has_pressure: u32::from(pressure.is_some()),
         hull: controller.pointer,
         hull_prev: controller.pointer_prev,
         hull_radius: controller.brush_radius,
@@ -184,6 +193,7 @@ pub(super) fn prepare_dispersive_lod_write(
             &bed.texture_view,
             &drift_out.texture_view,
             drift_in,
+            pressure.unwrap_or(&bed.texture_view),
         )),
     ));
     let res = lod.slices.resolution;

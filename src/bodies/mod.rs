@@ -15,8 +15,8 @@
 mod forces;
 
 pub use forces::{
-    FLOATING_BODY_MAX, FLOATING_BODY_SHADER, FloatingBody, FloatingBodyFrame, FloatingBodyPlugin,
-    FloatingBodySettings,
+    BodyFootprintTarget, FLOATING_BODY_MAX, FLOATING_BODY_SHADER, FloatingBody, FloatingBodyFrame,
+    FloatingBodyPlugin, FloatingBodySettings,
 };
 
 use bevy::{

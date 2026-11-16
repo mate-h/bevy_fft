@@ -38,6 +38,11 @@ struct DispersiveSim {
     edge_trim_cells: f32,
     /// Exponent of the edge trim's taper.
     edge_trim_alpha: f32,
+    /// 1 when `body_pressure` and `body_obstruction` are the patch's maps.
+    body_maps: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 const SPECTRAL_FIXED_DEPTH: u32 = 1u;
@@ -61,6 +66,10 @@ const SPECTRAL_DEEP: u32 = 2u;
 @group(1) @binding(14) var bar_mac_w: texture_storage_2d<rgba32float, read_write>;
 /// Previous-step cell-centered bulk velocity (`.rg` = ū) for Alg. 3 midpoint.
 @group(1) @binding(15) var bar_vel_prev: texture_storage_2d<rgba32float, read_write>;
+/// Depth in meters that floating bodies press the surface down by, from `FloatingBodyPlugin`.
+@group(1) @binding(16) var body_pressure: texture_2d<f32>;
+/// Gilligan's obstruction map: 1 in open water, 0 where hulls fill the cell at the waterline.
+@group(1) @binding(17) var body_obstruction: texture_2d<f32>;
 
 const PI: f32 = 3.1415926535;
 
@@ -645,6 +654,14 @@ fn brush_pressure_head(id: vec2u) -> f32 {
     return 0.5 * sim.brush_strength * t * t * (3.0 - 2.0 * t);
 }
 
+/// Head that floating bodies press the surface down by, in deep mode. Like the brush's, it joins
+/// the height the Airy step drives the flux with, so water flows away from under a hull and a
+/// moving hull trails a wake.
+fn body_pressure_head(id: vec2u) -> f32 {
+    if ((sim.spectral_flags & SPECTRAL_DEEP) == 0u || sim.body_maps == 0u) { return 0.0; }
+    return textureLoad(body_pressure, id, 0).r;
+}
+
 @compute @workgroup_size(16, 16, 1)
 fn pack_h_t_to_a(@builtin(global_invocation_id) id: vec3u) {
     let n = sim.n;
@@ -657,7 +674,7 @@ fn pack_h_t_to_a(@builtin(global_invocation_id) id: vec3u) {
     // brush's pressure head, which `unpack_b_re_to_tilde_h` takes back out.
     var h_avg = 0.5 * (t.r + t.a);
     if ((sim.spectral_flags & SPECTRAL_DEEP) != 0u) {
-        h_avg = t.r + brush_pressure_head(id.xy);
+        h_avg = t.r + brush_pressure_head(id.xy) + body_pressure_head(id.xy);
     }
     let z = vec4f(0.0, 0.0, 0.0, 0.0);
     textureStore(buffer_a_re, id.xy, vec4(h_avg, 0.0, 0.0, 0.0));
@@ -689,7 +706,8 @@ fn unpack_b_re_to_tilde_h(@builtin(global_invocation_id) id: vec3u) {
     if (id.x >= n || id.y >= n) { return; }
     let t = textureLoad(d_tilde, id.xy);
     // The band-limited height, without the brush's pressure head, stays as h̃.
-    var h = textureLoad(buffer_b_re, id.xy).x - brush_pressure_head(id.xy);
+    var h = textureLoad(buffer_b_re, id.xy).x - brush_pressure_head(id.xy)
+        - body_pressure_head(id.xy);
     if (!is_finite_f(h)) { h = 0.0; }
     textureStore(d_tilde, id.xy, vec4(h, t.g, t.b, t.a));
 }
@@ -1289,16 +1307,30 @@ fn edge_trim_1d(i: u32) -> f32 {
     return pow(d / sim.edge_trim_cells, sim.edge_trim_alpha);
 }
 
+// Hulls reflect waves the same way (Gilligan §3.3), with the obstruction map, which is 0 under a
+// hull at the waterline. It multiplies the effective surface, the surface plus the head bodies
+// press it down by, so under a hull the water rests against the hull's bottom, where the head
+// holds it. Obstructing the bare surface would pull it back to rest against the head, and the
+// footprint would then find the hull deeper and press harder, without end.
 @compute @workgroup_size(16, 16, 1)
 fn edge_trim(@builtin(global_invocation_id) id: vec3u) {
     let n = sim.n;
-    if (id.x >= n || id.y >= n || sim.edge_trim_cells <= 0.0) { return; }
-    let t = edge_trim_1d(id.x) * edge_trim_1d(id.y);
-    if (t >= 1.0) { return; }
+    if (id.x >= n || id.y >= n) { return; }
+    var t = 1.0;
+    if (sim.edge_trim_cells > 0.0) {
+        t = edge_trim_1d(id.x) * edge_trim_1d(id.y);
+    }
+    var o = 1.0;
+    if (sim.body_maps != 0u) {
+        o = clamp(textureLoad(body_obstruction, id.xy, 0).r, 0.0, 1.0);
+    }
+    if (t >= 1.0 && o >= 1.0) { return; }
     let s = textureLoad(d_state, id.xy);
+    let head = body_pressure_head(id.xy);
     let eta = textureLoad(d_bed, id.xy).r + s.r;
-    let h = max(s.r + (t - 1.0) * eta, 0.0);
-    textureStore(d_state, id.xy, vec4(h, s.g * t, s.b * t, s.a));
+    let trimmed = ((eta + head) * o - head) * t;
+    let h = max(s.r + trimmed - eta, 0.0);
+    textureStore(d_state, id.xy, vec4(h, s.g * t * o, s.b * t * o, s.a));
 }
 
 // --- Post-merge spectral damp of total η and q (matches NumPy damp_state_fields).

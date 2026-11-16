@@ -146,8 +146,10 @@ fn r32_wh(w: u32, h: u32) -> Image {
         TextureFormat::R32Float,
         RenderAssetUsages::default(),
     );
-    image.texture_descriptor.usage =
-        TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    image.texture_descriptor.usage = TextureUsages::STORAGE_BINDING
+        | TextureUsages::TEXTURE_BINDING
+        | TextureUsages::COPY_DST
+        | TextureUsages::COPY_SRC;
     image
 }
 
@@ -171,6 +173,16 @@ impl DispersiveGridImages {
             bar_vel_prev: images.add(rgba32(n)),
         }
     }
+}
+
+/// The grids [`FloatingBodyPlugin`](crate::bodies::FloatingBodyPlugin) writes for a dispersive
+/// patch, one `R32Float` texel per cell. See [`DispersiveController::enable_bodies`].
+#[derive(Clone, Debug, Reflect)]
+pub struct DispersiveBodyMaps {
+    /// Depth in meters that floating bodies press the surface down by.
+    pub pressure_head: Handle<Image>,
+    /// Gilligan's obstruction map: 1 in open water, 0 where hulls fill the cell at the waterline.
+    pub obstruction: Handle<Image>,
 }
 
 /// Wavelength in meters of the transverse waves in the Kelvin wake of a boat moving at `speed`
@@ -259,6 +271,9 @@ pub struct DispersiveController {
     /// `None` runs the full hybrid, which shallow water needs for shoaling and run-up.
     /// [`Self::choose_mode`] picks one from the depth under the patch.
     pub deep_water_depth: Option<f32>,
+    /// Lets [`FloatingBody`](crate::bodies::FloatingBody)s act on a placed patch. Set it with
+    /// [`Self::enable_bodies`].
+    pub body_maps: Option<DispersiveBodyMaps>,
     pub paused: bool,
     /// Bump while paused to run one hybrid step.
     pub step_serial: u32,
@@ -291,6 +306,23 @@ impl DispersiveController {
         } else if let Some(deep) = &mut self.deep_water_depth {
             *deep = depth;
         }
+    }
+
+    /// Lets floating bodies act on the patch, once it has a [`Self::placement`] and
+    /// [`FloatingBodyPlugin`](crate::bodies::FloatingBodyPlugin) runs. Waves reflect off their
+    /// hulls through Gilligan's obstruction map (§3.3 and §3.4), and in deep mode the hulls press
+    /// the surface down, so a moving body trails a wake by itself. [`Self::rebuild`] drops the
+    /// maps, since they have the patch's size.
+    pub fn enable_bodies(&mut self, images: &mut Assets<Image>) {
+        let map = |images: &mut Assets<Image>, value: f32| {
+            let mut image = r32_wh(self.n, self.n);
+            image.data = Some(value.to_le_bytes().repeat((self.n * self.n) as usize));
+            images.add(image)
+        };
+        self.body_maps = Some(DispersiveBodyMaps {
+            pressure_head: map(images, 0.0),
+            obstruction: map(images, 1.0),
+        });
     }
 
     pub fn cell_size(&self) -> f32 {
@@ -331,6 +363,7 @@ impl DispersiveController {
             edge_trim_cells: 12.0,
             edge_trim_alpha: 0.05,
             deep_water_depth: None,
+            body_maps: None,
             paused: false,
             step_serial: 0,
             sim_apply_serial: 0,
@@ -479,7 +512,11 @@ impl Plugin for DispersivePlugin {
             .add_plugins(ExtractComponentPlugin::<DispersiveSimRoot>::default())
             .add_plugins(ExtractComponentPlugin::<DispersiveGridImages>::default())
             .add_plugins(MaterialPlugin::<DispersiveSurfaceMaterial>::default())
-            .add_systems(PostUpdate, sync_dispersive_mesh);
+            .register_type::<DispersiveBodyMaps>()
+            .add_systems(
+                PostUpdate,
+                (sync_dispersive_mesh, sync_dispersive_footprint),
+            );
     }
 
     fn finish(&self, app: &mut App) {
@@ -507,6 +544,45 @@ impl Plugin for DispersivePlugin {
                         .after(run_dispersive_sim)
                         .in_set(crate::water::WaterLodGraphSystems::Blend),
                 );
+        }
+    }
+}
+
+/// Marks the [`BodyFootprintTarget`](crate::bodies::BodyFootprintTarget) kept over the patch.
+#[derive(Component)]
+struct DispersiveFootprint;
+
+/// Keeps a footprint target over a placed patch with body maps, so floating bodies write into
+/// them.
+fn sync_dispersive_footprint(
+    mut commands: Commands,
+    controller: Option<Res<DispersiveController>>,
+    mut existing: Query<
+        (Entity, &mut crate::bodies::BodyFootprintTarget),
+        With<DispersiveFootprint>,
+    >,
+) {
+    let target = controller.as_ref().and_then(|c| {
+        let placement = c.placement?;
+        let maps = c.body_maps.as_ref()?;
+        Some(crate::bodies::BodyFootprintTarget {
+            center: placement.center,
+            cells: UVec2::splat(c.n),
+            cell_size: c.cell_size(),
+            height_scale: 1.0,
+            pressure_head: maps.pressure_head.clone(),
+            obstruction: maps.obstruction.clone(),
+        })
+    });
+    match (target, existing.single_mut()) {
+        (Some(target), Ok((_, mut current))) => *current = target,
+        (Some(target), Err(_)) => {
+            commands.spawn((target, DispersiveFootprint));
+        }
+        (None, _) => {
+            for (entity, _) in &existing {
+                commands.entity(entity).despawn();
+            }
         }
     }
 }

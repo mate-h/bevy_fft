@@ -248,6 +248,43 @@ impl FloatingBody {
     }
 }
 
+/// A grid that bodies press down and obstruct, other than a [`WaterHeightfield`], such as a
+/// dispersive wake patch.
+///
+/// Each frame the body pass writes into the grid's two `R32Float` images, one texel per cell,
+/// with row `j` along world +Z. `pressure_head` gets the depth bodies press the surface down by,
+/// in units of `height_scale` meters, as [`WaterHeightfield::pressure_head`] does.
+/// `obstruction` gets Gilligan's obstruction map (§3.3): 1 in open water and 0 where hulls fill
+/// the cell at the waterline. Both images need storage binding.
+#[derive(Component, Clone, Debug, Reflect)]
+pub struct BodyFootprintTarget {
+    /// World X and Z of the grid centre in meters.
+    pub center: Vec2,
+    pub cells: UVec2,
+    /// Width of one cell in meters.
+    pub cell_size: f32,
+    /// Meters per unit of the grid's heights.
+    pub height_scale: f32,
+    pub pressure_head: Handle<Image>,
+    pub obstruction: Handle<Image>,
+}
+
+impl bevy::render::sync_component::SyncComponent<RenderApp> for BodyFootprintTarget {
+    type Target = Self;
+}
+
+impl bevy::render::extract_component::ExtractComponent<RenderApp> for BodyFootprintTarget {
+    type QueryData = bevy::ecs::system::lifetimeless::Read<Self>;
+    type QueryFilter = ();
+    type Out = Self;
+
+    fn extract_component(
+        item: bevy::ecs::query::QueryItem<'_, '_, Self::QueryData>,
+    ) -> Option<Self::Out> {
+        Some(item.clone())
+    }
+}
+
 /// Registers [`FloatingBody`] and its force pass, and adds
 /// [`WaterPlugin`](crate::water::WaterPlugin) if it isn't there yet.
 pub struct FloatingBodyPlugin;
@@ -263,6 +300,10 @@ impl Plugin for FloatingBodyPlugin {
             .init_resource::<FloatingBodySettings>()
             .init_resource::<FloatingBodyFrame>()
             .add_plugins(ExtractResourcePlugin::<FloatingBodyFrame>::default())
+            .add_plugins(bevy::render::extract_component::ExtractComponentPlugin::<
+                BodyFootprintTarget,
+            >::default())
+            .register_type::<BodyFootprintTarget>()
             .add_systems(Startup, setup_floating_bodies)
             .add_systems(
                 PostUpdate,
@@ -643,6 +684,7 @@ impl FromWorld for FloatingBodyPipeline {
                     storage_buffer_sized(false, None),
                     texture_storage_2d(TextureFormat::R32Float, StorageTextureAccess::WriteOnly),
                     storage_buffer_sized(false, None),
+                    texture_storage_2d(TextureFormat::R32Float, StorageTextureAccess::WriteOnly),
                 ),
             ),
         );
@@ -691,7 +733,7 @@ struct GridParams {
     cell_size: f32,
     height_scale: f32,
     relaxation: f32,
-    _pad: f32,
+    has_obstruction: u32,
 }
 
 /// One shallow water grid that bodies press down, with its volume sums.
@@ -717,6 +759,8 @@ struct FloatingBodyBindGroup {
     grids: Vec<GridPass>,
     /// Volume sum buffers and grid uniforms, kept per grid entity while its size stays.
     grid_buffers: std::collections::HashMap<Entity, GridBuffers>,
+    /// Bound as the obstruction map of grids without one.
+    placeholder: Option<TextureView>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -730,6 +774,7 @@ fn prepare_floating_bodies(
     images: Res<RenderAssets<GpuImage>>,
     lod_gpu: Res<WaterLodGpu>,
     heightfields: Query<(Entity, &WaterHeightfield)>,
+    footprint_targets: Query<(Entity, &BodyFootprintTarget)>,
     mut bind_group: ResMut<FloatingBodyBindGroup>,
 ) {
     let state = &mut *bind_group;
@@ -742,20 +787,63 @@ fn prepare_floating_bodies(
     // Grids with a pressure head get their footprints rebuilt every frame, even without bodies,
     // so a body that leaves takes its dent with it.
     let grid_layout = pipeline_cache.get_bind_group_layout(&pipeline.grid_layout);
-    state.grid_buffers.retain(|e, _| heightfields.contains(*e));
+    let mut targets = Vec::new();
     for (entity, heightfield) in &heightfields {
-        let Some(pressure) = heightfield
-            .pressure_head
-            .as_ref()
-            .and_then(|handle| images.get(handle))
-        else {
+        if let Some(pressure) = &heightfield.pressure_head {
+            targets.push((
+                entity,
+                heightfield.center,
+                heightfield.cells,
+                heightfield.cell_size,
+                heightfield.height_scale,
+                pressure.clone(),
+                None,
+            ));
+        }
+    }
+    for (entity, target) in &footprint_targets {
+        targets.push((
+            entity,
+            target.center,
+            target.cells,
+            target.cell_size,
+            target.height_scale,
+            target.pressure_head.clone(),
+            Some(target.obstruction.clone()),
+        ));
+    }
+    state
+        .grid_buffers
+        .retain(|e, _| targets.iter().any(|t| t.0 == *e));
+    let placeholder = state.placeholder.get_or_insert_with(|| {
+        device
+            .create_texture(&TextureDescriptor {
+                label: Some("floating_body_no_obstruction"),
+                size: Extent3d::default(),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::R32Float,
+                usage: TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&TextureViewDescriptor::default())
+    });
+    for (entity, center, cells, cell_size, height_scale, pressure, obstruction) in targets {
+        let Some(pressure) = images.get(&pressure) else {
             continue;
         };
-        let cells = heightfield.cells;
-        let per_cell = |label: &'static str| {
+        let obstruction = match &obstruction {
+            Some(handle) => match images.get(handle) {
+                Some(image) => Some(&image.texture_view),
+                None => continue,
+            },
+            None => None,
+        };
+        let per_cell = |label: &'static str, lanes: u32| {
             device.create_buffer(&BufferDescriptor {
                 label: Some(label),
-                size: (cells.x * cells.y).max(1) as u64 * 4,
+                size: (cells.x * cells.y).max(1) as u64 * 4 * lanes as u64,
                 usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             })
@@ -769,20 +857,21 @@ fn prepare_floating_bodies(
                 entity,
                 GridBuffers {
                     cells,
-                    displaced: per_cell("floating_body_displaced_volume"),
-                    previous: per_cell("floating_body_previous_head"),
+                    // Displaced volume, then waterline area, per cell.
+                    displaced: per_cell("floating_body_displaced_volume", 2),
+                    previous: per_cell("floating_body_previous_head", 1),
                     params: UniformBuffer::default(),
                 },
             );
         }
         let buffers = state.grid_buffers.get_mut(&entity).unwrap();
         buffers.params.set(GridParams {
-            center: heightfield.center,
+            center,
             cells,
-            cell_size: heightfield.cell_size,
-            height_scale: heightfield.height_scale,
+            cell_size,
+            height_scale,
             relaxation: frame.pressure_relaxation,
-            _pad: 0.0,
+            has_obstruction: u32::from(obstruction.is_some()),
         });
         buffers.params.write_buffer(&device, &queue);
         let Some(params) = buffers.params.binding() else {
@@ -796,6 +885,7 @@ fn prepare_floating_bodies(
                 buffers.displaced.as_entire_binding(),
                 &pressure.texture_view,
                 buffers.previous.as_entire_binding(),
+                obstruction.unwrap_or(placeholder),
             )),
         );
         state.grids.push(GridPass {

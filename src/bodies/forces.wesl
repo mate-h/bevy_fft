@@ -280,9 +280,12 @@ struct Grid {
     height_scale: f32,
     /// Share of the way the head moves toward its new value each frame.
     relaxation: f32,
-    _pad: f32,
+    /// 1 when `obstruction_out` is the grid's own map, 0 for the placeholder.
+    has_obstruction: u32,
 }
 
+/// Fixed-point unit of the waterline area sums, in square meters.
+const AREA_UNIT: f32 = 1.0e-4;
 /// Fixed-point unit of the volume sums, in cubic meters.
 const VOLUME_UNIT: f32 = 1.0e-6;
 
@@ -291,6 +294,9 @@ const VOLUME_UNIT: f32 = 1.0e-6;
 @group(1) @binding(2) var pressure_out: texture_storage_2d<r32float, write>;
 /// The head of the previous frame per cell, in the grid's height units.
 @group(1) @binding(3) var<storage, read_write> previous_head: array<f32>;
+/// Obstruction per cell (Gilligan §3.3): 1 in open water, 0 where a hull fills the cell at the
+/// waterline. Waves multiplied by it reflect off hulls.
+@group(1) @binding(4) var obstruction_out: texture_storage_2d<r32float, write>;
 
 @compute @workgroup_size(64, 1, 1)
 fn body_footprints(
@@ -321,7 +327,14 @@ fn body_footprints(
             continue;
         }
         let cell = vec2<u32>(g);
-        atomicAdd(&displaced[cell.y * grid.cells.x + cell.x], u32(round(volume / VOLUME_UNIT)));
+        let index = cell.y * grid.cells.x + cell.x;
+        atomicAdd(&displaced[index], u32(round(volume / VOLUME_UNIT)));
+        // A voxel the surface cuts through, or touches at its top, puts its horizontal area on the
+        // waterline. The second half of the buffer sums that area per cell.
+        if (water.height - (p.y - 0.5 * s)) / s <= 1.0 {
+            let n_cells = grid.cells.x * grid.cells.y;
+            atomicAdd(&displaced[n_cells + index], u32(round(s * s / AREA_UNIT)));
+        }
     }
 }
 
@@ -339,4 +352,10 @@ fn resolve_pressure(@builtin(global_invocation_id) gid: vec3<u32>) {
     let head = mix(previous_head[index], target_head, grid.relaxation);
     previous_head[index] = head;
     textureStore(pressure_out, gid.xy, vec4<f32>(head, 0.0, 0.0, 0.0));
+    if grid.has_obstruction != 0u {
+        let n_cells = grid.cells.x * grid.cells.y;
+        let area = f32(atomicLoad(&displaced[n_cells + index])) * AREA_UNIT;
+        let open = 1.0 - clamp(area / (grid.cell_size * grid.cell_size), 0.0, 1.0);
+        textureStore(obstruction_out, gid.xy, vec4<f32>(open, 0.0, 0.0, 0.0));
+    }
 }

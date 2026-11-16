@@ -23,7 +23,8 @@ struct DispersiveLodParams {
     cells: u32,
     blend_cells: f32,
     blend: u32,
-    _pad: u32,
+    /// 1 when `pressure` holds the head bodies press the patch down by.
+    has_pressure: u32,
     /// Hull position this frame and last frame, in cells.
     hull: vec2<f32>,
     hull_prev: vec2<f32>,
@@ -49,6 +50,24 @@ struct DispersiveLodParams {
 @group(0) @binding(9) var bed: texture_2d<f32>;
 @group(0) @binding(10) var drift_out: texture_storage_2d_array<rg32float, write>;
 @group(0) @binding(11) var base_drift: texture_2d_array<f32>;
+/// Head in meters that floating bodies press the surface down by, when `has_pressure` is 1.
+@group(0) @binding(12) var pressure: texture_2d<f32>;
+
+/// Bilinear pressure head at grid coordinate `g`.
+fn pressure_at(g: vec2<f32>) -> f32 {
+    if params.has_pressure == 0u {
+        return 0.0;
+    }
+    let hi = vec2<i32>(i32(params.cells) - 1);
+    let x = g - 0.5;
+    let i0 = vec2<i32>(floor(x));
+    let f = x - floor(x);
+    let a = textureLoad(pressure, clamp(i0, vec2(0), hi), 0).r;
+    let b = textureLoad(pressure, clamp(i0 + vec2(1, 0), vec2(0), hi), 0).r;
+    let c = textureLoad(pressure, clamp(i0 + vec2(0, 1), vec2(0), hi), 0).r;
+    let d = textureLoad(pressure, clamp(i0 + vec2(1, 1), vec2(0), hi), 0).r;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
 
 /// Depth below which velocity is taken from a floor depth, so flux over nearly dry cells does not
 /// turn into runaway speeds.
@@ -133,7 +152,9 @@ fn dispersive_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     let eta = bd.x + bd.y;
     let st = state_at(g);
     let rise = -((state_at(g + dx).y - state_at(g - dx).y) + (state_at(g + dz).z - state_at(g - dz).z)) * inv;
-    let flow = vec4<f32>(st.yz / max(st.x, MIN_FLOW_DEPTH), rise, 0.0);
+    // The flow lane `.w` carries the pressure head, so body forces read the surface the water
+    // would have without the bodies.
+    let flow = vec4<f32>(st.yz / max(st.x, MIN_FLOW_DEPTH), rise, pressure_at(g));
     let base_v = textureLoad(base_flow, gid.xy, slice, 0);
 
     let base = textureLoad(base_displacement, gid.xy, slice, 0);

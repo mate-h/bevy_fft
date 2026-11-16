@@ -5,13 +5,17 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use bevy::app::SubApp;
 use bevy::ecs::world::FromWorld;
-use bevy::render::render_resource::binding_types::{texture_storage_2d, uniform_buffer};
+use bevy::render::render_resource::binding_types::{
+    texture_2d, texture_storage_2d, uniform_buffer,
+};
 use bevy::render::render_resource::encase::internal::{WriteInto, Writer};
 use bevy::render::render_resource::{
     BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
     BindingResource, Buffer, BufferBinding, BufferDescriptor, BufferUsages,
-    CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor, PipelineCache,
-    ShaderStages, ShaderType, StorageTextureAccess, TextureFormat,
+    CachedComputePipelineId, ComputePassDescriptor, ComputePipelineDescriptor, Extent3d,
+    PipelineCache, ShaderStages, ShaderType, StorageTextureAccess, TextureDescriptor,
+    TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
+    TextureViewDescriptor,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::{
@@ -57,6 +61,11 @@ pub struct DispersiveSimUniform {
     pub pointer_oy: f32,
     pub edge_trim_cells: f32,
     pub edge_trim_alpha: f32,
+    /// 1 when the body pressure head and obstruction maps are bound.
+    pub body_maps: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
 }
 
 fn write_uniform<T: ShaderType + WriteInto>(queue: &RenderQueue, buffer: &Buffer, v: &T) {
@@ -149,6 +158,10 @@ fn build_dispersive_sim_uniform(
         pointer_oy: controller.pointer_prev.y,
         edge_trim_cells: controller.edge_trim_cells,
         edge_trim_alpha: controller.edge_trim_alpha,
+        body_maps: u32::from(controller.body_maps.is_some()),
+        _pad0: 0,
+        _pad1: 0,
+        _pad2: 0,
     }
 }
 
@@ -229,6 +242,8 @@ impl FromWorld for DispersivePipelines {
                 texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
                 texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
                 texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadWrite),
+                texture_2d(TextureSampleType::Float { filterable: false }),
+                texture_2d(TextureSampleType::Float { filterable: false }),
             ),
         );
         let data_layout = BindGroupLayoutDescriptor::new("dispersive_data_layout", &data_entries);
@@ -318,6 +333,8 @@ pub struct DispersiveGpuResources {
     /// Last applied [`DispersiveController::step_serial`] after a successful paused step.
     pub last_step_serial: AtomicU32,
     pub last_apply_serial: u32,
+    /// Bound in place of the body maps while the patch has none.
+    pub no_body_map: Option<TextureView>,
 }
 
 impl Default for DispersiveGpuResources {
@@ -331,6 +348,7 @@ impl Default for DispersiveGpuResources {
             last_n: 0,
             last_init_serial: AtomicU32::new(0),
             last_step_serial: AtomicU32::new(0),
+            no_body_map: None,
             last_apply_serial: 0,
         }
     }
@@ -402,6 +420,23 @@ pub fn prepare_dispersive_gpu(
         | gpu.fft_settings_buffer.is_none()
         | gpu.dispersive_sim_buffer.is_none();
     gpu.ensure_uniform_buffers(&render_device, n, n_changed, need);
+    let no_body_map = gpu
+        .no_body_map
+        .get_or_insert_with(|| {
+            render_device
+                .create_texture(&TextureDescriptor {
+                    label: Some("dispersive_no_body_map"),
+                    size: Extent3d::default(),
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: TextureDimension::D2,
+                    format: TextureFormat::R32Float,
+                    usage: TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&TextureViewDescriptor::default())
+        })
+        .clone();
 
     let Some(fs) = gpu.fft_settings_buffer.as_ref() else {
         return;
@@ -514,6 +549,17 @@ pub fn prepare_dispersive_gpu(
     let Some(bvp) = gpu_imgs.get(&dimg.bar_vel_prev) else {
         return;
     };
+    let body_maps = match &controller.body_maps {
+        Some(maps) => match (
+            gpu_imgs.get(&maps.pressure_head),
+            gpu_imgs.get(&maps.obstruction),
+        ) {
+            (Some(p), Some(o)) => Some((p.texture_view.clone(), o.texture_view.clone())),
+            _ => return,
+        },
+        None => None,
+    };
+    let (pressure_view, obstruction_view) = body_maps.unwrap_or((no_body_map.clone(), no_body_map));
 
     let common_layout = pipeline_cache.get_bind_group_layout(&layouts.common);
     let dis_layout = pipeline_cache.get_bind_group_layout(&pipelines.data_layout);
@@ -572,6 +618,8 @@ pub fn prepare_dispersive_gpu(
                 texture_views.12,
                 texture_views.13,
                 texture_views.14,
+                &pressure_view,
+                &obstruction_view,
             )),
         )
     };
@@ -883,6 +931,6 @@ mod layout_tests {
         let n = DispersiveSimUniform::min_size().get();
         assert_eq!(n % 16, 0, "uniform size {n} must be 16-byte aligned");
         // Scalar payload plus end padding for the WGSL uniform size rule.
-        assert_eq!(n, 112, "expected 112-byte uniform, got {n}");
+        assert_eq!(n, 128, "expected 128-byte uniform, got {n}");
     }
 }
