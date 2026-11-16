@@ -53,6 +53,8 @@ cargo run --example dispersive --features free_camera
 cargo run --example wake --features free_camera
 ```
 
+The `beach` example runs its shallow water grid with 2 m cells. Set `BEACH_CELL_SIZE=1` for the 1 m grid that matches the terrain data, at about a third more GPU time per frame. `BEACH_TRACE_STEPS` sets the water's screen-space trace steps, and `BEACH_CAMERA=x,y,z,tx,ty,tz` starts the camera elsewhere on the map.
+
 The `fft` example drives `FftSchedule::ForwardThenInverse`. Data starts in spatial A, moves to spectrum C for a radial band-pass tuned with the sliders at the top-left, then returns through IFFT to B. The `ocean` example uses `FftSchedule::Inverse` with `OceanPlugin`: a compute pass fills spectrum C each frame, then the same IFFT and resolve path writes `spatial_output` for the ocean material.
 
 ## A few types worth knowing
