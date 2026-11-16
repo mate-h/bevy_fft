@@ -13,7 +13,7 @@ pub use crate::bodies::{
 pub use crate::dispersive::{
     DispersiveController, DispersiveGridImages, DispersiveLodBlend, DispersiveMaterialUniform,
     DispersivePlacement, DispersivePlugin, DispersiveSimRoot, DispersiveSurfaceExtension,
-    DispersiveSurfaceMaterial, DispersiveSurfaceTag,
+    DispersiveSurfaceMaterial, DispersiveSurfaceTag, deep_mode_suits, kelvin_wavelength,
 };
 pub use crate::ewave::{
     EwaveController, EwaveGridImages, EwaveMaterialUniform, EwavePlugin, EwaveSimRoot,

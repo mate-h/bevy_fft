@@ -257,7 +257,7 @@ pub struct DispersiveController {
     /// eWave. Kelvin wakes and their angle come out right at any boat speed, and each step skips
     /// the decomposition's diffusion passes, the bulk step, and three of the four Airy passes.
     /// `None` runs the full hybrid, which shallow water needs for shoaling and run-up.
-    /// [`deep_mode_suits`] says which to pick.
+    /// [`Self::choose_mode`] picks one from the depth under the patch.
     pub deep_water_depth: Option<f32>,
     pub paused: bool,
     /// Bump while paused to run one hybrid step.
@@ -278,6 +278,21 @@ pub struct DispersiveController {
 
 impl DispersiveController {
     /// Width of one cell in meters.
+    /// Picks Airy-only deep mode or the full hybrid for water `depth` meters deep under the patch
+    /// and wake waves `wavelength` meters long, such as [`kelvin_wavelength`] gives for the boat's
+    /// speed. Deep mode starts once the water is 0.6 wavelengths deep and the hybrid takes over
+    /// again below 0.4, so a patch near the threshold doesn't flip every frame. Call it each frame.
+    pub fn choose_mode(&mut self, depth: f32, wavelength: f32) {
+        let ratio = depth / wavelength.max(1e-3);
+        if ratio >= 0.6 {
+            self.deep_water_depth = Some(depth);
+        } else if ratio < 0.4 {
+            self.deep_water_depth = None;
+        } else if let Some(deep) = &mut self.deep_water_depth {
+            *deep = depth;
+        }
+    }
+
     pub fn cell_size(&self) -> f32 {
         self.tile_world / self.n.max(1) as f32
     }
@@ -507,5 +522,25 @@ mod tests {
         assert!((wavelength - 23.06).abs() < 0.05, "{wavelength}");
         assert!(deep_mode_suits(12.0, wavelength));
         assert!(!deep_mode_suits(8.0, wavelength));
+    }
+
+    #[test]
+    fn choose_mode_switches_with_hysteresis() {
+        let mut images = Assets::<Image>::default();
+        let mut world = World::new();
+        let mut controller = DispersiveController::spawn(&mut world.commands(), &mut images, 64);
+        let wavelength = 20.0;
+        controller.choose_mode(100.0, wavelength);
+        assert_eq!(controller.deep_water_depth, Some(100.0));
+        // Between 0.4 and 0.6 wavelengths it stays deep, following the depth.
+        controller.choose_mode(10.0, wavelength);
+        assert_eq!(controller.deep_water_depth, Some(10.0));
+        controller.choose_mode(7.0, wavelength);
+        assert_eq!(controller.deep_water_depth, None);
+        // And stays hybrid until the water is clearly deep again.
+        controller.choose_mode(10.0, wavelength);
+        assert_eq!(controller.deep_water_depth, None);
+        controller.choose_mode(12.0, wavelength);
+        assert_eq!(controller.deep_water_depth, Some(12.0));
     }
 }

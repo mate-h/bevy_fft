@@ -629,13 +629,36 @@ fn bar_gather_cell_q(@builtin(global_invocation_id) id: vec3u) {
     textureStore(d_bar, id.xy, vec4(h, qx, qy, 0.0));
 }
 
+/// Draft of the brush's hull in meters at cell `id`, in deep mode. The brush presses the surface
+/// down like a moving hull instead of adding water: the head joins the height the Airy step
+/// drives the flux with, so water flows away from under it and a moving brush trails a Kelvin
+/// wake, while the water volume stays the same.
+fn brush_pressure_head(id: vec2u) -> f32 {
+    if ((sim.spectral_flags & SPECTRAL_DEEP) == 0u || sim.brush_on == 0u) { return 0.0; }
+    let position = vec2f(f32(id.x), f32(id.y));
+    let a = vec2f(sim.pointer_ox, sim.pointer_oy);
+    let b = vec2f(sim.pointer_x, sim.pointer_y);
+    let dist = point_to_segment_distance(position, a, b);
+    let radius = max(sim.brush_radius, 1.0);
+    if (dist >= radius) { return 0.0; }
+    let t = clamp(1.0 - dist / radius, 0.0, 1.0);
+    return 0.5 * sim.brush_strength * t * t * (3.0 - 2.0 * t);
+}
+
 @compute @workgroup_size(16, 16, 1)
 fn pack_h_t_to_a(@builtin(global_invocation_id) id: vec3u) {
     let n = sim.n;
     if (id.x >= n || id.y >= n) { return; }
     let t = textureLoad(d_tilde, id.xy);
-    // Alg. 2: FFT the un-staggered average (h̃^{t−Δt/2} + h̃^{t+Δt/2}) / 2.
-    let h_avg = 0.5 * (t.r + t.a);
+    // Alg. 2: FFT the un-staggered average (h̃^{t−Δt/2} + h̃^{t+Δt/2}) / 2. The hybrid rebuilds
+    // q̃ from scratch every step, so the average is harmless there. Deep mode carries q̃ over,
+    // and the average's half-step lag pumps energy into every wave, so it uses the current h̃:
+    // q from h, then h from the new q, which is stable for ω Δt < 2. Deep mode also adds the
+    // brush's pressure head, which `unpack_b_re_to_tilde_h` takes back out.
+    var h_avg = 0.5 * (t.r + t.a);
+    if ((sim.spectral_flags & SPECTRAL_DEEP) != 0u) {
+        h_avg = t.r + brush_pressure_head(id.xy);
+    }
     let z = vec4f(0.0, 0.0, 0.0, 0.0);
     textureStore(buffer_a_re, id.xy, vec4(h_avg, 0.0, 0.0, 0.0));
     textureStore(buffer_a_im, id.xy, z);
@@ -665,7 +688,8 @@ fn unpack_b_re_to_tilde_h(@builtin(global_invocation_id) id: vec3u) {
     let n = sim.n;
     if (id.x >= n || id.y >= n) { return; }
     let t = textureLoad(d_tilde, id.xy);
-    var h = textureLoad(buffer_b_re, id.xy).x;
+    // The band-limited height, without the brush's pressure head, stays as h̃.
+    var h = textureLoad(buffer_b_re, id.xy).x - brush_pressure_head(id.xy);
     if (!is_finite_f(h)) { h = 0.0; }
     textureStore(d_tilde, id.xy, vec4(h, t.g, t.b, t.a));
 }
@@ -876,15 +900,21 @@ fn omega_disp(g: f32, k: f32, hbar: f32, dx: f32) -> f32 {
 }
 
 // Half-cell shift e^{-i k·Δ/2} on ĥ for x (qx) or y (qy) derivative (paper Sec. 4.3).
+// Deep mode carries q̃ from step to step, so it needs ĥ on the +x and +y faces where the merge
+// reads q: e^{+i k Δ/2} with the forward FFT's e^{-i k x}. The shift the hybrid uses lands half a
+// cell the other way. A whole-cell offset between q̃ and the merge's divergence makes a carried q̃
+// grow without bound, while the hybrid rebuilds q̃ every step and hides it.
 fn h_phase_shift_x(hre: f32, him: f32, kx: f32) -> vec2f {
-    let th = kx * sim.dx * 0.5;
+    var th = kx * sim.dx * 0.5;
+    if ((sim.spectral_flags & SPECTRAL_DEEP) != 0u) { th = -th; }
     let ct = cos(th);
     let st = sin(th);
     return vec2f(hre * ct + him * st, him * ct - hre * st);
 }
 
 fn h_phase_shift_y(hre: f32, him: f32, ky: f32) -> vec2f {
-    let th = ky * sim.dx * 0.5;
+    var th = ky * sim.dx * 0.5;
+    if ((sim.spectral_flags & SPECTRAL_DEEP) != 0u) { th = -th; }
     let ct = cos(th);
     let st = sin(th);
     return vec2f(hre * ct + him * st, him * ct - hre * st);
@@ -1377,7 +1407,10 @@ fn point_to_segment_distance(p: vec2f, s0: vec2f, s1: vec2f) -> f32 {
 @compute @workgroup_size(16, 16, 1)
 fn brush_flow_impulse(@builtin(global_invocation_id) id: vec3u) {
     let n = sim.n;
-    if (id.x >= n || id.y >= n || sim.brush_on == 0u) { return; }
+    // Deep mode presses the surface through `brush_pressure_head` instead of adding water.
+    if (id.x >= n || id.y >= n || sim.brush_on == 0u || (sim.spectral_flags & SPECTRAL_DEEP) != 0u) {
+        return;
+    }
     let position = vec2f(f32(id.x), f32(id.y));
     let a = vec2f(sim.pointer_ox, sim.pointer_oy);
     let b = vec2f(sim.pointer_x, sim.pointer_y);
@@ -1399,7 +1432,9 @@ fn brush_flow_impulse(@builtin(global_invocation_id) id: vec3u) {
 @compute @workgroup_size(16, 16, 1)
 fn brush_tilde_wake(@builtin(global_invocation_id) id: vec3u) {
     let n = sim.n;
-    if (id.x >= n || id.y >= n || sim.brush_on == 0u) { return; }
+    if (id.x >= n || id.y >= n || sim.brush_on == 0u || (sim.spectral_flags & SPECTRAL_DEEP) != 0u) {
+        return;
+    }
     let position = vec2f(f32(id.x), f32(id.y));
     let a = vec2f(sim.pointer_ox, sim.pointer_oy);
     let b = vec2f(sim.pointer_x, sim.pointer_y);

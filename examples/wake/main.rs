@@ -5,8 +5,8 @@
 //! patch. A scripted disturbance circles the patch like a boat. Turn it off in the panel and drag
 //! with the left mouse button to make your own wake.
 //!
-//! The patch absorbs waves at its edges with Tessendorf's trim. Following the boat is a separate
-//! step.
+//! The patch runs in Airy-only deep mode, as open-sea wakes need, and absorbs waves at its edges
+//! with Tessendorf's trim. Following the boat is a separate step.
 
 use bevy::{
     anti_alias::fxaa::Fxaa,
@@ -50,6 +50,8 @@ const PATCH_WORLD: f32 = 256.0;
 const BOAT_RADIUS: f32 = 55.0;
 /// Speed in m/s of the scripted boat.
 const BOAT_SPEED: f32 = 6.0;
+/// Depth in meters of the open sea under the patch.
+const OPEN_SEA_DEPTH: f32 = 100.0;
 
 fn main() {
     App::new()
@@ -150,6 +152,9 @@ fn setup(
     controller.brush_radius = 6.0;
     controller.brush_strength = 1.2;
     controller.placement = Some(DispersivePlacement::default());
+    // Open sea: Airy-only deep mode, so the wake has deep-water dispersion and its Kelvin angle.
+    // The brush then presses the surface down like a hull instead of adding water.
+    controller.choose_mode(OPEN_SEA_DEPTH, kelvin_wavelength(BOAT_SPEED, controller.g));
     commands.insert_resource(controller);
 
     commands.spawn((
