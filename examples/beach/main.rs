@@ -255,6 +255,17 @@ fn log_lag_repro(
     eprintln!("lag frame {n} cam {cam:?} slice0 {slice:?}");
 }
 
+fn start_camera() -> Transform {
+    let values: Vec<f32> = std::env::var("BEACH_CAMERA")
+        .ok()
+        .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+        .unwrap_or_default();
+    if let [x, y, z, tx, ty, tz] = values[..] {
+        return Transform::from_xyz(x, y, z).looking_at(Vec3::new(tx, ty, tz), Vec3::Y);
+    }
+    Transform::from_xyz(-480.0, 30.0, 275.0).looking_at(Vec3::new(-250.0, 0.0, 200.0), Vec3::Y)
+}
+
 fn setup(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -346,9 +357,9 @@ fn setup(
         .spawn((
             Camera3d::default(),
             // Just offshore of the surf buoy, looking along the shore, so the fine slices and
-            // the near tiles cover the waterline.
-            Transform::from_xyz(-480.0, 30.0, 275.0)
-                .looking_at(Vec3::new(-250.0, 0.0, 200.0), Vec3::Y),
+            // the near tiles cover the waterline. `BEACH_CAMERA=x,y,z,tx,ty,tz` places it
+            // elsewhere, for screenshots of other parts of the map.
+            start_camera(),
             FreeCamera {
                 walk_speed: 60.0,
                 run_speed: 400.0,
