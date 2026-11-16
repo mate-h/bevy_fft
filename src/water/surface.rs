@@ -55,6 +55,9 @@ pub struct WaterOpticsUniform {
     pub debug_view: u32,
     /// Nonzero composites water over the captured opaque scene.
     pub enabled: u32,
+    /// March steps of each screen-space refraction and reflection ray, before five bisection
+    /// steps refine a hit. Fewer steps are cheaper and miss thin occluders.
+    pub trace_steps: u32,
 }
 
 impl Default for WaterOpticsUniform {
@@ -68,6 +71,7 @@ impl Default for WaterOpticsUniform {
             ssr_strength: 1.0,
             debug_view: 0,
             enabled: 0,
+            trace_steps: 12,
         }
     }
 }

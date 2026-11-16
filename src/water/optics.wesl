@@ -26,6 +26,7 @@ struct WaterOpticsUniform {
     ssr_strength: f32,
     debug_view: u32,
     enabled: u32,
+    trace_steps: u32,
 }
 @group(constants::MATERIAL_BIND_GROUP) @binding(106) var opaque_depth: texture_depth_2d;
 @group(constants::MATERIAL_BIND_GROUP) @binding(107) var<uniform> optics: WaterOpticsUniform;
@@ -131,8 +132,7 @@ fn behind_scene(point: vec3<f32>, size: vec2<f32>) -> bool {
     return depth > 0.0 && depth >= point.z;
 }
 
-/// March and bisection steps of the screen-space traces.
-const TRACE_STEPS: u32 = 12u;
+/// Bisection steps that refine a bracketed crossing. `optics.trace_steps` sets the march steps.
 const TRACE_REFINE_STEPS: u32 = 5u;
 
 // Bracket a crossing of the opaque depth surface, then refine it. Hits outside the screen,
@@ -141,8 +141,9 @@ fn trace_scene(origin: vec3<f32>, direction: vec3<f32>, limit: f32, reflection: 
     var result: RayHit;
     let ray = screen_ray(origin, direction);
     var previous = 0.025;
-    for (var i = 1u; i <= TRACE_STEPS; i++) {
-        let fraction = f32(i) / f32(TRACE_STEPS);
+    let steps = max(optics.trace_steps, 1u);
+    for (var i = 1u; i <= steps; i++) {
+        let fraction = f32(i) / f32(steps);
         let distance = 0.025 + fraction * fraction * limit;
         let point = screen_point(ray, distance);
         if point.z < 0.0 || !on_screen(point, ray.size) { break; }

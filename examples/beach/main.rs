@@ -436,6 +436,13 @@ fn spawn_surface_when_ready(
                         Ok("refraction") => 4,
                         _ => 0,
                     },
+                    // Six march steps look the same as the default twelve from the surf view
+                    // and save about 1 ms of the water pass at 2560x1440. `BEACH_TRACE_STEPS`
+                    // overrides it, as does the panel.
+                    trace_steps: std::env::var("BEACH_TRACE_STEPS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(6),
                     ..default()
                 },
                 settings: WaterSurfaceUniform {
@@ -557,6 +564,7 @@ fn beach_panel(
         if let Some((id, mut optics)) = water_view {
             let old_view = optics.debug_view;
             let old_refraction = optics.refraction_strength;
+            let old_steps = optics.trace_steps;
             egui::ComboBox::from_label("Water view")
                 .selected_text(
                     [
@@ -584,7 +592,11 @@ fn beach_panel(
             ui.add(
                 egui::Slider::new(&mut optics.refraction_strength, 0.0..=1.0).text("Refraction"),
             );
-            if old_view != optics.debug_view || old_refraction != optics.refraction_strength {
+            ui.add(egui::Slider::new(&mut optics.trace_steps, 2..=24).text("Trace steps"));
+            if old_view != optics.debug_view
+                || old_refraction != optics.refraction_strength
+                || old_steps != optics.trace_steps
+            {
                 water_materials.get_mut(id).unwrap().extension.optics = optics;
             }
         }
