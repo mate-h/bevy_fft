@@ -2,7 +2,7 @@
 //! topobathy.
 //!
 //! The ground is a 2 km square of 1 m LiDAR elevation and bathymetry, drawn by bevy_terrain. A
-//! shallow water grid with 1 m cells covers the same square and starts from the same heights, so
+//! shallow water grid with 2 m cells covers the same square and starts from the same heights, so
 //! the sea fills the measured bed and the waterline follows the island's coast, bay, and river
 //! mouth. The grid writes into the shared water LOD data, so the water quadtree shows the surf and
 //! the open sea past the map with one material, and the grid fades into the ocean waves along its
@@ -17,8 +17,8 @@
 //! the band has nothing to do. A PML behind the band absorbs the backwash. The panel switches the
 //! edges to walls or drains for comparison. Drag with the left mouse button to add water.
 //!
-//! `BEACH_CELL_SIZE=2` runs the grid with 2 m cells. At 2560x1440 on an M5 that takes the frame
-//! from about 43 to 33 ms, with softer detail in the surf.
+//! The grid runs with 2 m cells. `BEACH_CELL_SIZE=1` matches the 1 m data for finer surf, at about
+//! 43 instead of 33 ms per frame at 2560x1440 on an M5.
 //!
 //! The elevation and class rasters come from the matching 1 m shoreline square in
 //! `~/Downloads/hawaii_topobathy`. Prepare the CC0 texture arrays, class map, sand capillary mask,
@@ -83,9 +83,8 @@ const TERRAIN_SIDE: f32 = 2048.0;
 /// Finest LOD in the tile set.
 const TERRAIN_VIEW_LOD: u32 = 3;
 
-/// Shallow water cell width in meters, 1 unless `BEACH_CELL_SIZE` sets it. Two meter cells run
-/// the solver and everything sized by its grid on a quarter of the cells, at the cost of shorter
-/// waves in the surf.
+/// Shallow water cell width in meters, 2 unless `BEACH_CELL_SIZE` sets it. One meter cells match
+/// the bed data and resolve shorter waves in the surf, with four times the cells to solve.
 fn cell_size() -> f32 {
     static CELL: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
     *CELL.get_or_init(|| {
@@ -93,7 +92,7 @@ fn cell_size() -> f32 {
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|v| *v >= 0.25 && *v <= 8.0)
-            .unwrap_or(1.0)
+            .unwrap_or(2.0)
     })
 }
 
