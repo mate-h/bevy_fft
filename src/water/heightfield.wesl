@@ -242,13 +242,9 @@ fn water_heightfield(@builtin(global_invocation_id) gid: vec3<u32>) {
     let xz = lod_texel_world(lod, gid.xy, slice);
     let n = vec2<f32>(params.cells);
     let g = (xz - params.center) / params.cell_size + 0.5 * n;
-    // This pass is write-only. A texel left untouched would keep the previous frame's value,
-    // which was written for the previous slice centres, so the outer rings would trail the camera.
+    // The base textures are a copy of the outputs taken just before this pass, so a texel outside
+    // the grid already holds this frame's base value and is left alone.
     if any(g < vec2(0.0)) || any(g > n) {
-        textureStore(displacement_out, gid.xy, slice, textureLoad(base_displacement, gid.xy, slice, 0));
-        textureStore(foam_out, gid.xy, slice, textureLoad(base_foam, gid.xy, slice, 0));
-        textureStore(flow_out, gid.xy, slice, textureLoad(base_flow, gid.xy, slice, 0));
-        textureStore(drift_out, gid.xy, slice, textureLoad(base_drift, gid.xy, slice, 0));
         return;
     }
 

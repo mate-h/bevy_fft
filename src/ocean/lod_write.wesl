@@ -172,19 +172,35 @@ fn ocean_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     var det_mean = 1.0;
     var det_variance = 0.0;
     let count = min(params.cascade_count, 4u);
+    // The near foam reads the point Jacobian and the far foam the footprint statistics. A slice
+    // that uses only one of them skips the other's taps, and a cascade that neither shows nor
+    // breaks in this slice is not read at all. Coarse slices would otherwise make large-stride
+    // wrapped loads that all miss the cache. `texel` is uniform per slice, so these branches are.
+    let far_weight = smoothstep(params.far_foam_texel, 2.0 * params.far_foam_texel, texel);
+    let use_near = far_weight < 1.0;
+    let use_far = far_weight > 0.0;
     for (var i = 0u; i < count; i++) {
-        let dims = cascade_dims(i);
-        let taps = wrap_taps(dims, xz / params.cascade_tile_sizes[i]);
         let w = cascade_weight(i, texel);
+        let breaking = params.cascade_breaking[i];
+        let near_breaking = use_near && breaking > 0.0;
+        if w <= 0.0 && !near_breaking && !(use_far && breaking > 0.0) {
+            continue;
+        }
+        let dims = cascade_dims(i);
+        let per_meter = vec2<f32>(dims) / params.cascade_tile_sizes[i];
+        if use_far && breaking > 0.0 {
+            let level = log2(max(texel * per_meter.x, 1.0));
+            let stats = jacobian_cascade(i, xz / params.cascade_tile_sizes[i], level) * breaking;
+            det_mean += stats.x;
+            det_variance += max(stats.y - stats.x * stats.x, 0.0);
+        }
+        if w <= 0.0 && !near_breaking {
+            continue;
+        }
+        let taps = wrap_taps(dims, xz / params.cascade_tile_sizes[i]);
         let d = displacement_cascade(i, taps);
         let f = foam_cascade(i, taps);
-        let per_meter = vec2<f32>(dims) / params.cascade_tile_sizes[i];
-        let breaking = params.cascade_breaking[i];
         jacobian += vec4<f32>(d.d_dx.a, d.d_dy.a, f.d_dx.g, f.d_dy.g) * per_meter.xyxy * breaking;
-        let level = log2(max(texel * per_meter.x, 1.0));
-        let stats = jacobian_cascade(i, xz / params.cascade_tile_sizes[i], level) * breaking;
-        det_mean += stats.x;
-        det_variance += max(stats.y - stats.x * stats.x, 0.0);
         if w > 0.0 {
             disp += d.value * w;
             change += (d.value - previous_cascade(i, taps)) * w;
@@ -202,7 +218,6 @@ fn ocean_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     // threshold, for a normally distributed determinant.
     let sigma = sqrt(max(det_variance, 1e-10));
     let far = 0.5 + 0.5 * erf((params.far_foam_cutoff - det_mean) / (sqrt(2.0) * sigma));
-    let far_weight = smoothstep(params.far_foam_texel, 2.0 * params.far_foam_texel, texel);
     let foam = mix(near, far, far_weight);
     let scaled = vec4<f32>(disp.rgb * amp, disp.a * chop);
     textureStore(displacement_out, gid.xy, slice, scaled);
