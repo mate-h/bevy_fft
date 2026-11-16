@@ -1,6 +1,7 @@
 // Water forces on voxelized floating bodies. One workgroup per body loops over its voxels, samples
-// the water LOD data at each one, and sums buoyancy, friction, pressure drag and slamming into
-// one force and torque about the body's centre of mass.
+// the water LOD data at each one, and sums buoyancy, and separately friction, pressure drag and
+// slamming, into forces and torques about the body's centre of mass. They stay apart so the CPU
+// can correct each for the frames the readback takes in its own way.
 //
 // The force model follows Kerner's boat model (2015, parts 1 and 2), with relative velocities
 // measured against the local water velocity instead of still water:
@@ -40,10 +41,17 @@ struct Body {
 }
 
 struct BodyForce {
-    /// Force in newtons in `.xyz`, submerged volume in cubic meters in `.w`.
-    force: vec4<f32>,
-    /// Torque about the centre of mass in newton meters in `.xyz`, wetted area in `.w`.
-    torque: vec4<f32>,
+    /// Buoyancy in newtons in `.xyz`, submerged volume in cubic meters in `.w`.
+    buoyancy: vec4<f32>,
+    /// Torque of buoyancy about the centre of mass in `.xyz`, waterplane area in square meters in
+    /// `.w`: how fast the submerged volume grows per meter of sinking.
+    buoyancy_torque: vec4<f32>,
+    /// Friction, pressure drag and slamming in newtons in `.xyz`, wetted area in `.w`.
+    drag: vec4<f32>,
+    /// Torque of those about the centre of mass in `.xyz`.
+    drag_torque: vec4<f32>,
+    /// Water velocity averaged over the wetted surface by area, in `.xyz`.
+    water_velocity: vec4<f32>,
 }
 
 struct ForceOutput {
@@ -84,8 +92,11 @@ struct ForceParams {
 @group(0) @binding(8) var lod_foam: texture_2d_array<f32>;
 @group(0) @binding(9) var lod_flow: texture_2d_array<f32>;
 
-var<workgroup> shared_force: array<vec4<f32>, WORKGROUP>;
-var<workgroup> shared_torque: array<vec4<f32>, WORKGROUP>;
+var<workgroup> shared_buoyancy: array<vec4<f32>, WORKGROUP>;
+var<workgroup> shared_buoyancy_torque: array<vec4<f32>, WORKGROUP>;
+var<workgroup> shared_drag: array<vec4<f32>, WORKGROUP>;
+var<workgroup> shared_drag_torque: array<vec4<f32>, WORKGROUP>;
+var<workgroup> shared_water: array<vec4<f32>, WORKGROUP>;
 
 fn rotate(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
     let t = 2.0 * cross(q.xyz, v);
@@ -137,10 +148,14 @@ fn body_forces(
     let total_area = max(body.angular_velocity.w, 1.0e-6);
     let rho = params.density;
 
-    var force = vec3<f32>(0.0);
-    var torque = vec3<f32>(0.0);
+    var buoyancy = vec3<f32>(0.0);
+    var buoyancy_torque = vec3<f32>(0.0);
+    var drag = vec3<f32>(0.0);
+    var drag_torque = vec3<f32>(0.0);
+    var water_flux = vec3<f32>(0.0);
     var submerged = 0.0;
     var wetted = 0.0;
+    var waterplane = 0.0;
     // Buoyancy from each voxel's submerged part, at that part's centroid.
     for (var i = lane; i < body.ranges.y; i += WORKGROUP) {
         let voxel = voxels[body.ranges.x + i];
@@ -153,10 +168,13 @@ fn body_forces(
             continue;
         }
         let volume = voxel.w * fraction;
+        if fraction < 1.0 {
+            waterplane += voxel.w / s;
+        }
         let lift = vec3<f32>(0.0, rho * params.gravity * volume, 0.0);
         let at = vec3<f32>(p.x, bottom + 0.5 * fraction * s, p.z);
-        force += lift;
-        torque += cross(at - com, lift);
+        buoyancy += lift;
+        buoyancy_torque += cross(at - com, lift);
         submerged += volume;
     }
 
@@ -174,6 +192,7 @@ fn body_forces(
             continue;
         }
         wetted += area;
+        water_flux += water.velocity * area;
         let n = rotate(body.rotation, piece.normal.xyz);
         let point_velocity = body.linear_velocity.xyz + cross(body.angular_velocity.xyz, p - com);
         let relative = point_velocity - water.velocity;
@@ -210,21 +229,35 @@ fn body_forces(
             f -= strength * (normal_speed / max(speed, 1.0e-4)) * stop;
         }
 
-        force += f;
-        torque += cross(p - com, f);
+        drag += f;
+        drag_torque += cross(p - com, f);
     }
 
-    shared_force[lane] = vec4<f32>(force, submerged);
-    shared_torque[lane] = vec4<f32>(torque, wetted);
+    shared_buoyancy[lane] = vec4<f32>(buoyancy, submerged);
+    shared_buoyancy_torque[lane] = vec4<f32>(buoyancy_torque, waterplane);
+    shared_drag[lane] = vec4<f32>(drag, wetted);
+    shared_drag_torque[lane] = vec4<f32>(drag_torque, 0.0);
+    shared_water[lane] = vec4<f32>(water_flux, 0.0);
     workgroupBarrier();
     for (var stride = WORKGROUP / 2u; stride > 0u; stride /= 2u) {
         if lane < stride {
-            shared_force[lane] += shared_force[lane + stride];
-            shared_torque[lane] += shared_torque[lane + stride];
+            shared_buoyancy[lane] += shared_buoyancy[lane + stride];
+            shared_buoyancy_torque[lane] += shared_buoyancy_torque[lane + stride];
+            shared_drag[lane] += shared_drag[lane + stride];
+            shared_drag_torque[lane] += shared_drag_torque[lane + stride];
+            shared_water[lane] += shared_water[lane + stride];
         }
         workgroupBarrier();
     }
     if lane == 0u {
-        output.bodies[b] = BodyForce(shared_force[0], shared_torque[0]);
+        let wetted_total = shared_drag[0].w;
+        let water = select(vec3<f32>(0.0), shared_water[0].xyz / wetted_total, wetted_total > 0.0);
+        output.bodies[b] = BodyForce(
+            shared_buoyancy[0],
+            shared_buoyancy_torque[0],
+            shared_drag[0],
+            shared_drag_torque[0],
+            vec4<f32>(water, 0.0),
+        );
     }
 }

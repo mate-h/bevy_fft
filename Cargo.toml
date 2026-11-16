@@ -35,6 +35,11 @@ path = "examples/beach/main.rs"
 required-features = ["free_camera"]
 
 [[example]]
+name = "floating"
+path = "examples/floating/main.rs"
+required-features = ["free_camera"]
+
+[[example]]
 name = "wake"
 path = "examples/wake/main.rs"
 required-features = ["free_camera"]
@@ -52,6 +57,7 @@ required-features = ["free_camera"]
 [dev-dependencies]
 bevy = { version = "0.20.0", features = ["dds"] }
 bevy_egui = "0.43.1"
+bevy_rapier3d = { version = "0.37", default-features = false, features = ["dim3", "debug-render-3d"] }
 bevy_terrain = { git = "https://github.com/mate-h/bevy_terrain", branch = "bevy-0.20.0", default-features = false }
 tiff = "0.10"
 

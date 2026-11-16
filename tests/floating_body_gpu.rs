@@ -114,6 +114,21 @@ fn buoyancy_follows_the_submerged_volume() {
     assert!(half.torque.length() < 1.0, "{:?}", half.torque);
     // The bottom and the lower half of four sides.
     assert!(close(half.wetted_area, 3.0, 0.01), "{}", half.wetted_area);
+    assert_eq!(half.sampled_center, Vec3::ZERO);
+
+    // Lowered 0.1 m, the water line cuts a layer of voxels across the whole 1 m² section.
+    let lower = settle(&mut app, still(hull.clone()), -0.1);
+    assert!(close(lower.submerged_volume, 0.6, 0.01), "{lower:?}");
+    assert!(
+        close(lower.waterplane_area, 1.0, 0.01),
+        "{}",
+        lower.waterplane_area
+    );
+    assert!(
+        close(lower.sampled_center.y, -0.1, 1e-4),
+        "{:?}",
+        lower.sampled_center
+    );
 
     let under = settle(&mut app, still(hull.clone()), -3.0);
     assert!(close(under.force.y, RHO * G, 0.01), "{:?}", under.force);

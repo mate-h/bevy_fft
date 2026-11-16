@@ -5,7 +5,8 @@
 //! shared water LOD data at every voxel of every body, so currents, wakes and surf push bodies
 //! along with the waves, and sums the forces per body. Bevy's [`Readback`] returns them a few
 //! frames later into [`FloatingBody::force`] and [`FloatingBody::torque`], for a physics engine to
-//! apply. Only 32 bytes per body come back.
+//! apply. Only 80 bytes per body come back. [`FloatingBody::compensated`] corrects them for how
+//! the body has moved since.
 //!
 //! `forces.wesl` documents the force model. [`FloatingBodySettings`] holds its coefficients.
 
@@ -38,7 +39,7 @@ const PATCH_BYTES: usize = 32;
 const BODY_BYTES: usize = 96;
 /// Bytes of the output header and of one `BodyForce` in `forces.wesl`.
 const OUTPUT_HEADER_BYTES: usize = 16;
-const OUTPUT_BODY_BYTES: usize = 32;
+const OUTPUT_BODY_BYTES: usize = 80;
 /// Most bodies one frame evaluates. Further bodies get no forces.
 pub const FLOATING_BODY_MAX: usize = 256;
 /// Submitted frames kept for pairing readbacks with the bodies they were computed for.
@@ -67,7 +68,12 @@ pub struct FloatingBodySettings {
     pub suction_quadratic: f32,
     pub suction_falloff: f32,
     /// Growth rate of wetted area times normal speed, per unit hull area, in m/s², at which
-    /// slamming reaches full strength. Zero turns slamming off.
+    /// slamming reaches full strength. Zero, the default, turns slamming off.
+    ///
+    /// Slamming stops the momentum of entering surface within one frame. Forces read back a few
+    /// frames late keep acting for all of those frames, so with a physics engine applying them
+    /// as-is slamming overshoots and throws bodies out of the water. Turn it on only where the
+    /// forces are applied without that delay.
     pub slam_rate_max: f32,
     /// Exponent applied to the slamming strength below that rate.
     pub slam_power: f32,
@@ -86,7 +92,7 @@ impl Default for FloatingBodySettings {
             suction_linear: 50.0,
             suction_quadratic: 250.0,
             suction_falloff: 0.5,
-            slam_rate_max: 50.0,
+            slam_rate_max: 0.0,
             slam_power: 2.0,
         }
     }
@@ -97,7 +103,8 @@ impl Default for FloatingBodySettings {
 /// The physics engine writes [`Self::linear_velocity`] and [`Self::angular_velocity`] each frame,
 /// or leaves [`Self::estimate_velocity`] on to have them estimated from the [`GlobalTransform`].
 /// The forces in [`Self::force`] and [`Self::torque`] are in world space, the torque about the
-/// world-space centre of mass. They arrive a few frames late. [`Self::frame`] counts readbacks.
+/// world-space centre of mass. They arrive a few frames late, so apply
+/// [`Self::compensated`] instead when the body moves fast. [`Self::frame`] counts readbacks.
 #[derive(Component, Clone, Debug, Reflect)]
 #[require(Transform)]
 pub struct FloatingBody {
@@ -115,14 +122,30 @@ pub struct FloatingBody {
     pub angular_velocity: Vec3,
     /// Estimate the velocities from how the [`GlobalTransform`] moves between frames.
     pub estimate_velocity: bool,
-    /// Latest water force in newtons.
+    /// Latest water force in newtons: [`Self::buoyancy`] plus [`Self::drag`].
     pub force: Vec3,
     /// Latest torque about the centre of mass in newton meters.
     pub torque: Vec3,
+    /// The buoyancy part of [`Self::force`].
+    pub buoyancy: Vec3,
+    pub buoyancy_torque: Vec3,
+    /// Friction, pressure drag and slamming: the part of [`Self::force`] that depends on velocity.
+    pub drag: Vec3,
+    pub drag_torque: Vec3,
+    /// Water velocity averaged over the wetted surface, in m/s.
+    pub water_velocity: Vec3,
     /// Hull volume below the surface in cubic meters.
     pub submerged_volume: f32,
     /// Hull surface area below the surface in square meters.
     pub wetted_area: f32,
+    /// Waterplane area in square meters: how fast the submerged volume grows per meter the body
+    /// sinks.
+    pub waterplane_area: f32,
+    /// World centre of mass when the forces were computed.
+    pub sampled_center: Vec3,
+    /// [`Self::linear_velocity`] and [`Self::angular_velocity`] when the forces were computed.
+    pub sampled_velocity: Vec3,
+    pub sampled_angular_velocity: Vec3,
     /// Readbacks so far. It changes when the forces do.
     pub frame: u32,
     #[reflect(ignore)]
@@ -151,11 +174,65 @@ impl FloatingBody {
             estimate_velocity: true,
             force: Vec3::ZERO,
             torque: Vec3::ZERO,
+            buoyancy: Vec3::ZERO,
+            buoyancy_torque: Vec3::ZERO,
+            drag: Vec3::ZERO,
+            drag_torque: Vec3::ZERO,
+            water_velocity: Vec3::ZERO,
             submerged_volume: 0.0,
             wetted_area: 0.0,
+            waterplane_area: 0.0,
+            sampled_center: Vec3::ZERO,
+            sampled_velocity: Vec3::ZERO,
+            sampled_angular_velocity: Vec3::ZERO,
             frame: 0,
             last: None,
         }
+    }
+}
+
+impl FloatingBody {
+    /// [`Self::force`] and [`Self::torque`] corrected for the frames they took to arrive, for a
+    /// body whose centre of mass is now at `center`, moving at `linear` and `angular`, about to
+    /// be stepped by `dt` seconds.
+    ///
+    /// Forces applied late act like a spring and a damper with a delay. Both pump energy into
+    /// the motion, and at speed the drag reverses a body's motion before the next readback
+    /// arrives. So:
+    /// - buoyancy moves along its slope, ρ g times the waterplane area, by how far the centre of
+    ///   mass has risen or sunk since [`Self::sampled_center`], limited to two voxels of travel;
+    /// - drag scales with how much of the velocity relative to the water it was computed for
+    ///   remains, drops to zero once that velocity has reversed, and never more than stops the
+    ///   body within `dt`;
+    /// - the drag torque scales the same way with the angular velocity.
+    pub fn compensated(
+        &self,
+        center: Vec3,
+        linear: Vec3,
+        angular: Vec3,
+        dt: f32,
+        settings: &FloatingBodySettings,
+    ) -> (Vec3, Vec3) {
+        let limit = 2.0 * self.hull.voxel_size;
+        let rise = (center.y - self.sampled_center.y).clamp(-limit, limit);
+        let stiffness = settings.density * settings.gravity * self.waterplane_area;
+        let buoyancy = self.buoyancy - Vec3::Y * stiffness * rise;
+
+        let remaining = |now: Vec3, then: Vec3| {
+            let then_squared = then.length_squared();
+            if then_squared < 0.05 * 0.05 {
+                1.0
+            } else {
+                (now.dot(then) / then_squared).clamp(0.0, 1.0)
+            }
+        };
+        let relative = linear - self.water_velocity;
+        let mut drag = self.drag * remaining(relative, self.sampled_velocity - self.water_velocity);
+        if dt > 0.0 {
+            drag = drag.clamp_length_max(self.mass * relative.length() / dt);
+        }
+        let drag_torque = self.drag_torque * remaining(angular, self.sampled_angular_velocity);
+        (buoyancy + drag, self.buoyancy_torque + drag_torque)
     }
 }
 
@@ -197,6 +274,9 @@ impl Plugin for FloatingBodyPlugin {
     }
 }
 
+/// A body as the force pass sampled it: entity, centre of mass, velocity, angular velocity.
+type SampledBody = (Entity, [Vec3; 3]);
+
 /// Buffers and pairing state of the force pass.
 #[derive(Resource)]
 struct FloatingBodyBuffers {
@@ -208,7 +288,8 @@ struct FloatingBodyBuffers {
     /// Entities and hulls the voxel buffers were built for.
     layout: Vec<(Entity, usize)>,
     frame: u32,
-    pending: VecDeque<(u32, Vec<Entity>)>,
+    /// Per submitted frame, each body with its centre of mass, velocity and angular velocity.
+    pending: VecDeque<(u32, Vec<SampledBody>)>,
 }
 
 /// Marks the entity that reads back the body forces.
@@ -258,7 +339,7 @@ fn accept_floating_body_forces(
     };
     let (_, entities) = buffers.pending.remove(pos).unwrap();
     buffers.pending.retain(|(f, _)| *f > frame);
-    for (i, entity) in entities.iter().enumerate().take(count) {
+    for (i, (entity, [center, velocity, angular])) in entities.iter().enumerate().take(count) {
         let Ok(mut body) = bodies.get_mut(*entity) else {
             continue;
         };
@@ -267,10 +348,20 @@ fn accept_floating_body_forces(
             break;
         };
         let f = |lane: usize| read_f32(bytes, lane * 4);
-        body.force = Vec3::new(f(0), f(1), f(2));
+        let v = |lane: usize| Vec3::new(f(lane), f(lane + 1), f(lane + 2));
+        body.buoyancy = v(0);
         body.submerged_volume = f(3);
-        body.torque = Vec3::new(f(4), f(5), f(6));
-        body.wetted_area = f(7);
+        body.buoyancy_torque = v(4);
+        body.waterplane_area = f(7);
+        body.drag = v(8);
+        body.wetted_area = f(11);
+        body.drag_torque = v(12);
+        body.water_velocity = v(16);
+        body.force = body.buoyancy + body.drag;
+        body.torque = body.buoyancy_torque + body.drag_torque;
+        body.sampled_center = *center;
+        body.sampled_velocity = *velocity;
+        body.sampled_angular_velocity = *angular;
         body.frame = body.frame.wrapping_add(1);
     }
 }
@@ -446,9 +537,12 @@ fn submit_floating_bodies(
 
     state.frame = state.frame.wrapping_add(1).max(1);
     let frame = state.frame;
-    state
-        .pending
-        .push_back((frame, list.iter().map(|(e, ..)| *e).collect()));
+    state.pending.push_back((
+        frame,
+        list.iter()
+            .map(|(e, body, .., com)| (*e, [*com, body.linear_velocity, body.angular_velocity]))
+            .collect(),
+    ));
     while state.pending.len() > PENDING_FRAMES {
         state.pending.pop_front();
     }
@@ -620,4 +714,61 @@ fn run_floating_bodies(
     pass.set_pipeline(compute);
     pass.set_bind_group(0, group, &[]);
     pass.dispatch_workgroups(frame.body_count, 1, 1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bodies::voxelize;
+
+    fn body() -> FloatingBody {
+        let hull = voxelize(&Mesh::from(Cuboid::new(1.0, 1.0, 1.0)), 0.25).unwrap();
+        let mut body = FloatingBody::new(hull, 500.0);
+        body.buoyancy = Vec3::Y * 5000.0;
+        body.waterplane_area = 1.0;
+        body.drag = Vec3::NEG_X * 1000.0;
+        body.sampled_velocity = Vec3::X * 2.0;
+        body
+    }
+
+    #[test]
+    fn buoyancy_follows_the_body_between_readbacks() {
+        let settings = FloatingBodySettings::default();
+        let (force, _) =
+            body().compensated(Vec3::Y * 0.1, Vec3::X * 2.0, Vec3::ZERO, 0.0, &settings);
+        let slope = settings.density * settings.gravity;
+        assert!((force.y - (5000.0 - 0.1 * slope)).abs() < 1e-2, "{force:?}");
+        // Travel past two voxels is not extrapolated further.
+        let (far, _) = body().compensated(Vec3::Y * 5.0, Vec3::X * 2.0, Vec3::ZERO, 0.0, &settings);
+        assert!((far.y - (5000.0 - 0.5 * slope)).abs() < 1e-2, "{far:?}");
+    }
+
+    #[test]
+    fn drag_fades_with_the_motion_it_was_computed_for() {
+        let settings = FloatingBodySettings::default();
+        let drag = |velocity: Vec3, dt: f32| {
+            body()
+                .compensated(Vec3::ZERO, velocity, Vec3::ZERO, dt, &settings)
+                .0
+                .x
+        };
+        assert_eq!(drag(Vec3::X * 2.0, 0.0), -1000.0);
+        assert_eq!(drag(Vec3::X * 1.0, 0.0), -500.0);
+        // Once the body has turned around, the old drag would push it the wrong way.
+        assert_eq!(drag(Vec3::NEG_X, 0.0), 0.0);
+        // It never more than stops the body: 500 kg at 0.1 m/s within 0.1 s is 500 N.
+        assert!((drag(Vec3::X * 0.1, 0.1) + 50.0).abs() < 1e-3);
+        let mut slow = body();
+        slow.sampled_velocity = Vec3::X * 0.2;
+        let capped = slow
+            .compensated(Vec3::ZERO, Vec3::X * 0.2, Vec3::ZERO, 0.1, &settings)
+            .0
+            .x;
+        assert!((capped + 1000.0).abs() < 1e-3, "{capped}");
+        let capped = slow
+            .compensated(Vec3::ZERO, Vec3::X * 0.1, Vec3::ZERO, 0.5, &settings)
+            .0
+            .x;
+        assert!((capped + 100.0).abs() < 1e-3, "{capped}");
+    }
 }
