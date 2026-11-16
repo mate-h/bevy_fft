@@ -11,6 +11,8 @@
 //! back and forth across the channel. The dam log is fixed on the bed, and the river pours over
 //! it.
 //!
+//! A fountain on the near bank sprays water particles, until they spawn from the water itself.
+//!
 //! The panel drops the crate again and shows its submerged share.
 
 use std::sync::Arc;
@@ -30,7 +32,7 @@ use bevy::{
     prelude::*,
 };
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui, input::EguiWantsInput};
-use bevy_fft::{prelude::*, shallow_water::*};
+use bevy_fft::{particles::*, prelude::*, shallow_water::*};
 use bevy_rapier3d::prelude::*;
 
 #[path = "../common/screenshot.rs"]
@@ -76,6 +78,7 @@ fn main() {
             FreeCameraPlugin,
             ShallowWaterPlugin,
             FloatingBodyPlugin,
+            WaterParticlesPlugin,
             RapierPhysicsPlugin::<NoUserData>::default(),
             EguiPlugin::default(),
             screenshot::ScreenshotOnEnvPlugin,
@@ -299,6 +302,19 @@ fn setup(
         Collider::cylinder(0.5 * WIDTH, DAM_RADIUS),
         Velocity::default(),
         ExternalForce::default(),
+    ));
+
+    // A fountain on the near bank, until the particles spawn from the water itself.
+    commands.spawn((
+        Transform::from_xyz(-20.0, 0.2, -0.5 * WIDTH + 1.0),
+        WaterParticleEmitter {
+            velocity: Vec3::new(1.0, 7.0, 3.5),
+            spread: 0.8,
+            rate: 3000.0,
+            lifetime: 3.0,
+            size: 0.06,
+            ..default()
+        },
     ));
 
     let earth_medium = scattering_mediums.add(ScatteringMedium::earth(256, 256));

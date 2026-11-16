@@ -38,6 +38,7 @@ pub mod dispersive;
 pub mod ewave;
 pub mod fft;
 pub mod ocean;
+pub mod particles;
 pub mod prelude;
 pub mod shallow_water;
 pub mod water;

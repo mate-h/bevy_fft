@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `WaterParticlesPlugin` keeps a GPU pool of water particles in world space: spawns from `WaterParticleSpawns` or a `WaterParticleEmitter` land at an atomic cursor in a ring, a compute pass moves them under gravity and quadratic air drag against the wind, and they are drawn as soft camera-facing dots. The `pool` example has a fountain.
 - The `pool` example drops a crate into a shallow water channel with a river running through it, tows a log across it and lays one across it as a dam, with Rapier moving the bodies and their pressure heads pressing the water.
 - `check_river_banks` flags water that left a settled river's channel and banks lower than its surface, and the `river_banks` example runs it on a baked terrain. `tools/bake_topobathy.py` also writes the carved heights to `height.r32`, and rivers take an optional discharge.
 - `ShallowWaterController::nested` runs a `ShallowWaterNestedGrid` with a third of the cell width inside the plugin's grid, following a point such as the camera and drawn over its parent in the water LOD data. `WaterHeightfield::order` sets which heightfield draws over which. The `beach` example nests one around the camera.
