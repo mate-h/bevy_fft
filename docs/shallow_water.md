@@ -30,6 +30,18 @@ When `WaterPlugin` is in the app, which `OceanPlugin` adds on its own, a compute
 
 Two more controller fields feed the depth update. `manning_n` adds implicit Manning friction on top of the linear `friction`, and `evaporation` removes a fraction of the depth per second. `source` takes an optional water source texture, described in the next section.
 
+## Rivers
+
+A river runs through the grid on per-face borders. `ShallowWaterController::border_profile` takes an image from `ShallowWaterBorderProfile`, which overrides single faces along the grid's edges and leaves the rest to their edge's `ShallowWaterBorder`. A face is one of these:
+
+- `Inflow` lets in a fixed discharge per unit width, in m²/s. The depth update takes that flux exactly, whatever the depth beside the face, so a dry channel fills at the given rate. The face velocity is the discharge over the depth inside, which carries the inflow's momentum into the advection.
+- `Outflow` lets water leave at Manning's normal-depth speed `h^(2/3) √S / n` for the bed slope `S` downstream, so the river holds the depth it would have in a long channel past the edge. It needs `manning_n`. With a zero slope it copies the outward speed of the face inside, a zero-gradient edge.
+- `Wall` closes the face.
+
+`ShallowWaterBorderProfile::add_river` places both ends from a `RiverSpline`: a Catmull-Rom centreline in world meters, a channel width, a discharge in m³/s and the outflow slope. Where the spline first enters the grid it spreads the discharge over the faces the channel covers, with a parabolic profile that peaks on the centreline and is wider along an edge the river crosses at a slant. Where it last leaves, those faces drain at normal depth. The spline should start and end outside the grid.
+
+[`tests/shallow_water_river_gpu.rs`](../tests/shallow_water_river_gpu.rs) feeds a dry, 96 m channel on a 0.002 slope with 0.25 m²/s and Manning n 0.03. It checks that the flow settles within 5% of the normal depth of 0.343 m along the channel and that its volume then holds still, so what flows in flows out.
+
 `fill_level` fills each preset to a still water level on reset. Cells whose bed rises above it start dry.
 
 ## Driving the solver from another crate
@@ -40,7 +52,7 @@ In the render world, `ShallowWaterSolver::new` takes the device, the pipelines, 
 
 The grid textures are a `ShallowWaterTextures` of texture views. `ShallowWaterTextures::create` makes zeroed textures on the device. `ShallowWaterTextures::from_images` takes the views of main-world images from `ShallowWaterImages::new`, which suits a grid that is also drawn with `ShallowWaterSurfaceMaterial` or read back. `bed_water` holds the bed H in `.x` and the depth h in `.y`. `flow_x` is `R32Float` at `(nx + 1) × ny` with the face velocity u on vertical faces, and `flow_y` is `R32Float` at `nx × (ny + 1)` with w on horizontal faces. Both are positive along +x and +y in cells per second times the cell size. A caller can bind these views in its own kernels.
 
-`ShallowWaterInputs` holds two optional sampled textures with one texel per cell. `bed` is `R32Float` bed height. `source` is `Rgba32Float`, where `.x` is depth added per second, negative to remove water, and `.y` is a sink weight between 0 and 1 that drains that fraction of the depth each step, so 1 keeps a cell dry. The depth never goes below zero. Missing inputs read as zero. `set_inputs` swaps them later. Both live in the settings bind group, so the main kernel stays at eight storage textures.
+`ShallowWaterInputs` holds optional sampled textures with one texel per cell, and the border profile. `bed` is `R32Float` bed height. `source` is `Rgba32Float`, where `.x` is depth added per second, negative to remove water, and `.y` is a sink weight between 0 and 1 that drains that fraction of the depth each step, so 1 keeps a cell dry. The depth never goes below zero. `pressure_head` is an `R32Float` head that presses the surface, and `border` the `Rgba32Float` image of a `ShallowWaterBorderProfile`, described under Rivers. Missing inputs read as zero. `set_inputs` swaps them later. They all live in the settings bind group, so the main kernel stays at eight storage textures.
 
 `write_settings` uploads a `ShallowWaterSettings`: time step, cell size, gravity, linear friction, Manning n, evaporation per second, the four borders, the PML and ocean parameters, the overshoot limiter, and a step counter. Write it before the frame's command buffer is submitted. Every step in that frame uses the same values.
 

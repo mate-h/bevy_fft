@@ -17,6 +17,7 @@
 //! [`OceanQueries`](crate::ocean::OceanQueries) show it and it fades into the ocean at its edges.
 
 mod render;
+mod river;
 mod solver;
 
 use bevy::{
@@ -41,6 +42,7 @@ pub use render::{
     ShallowWaterGpuResources, ShallowWaterSimLabel, ShallowWaterTimestamp,
     plug_shallow_water_render_app, prepare_shallow_water_gpu, run_shallow_water_sim,
 };
+pub use river::{GridEdge, RiverSpline, ShallowWaterBorderFace, ShallowWaterBorderProfile};
 pub use solver::{
     ShallowWaterInputs, ShallowWaterKernels, ShallowWaterPipelines, ShallowWaterSettings,
     ShallowWaterSolver, ShallowWaterSolverDescriptor, ShallowWaterTextures, round_particle_count,
@@ -143,6 +145,9 @@ pub struct ShallowWaterController {
     /// writes their footprints into it, and the solver drives the flow with the gradient of the
     /// surface plus this head. See [`ShallowWaterInputs::pressure_head`].
     pub pressure_head: Option<Handle<Image>>,
+    /// Optional per-face border overrides, such as a river's inflow and outflow, from
+    /// [`ShallowWaterBorderProfile::image`]. Faces it leaves unset keep their edge's border.
+    pub border_profile: Option<Handle<Image>>,
     pub pointer_sim: Vec2,
     pub pointer_prev_sim: Vec2,
     /// Terrain preset index for `loadPreset`. 0 to 3 are procedural, and
@@ -238,6 +243,7 @@ impl ShallowWaterController {
             evaporation: 0.0,
             source: None,
             pressure_head: None,
+            border_profile: None,
             pointer_sim: Vec2::ZERO,
             pointer_prev_sim: Vec2::ZERO,
             preset_index: 0,

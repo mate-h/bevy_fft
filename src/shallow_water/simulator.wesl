@@ -122,6 +122,41 @@ fn perlinNoise(point : vec2f, gridSize : f32, seed : u32) -> f32 {
 /// External pressure head per cell when flag bit 4 is set, in height units. Bodies on the water
 /// press it down this way (Kellomäki 2014).
 @group(1) @binding(4) var pressureHeadTexture : texture_2d<f32>;
+/// Per-face border profile when flag bit 5 is set: row 0 holds the left edge's faces, row 1 the
+/// right, row 2 the bottom and row 3 the top, one texel per face along the edge. `.x` is the face
+/// kind (`FACE_*`), `.y` an inflow's discharge per unit width into the grid, `.z` an outflow's
+/// bed slope.
+@group(1) @binding(5) var borderProfile : texture_2d<f32>;
+
+/// The edge's own border type applies.
+const FACE_EDGE = 0u;
+/// A fixed discharge per unit width flows in.
+const FACE_INFLOW = 1u;
+/// Water leaves at the Manning normal-depth speed for the face's bed slope.
+const FACE_OUTFLOW = 2u;
+/// Closed.
+const FACE_WALL = 3u;
+/// Depth under which an inflow face's velocity stops growing as `q / h`. The discharge stays exact,
+/// since the depth flux reads it directly.
+const INFLOW_MIN_DEPTH = 0.01;
+
+/// The profile texel of face `index` along `edge` (0 left, 1 right, 2 bottom, 3 top).
+fn border_face(edge : u32, index : u32) -> vec4f {
+    if ((simulationSettings.flags & 32u) == 0u) { return vec4f(0.0); }
+    return textureLoad(borderProfile, vec2u(index, edge), 0);
+}
+
+fn face_kind(face : vec4f) -> u32 {
+    return u32(round(face.x));
+}
+
+/// Discharge per unit width through a domain-edge face, along +x or +y, in `.x`, with 1 in `.y`
+/// when the profile makes the face an inflow and zeros otherwise.
+fn inflow_flux(edge : u32, index : u32, sign : f32) -> vec2f {
+    let face = border_face(edge, index);
+    if (face_kind(face) != FACE_INFLOW) { return vec2f(0.0); }
+    return vec2f(sign * face.y, 1.0);
+}
 
 /// The surface plus the pressure head, whose gradient drives the flow.
 fn pressure_surface_at(ic : i32, jc : i32) -> f32 {
@@ -683,6 +718,11 @@ fn face_depth(m_far : f32, m_up : f32, m_dn : f32, courant : f32) -> f32 {
 
 /// Depth flux through the vertical face `fi`, between cells `fi - 1` and `fi`, positive along +x.
 fn depth_flux_x(fi : i32, jc : i32) -> f32 {
+    if (fi == 0 || fi == nx()) {
+        let inflow = inflow_flux(select(1u, 0u, fi == 0), u32(clamp(jc, 0, ny() - 1)),
+            select(-1.0, 1.0, fi == 0));
+        if (inflow.y > 0.0) { return inflow.x; }
+    }
     let u = u_face_at(fi, jc);
     let c = abs(u) * simulationSettings.dt / simulationSettings.dx;
     if (u > 0.0) {
@@ -693,6 +733,11 @@ fn depth_flux_x(fi : i32, jc : i32) -> f32 {
 
 /// Depth flux through the horizontal face `fj`, between cells `fj - 1` and `fj`, positive along +y.
 fn depth_flux_y(ic : i32, fj : i32) -> f32 {
+    if (fj == 0 || fj == ny()) {
+        let inflow = inflow_flux(select(3u, 2u, fj == 0), u32(clamp(ic, 0, nx() - 1)),
+            select(-1.0, 1.0, fj == 0));
+        if (inflow.y > 0.0) { return inflow.x; }
+    }
     let w = w_face_at(ic, fj);
     let c = abs(w) * simulationSettings.dt / simulationSettings.dx;
     if (w > 0.0) {
@@ -824,32 +869,55 @@ fn border_velocity(borderType : u32, bed : f32, sign : f32) -> f32 {
     return 0.0;
 }
 
+/// Velocity of a domain-edge face, along +x or +y. `cell` is the grid cell inside the face,
+/// `inner` the velocity of the next face inward, and `sign` +1 on the left or bottom edge and -1
+/// on the right or top. A face in the border profile overrides the edge's border type.
+fn edge_face_velocity(edge : u32, index : u32, cell : vec2u, inner : f32, sign : f32) -> f32 {
+    let face = border_face(edge, index);
+    let kind = face_kind(face);
+    let hw = textureLoad(bedWaterTexture, cell).xy;
+    if (kind == FACE_INFLOW) {
+        return sign * face.y / max(hw.y, INFLOW_MIN_DEPTH);
+    }
+    if (kind == FACE_OUTFLOW) {
+        return -sign * outflow_speed(hw.y, face.z, -sign * inner);
+    }
+    if (kind == FACE_WALL) { return 0.0; }
+    return border_velocity(border_type(edge), hw.x, sign);
+}
+
+/// Outward speed of an outflow face over water `h` deep: Manning's normal-depth speed
+/// `h^(2/3) √S / n` for bed slope `S`, so a river leaves at the depth it would hold in a long
+/// channel downstream. Without a slope or Manning's n it copies the outward speed of the face
+/// inside, a zero-gradient edge.
+fn outflow_speed(h : f32, slope : f32, inner_out : f32) -> f32 {
+    let n2 = simulationSettings.manning_n2;
+    if (slope > 0.0 && n2 > 0.0) {
+        return pow(max(h, 0.0), 2.0 / 3.0) * sqrt(slope / n2);
+    }
+    return max(inner_out, 0.0);
+}
+
 @compute @workgroup_size(16, 16)
 fn applyDomainBoundaries(@builtin(global_invocation_id) id: vec3u) {
-    let leftBorder = border_type(0u);
-    let rightBorder = border_type(1u);
-    let bottomBorder = border_type(2u);
-    let topBorder = border_type(3u);
     let sy = simulationSettings.size.y;
     let sx = simulationSettings.size.x;
     if (id.x == 0u && id.y < sy) {
-        let bed = textureLoad(bedWaterTexture, vec2u(0u, id.y)).x;
-        let v = border_velocity(leftBorder, bed, 1.0);
+        let v = edge_face_velocity(0u, id.y, vec2u(0u, id.y), u_face_at(1, i32(id.y)), 1.0);
         textureStore(faceUTexture, vec2u(0u, id.y), vec4f(clamp_face_vel(v), 0.0, 0.0, 0.0));
     }
     if (id.x == sx && id.y < sy) {
-        let bed = textureLoad(bedWaterTexture, vec2u(sx - 1u, id.y)).x;
-        let v = border_velocity(rightBorder, bed, -1.0);
+        let v = edge_face_velocity(1u, id.y, vec2u(sx - 1u, id.y),
+            u_face_at(i32(sx) - 1, i32(id.y)), -1.0);
         textureStore(faceUTexture, vec2u(sx, id.y), vec4f(clamp_face_vel(v), 0.0, 0.0, 0.0));
     }
     if (id.y == 0u && id.x < sx) {
-        let bed = textureLoad(bedWaterTexture, vec2u(id.x, 0u)).x;
-        let v = border_velocity(bottomBorder, bed, 1.0);
+        let v = edge_face_velocity(2u, id.x, vec2u(id.x, 0u), w_face_at(i32(id.x), 1), 1.0);
         textureStore(faceWTexture, vec2u(id.x, 0u), vec4f(clamp_face_vel(v), 0.0, 0.0, 0.0));
     }
     if (id.y == sy && id.x < sx) {
-        let bed = textureLoad(bedWaterTexture, vec2u(id.x, sy - 1u)).x;
-        let v = border_velocity(topBorder, bed, -1.0);
+        let v = edge_face_velocity(3u, id.x, vec2u(id.x, sy - 1u),
+            w_face_at(i32(id.x), i32(sy) - 1), -1.0);
         textureStore(faceWTexture, vec2u(id.x, sy), vec4f(clamp_face_vel(v), 0.0, 0.0, 0.0));
     }
 }

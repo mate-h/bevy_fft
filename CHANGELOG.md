@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Rivers through a shallow water grid. `ShallowWaterController::border_profile` sets single faces along the grid's edges to a fixed inflow discharge, a Manning normal-depth outflow or a wall, and `ShallowWaterBorderProfile::add_river` places a river's inflow and outflow where a `RiverSpline` crosses the grid.
 - `bodies::voxelize` turns a closed mesh into voxels with the hull's volume, plus surface patches with their outward normal and area. `FloatingBodyPlugin` evaluates buoyancy, ITTC 1957 friction, pressure drag and slamming on each `FloatingBody` against the water LOD data on the GPU, and reads back one force and torque per body.
 - `DispersiveController::follow` keeps a placed dispersive patch on a moving point, such as a boat, by moving it whole cells at a time. The water moves with it without resampling, the strip that comes in over the leading edge starts at rest, and floating bodies' pressure heads carry over. The `wake` example's patch follows its boat.
 - `DispersiveController::enable_bodies` lets floating bodies act on a placed dispersive patch: their hulls fill Gilligan's obstruction map, so waves reflect off them, and in deep mode they press the surface down, so a moving body trails a wake. `BodyFootprintTarget` registers any such grid with `FloatingBodyPlugin`.

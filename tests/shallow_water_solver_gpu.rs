@@ -158,6 +158,7 @@ fn prepare_driver(
                     bed: Some(bed.create_view(&TextureViewDescriptor::default())),
                     source: Some(source.create_view(&TextureViewDescriptor::default())),
                     pressure_head: None,
+                    border: None,
                 },
                 particle_count: 0,
             },
