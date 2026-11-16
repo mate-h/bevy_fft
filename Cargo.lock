@@ -1011,6 +1011,7 @@ dependencies = [
  "bevy_terrain",
  "bytemuck",
  "image",
+ "serde_json",
  "tiff 0.10.3",
 ]
 

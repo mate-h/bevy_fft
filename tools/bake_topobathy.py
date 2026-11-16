@@ -8,6 +8,7 @@ river channels along splines, and writes:
   <out>/source/height.tif    carved heights, a north-up float32 GeoTIFF in local UTM
   <out>/seafloor_depth.r32   meters of water below sea level (0 on land), little-endian float32,
                              rows increasing with world Z, for the shallow water bed and the LOD data
+  <out>/height.r32           the carved heights in meters, the same layout, for the bank checker
   <out>/manifest.json        CRS, geotransform, size, world mapping and sources
 
 With `--bake`, it also runs the neighboring bevy_terrain processor on the carved heights, which
@@ -23,11 +24,14 @@ exportImage answers with a near-constant 1.5-2.4 m everywhere, mountains and ope
 Elevation models record the water surface over rivers, not the bed. Pass `--rivers rivers.json`
 to cut channels to a depth set along each spline:
 
-  [{"width": 30, "points": [[x, z, depth], ...]}, ...]
+  [{"width": 30, "points": [[x, z, depth], ...], "discharge": 12}, ...]
 
 Points are local meters (x east, z north, from the square's centre). Depth is meters below the
 model's surface along the centerline and is interpolated along the spline. The cross-section is
-parabolic: full depth on the centerline, zero at the banks.
+parabolic: full depth on the centerline, zero at the banks. The optional discharge in m³/s is
+what the `river_banks` example feeds each river with when it checks the banks:
+
+  cargo run --release --example river_banks -- <name>
 
 Baked data is cached and written under assets/terrains, which git ignores. Requires Python,
 NumPy and GDAL (Homebrew's python3 has both).
@@ -244,6 +248,7 @@ def main():
     depth = np.maximum(args.sea_level - heights, 0).astype('<f4')
     # North-up raster rows run toward -Z; the depth file's rows increase with world Z.
     (out / 'seafloor_depth.r32').write_bytes(np.flipud(depth).tobytes())
+    (out / 'height.r32').write_bytes(np.flipud(heights).astype('<f4').tobytes())
     n = heights.shape[0]
     manifest = {
         'source': str(args.input) if args.input else SERVICE, 'center_lat_lon': [lat, lon], 'crs': f'EPSG:{epsg}',
@@ -251,7 +256,7 @@ def main():
         'sea_level_m': args.sea_level, 'height_range_m': [float(heights.min()), float(heights.max())],
         'wet_fraction': float((depth > 0).mean()), 'rivers': rivers,
         'world_mapping': f'x = (column + 0.5) * {args.resolution:g} - {side / 2:g}, z = {side / 2:g} - (row + 0.5) * {args.resolution:g} '
-                         'for source/height.tif rows. seafloor_depth.r32 rows increase with world Z.',
+                         'for source/height.tif rows. seafloor_depth.r32 and height.r32 rows increase with world Z.',
     }
     (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     print(f'Heights {manifest["height_range_m"][0]:.1f} to {manifest["height_range_m"][1]:.1f} m, '

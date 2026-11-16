@@ -16,6 +16,7 @@
 //! surface into the shared [`WaterLodData`](crate::water::WaterLodData) each frame, so the ocean surface material and
 //! [`OceanQueries`](crate::ocean::OceanQueries) show it and it fades into the ocean at its edges.
 
+mod banks;
 mod nest;
 mod render;
 mod river;
@@ -40,6 +41,9 @@ use bevy::{
 
 use crate::water::{WaterHeightfield, WaterHeightfieldDry};
 
+pub use banks::{
+    BankLeak, LowBank, RiverBankCheck, RiverBankReport, SettledGrid, check_river_banks,
+};
 pub use nest::{
     NEST_REFINEMENT, ShallowWaterNest, ShallowWaterNestDescriptor, ShallowWaterNestPipelines,
 };

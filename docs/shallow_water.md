@@ -42,6 +42,19 @@ A river runs through the grid on per-face borders. `ShallowWaterController::bord
 
 [`tests/shallow_water_river_gpu.rs`](../tests/shallow_water_river_gpu.rs) feeds a dry, 96 m channel on a 0.002 slope with 0.25 m²/s and Manning n 0.03. It checks that the flow settles within 5% of the normal depth of 0.343 m along the channel and that its volume then holds still, so what flows in flows out.
 
+### Checking the banks
+
+Elevation models record the water surface over rivers, so a carved channel is only as good as the banks beside it. `check_river_banks` takes a river run to a steady state and read back as a `SettledGrid`, and reports two problems. A `BankLeak` is a region of wet cells outside the channel, which is half the river's width plus `RiverBankCheck::margin` from its centreline, that touches wet channel cells. A `LowBank` is a stretch where the highest bed across the bank, from half the width out to the margin, stays below the settled surface on the centreline plus `freeboard`. `along` limits both to a range of distances along the river, to leave out the mouth and the grid's edges.
+
+The `river_banks` example runs the check on a terrain from `tools/bake_topobathy.py`. Give each river in the bake's `rivers.json` a `discharge` in m³/s. The tool writes the carved heights to `height.r32`, and the example fills a grid over the whole square from them, feeds every river with a discharge from its spline, runs it until it settles, and prints what it finds. It exits with status 1 when a bank fails.
+
+```bash
+cargo run --release --example river_banks -- <terrain> --cell 2 --seconds 600
+cargo run --release --example river_banks -- --demo
+```
+
+`--demo` runs an 8 m channel in a 96 m valley with its left bank cut low over 8 m, and reports the low bank there and the floodplain it fills. A floodplain that fills from one breach meets the channel along much of its length, so a leak's range points to the low banks to look at. [`tests/shallow_water_river_gpu.rs`](../tests/shallow_water_river_gpu.rs) checks that a sound channel passes and the notched one fails at the notch.
+
 `fill_level` fills each preset to a still water level on reset. Cells whose bed rises above it start dry.
 
 ## Driving the solver from another crate

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `check_river_banks` flags water that left a settled river's channel and banks lower than its surface, and the `river_banks` example runs it on a baked terrain. `tools/bake_topobathy.py` also writes the carved heights to `height.r32`, and rivers take an optional discharge.
 - `ShallowWaterController::nested` runs a `ShallowWaterNestedGrid` with a third of the cell width inside the plugin's grid, following a point such as the camera and drawn over its parent in the water LOD data. `WaterHeightfield::order` sets which heightfield draws over which. The `beach` example nests one around the camera.
 - `ShallowWaterShift` moves a shallow water grid over the world by whole cells, filling the cells that come in from a world bed texture and from a parent grid's surface, so a nest can follow the camera. Its sampling keeps a parent's bed the mean of its child's.
 - `ShallowWaterNest` runs a fine shallow water grid inside a coarse one at refinement 3, coupled both ways after Debreu and Blayo. The child's edge band takes the parent's state, the parent takes the child's interior back, and a reflux on the faces between them keeps the parent's water. See [docs/shallow_water_nesting.md](docs/shallow_water_nesting.md).
