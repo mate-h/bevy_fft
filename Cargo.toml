@@ -35,6 +35,11 @@ path = "examples/beach/main.rs"
 required-features = ["free_camera"]
 
 [[example]]
+name = "pool"
+path = "examples/pool/main.rs"
+required-features = ["free_camera"]
+
+[[example]]
 name = "river_banks"
 path = "examples/river_banks/main.rs"
 
