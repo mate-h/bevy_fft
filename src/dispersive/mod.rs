@@ -1,6 +1,6 @@
 //! Jeschke–Wojtan hybrid: diffusion decomposition, bar shallow water, Airy/FFT (Algorithm 2),
 //! transport, merge, then soft spectral damp of total η and q. Register
-//! [`FftPlugin`](crate::fft::FftPlugin) before [`DispersivePlugin`].
+//! [`FftPlugin`] before [`DispersivePlugin`].
 //! Do not use [`EwavePlugin`](crate::ewave::EwavePlugin) in the same app: both splice after FFT resolve.
 //!
 //! Interaction must stay on the GPU. Height splashes use `brush_flow_impulse`; drag wakes add

@@ -188,7 +188,7 @@ impl ExtractComponent<RenderApp> for OceanFoamUniform {
 /// scaled by the choppiness, R holds `a + b + a b - c_xz c_zx` and G its square. A full mip chain
 /// filters both over any footprint.
 ///
-/// The material samples whichever half was written last; see [`sync_ocean_foam_display`] and [`OceanFoamPhase`].
+/// The material samples whichever half was written last; see `sync_ocean_foam_display` and [`OceanFoamPhase`].
 #[derive(Component, Clone, Reflect)]
 pub struct OceanFoamMask {
     pub texture_a: Handle<Image>,

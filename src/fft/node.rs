@@ -55,7 +55,7 @@ pub enum FftNode {
     GeneratePattern,
 }
 
-/// When `true`, the default no-op [`fft_spectrum_passthrough`] system is skipped.
+/// When `true`, the default no-op `fft_spectrum_passthrough` system is skipped.
 #[derive(bevy::prelude::Resource, Default)]
 pub struct FftSpectrumSpliced(pub bool);
 

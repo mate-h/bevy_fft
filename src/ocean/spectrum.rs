@@ -23,7 +23,7 @@ const RADIAL_SAMPLES: u32 = 192;
 const ANGULAR_SAMPLES: u32 = 96;
 
 /// Surface Stokes drift of one cascade in meters per second along X and Z, before any amplitude
-/// shaping applied after the FFT. Kept up to date by [`update_ocean_stokes_drift`].
+/// shaping applied after the FFT. Kept up to date by `update_ocean_stokes_drift`.
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Reflect)]
 pub struct OceanStokesDrift(pub Vec2);
 

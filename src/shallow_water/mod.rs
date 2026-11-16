@@ -8,7 +8,7 @@
 //!
 //! Add [`ShallowWaterPlugin`], insert [`ShallowWaterController`] as a resource with GPU images, and use
 //! [`ShallowWaterSurfaceMaterial`] on an XZ plane. The compute pass runs on the root
-//! [`RenderGraph`](bevy::render::renderer::RenderGraph) schedule before the camera driver.
+//! [`RenderGraph`] schedule before the camera driver.
 //!
 //! To place the grid in a larger scene, set [`ShallowWaterController::placement`] and add
 //! [`WaterPlugin`](crate::water::WaterPlugin), which [`OceanPlugin`](crate::ocean::OceanPlugin)
@@ -179,9 +179,9 @@ pub struct ShallowWaterController {
     /// Width in cells of the band inside the PML where [`ShallowWaterBorder::Ocean`] edges blend the
     /// water height toward the target.
     pub ocean_band_cells: f32,
-    /// PML absorption ramp: **2** = quadratic ([Joh08] / CMF10 default), **3** = cubic.
+    /// PML absorption ramp: **2** = quadratic (Joh08 / CMF10 default), **3** = cubic.
     pub pml_sigma_exponent: f32,
-    /// **0** = uniform damping in each strip; **1** = full [Joh08] style scaling by **|u|/|v|** (x strip) and **|w|/|v|** (y strip) from cell-centered velocity.
+    /// **0** = uniform damping in each strip; **1** = full Joh08 style scaling by **|u|/|v|** (x strip) and **|w|/|v|** (y strip) from cell-centered velocity.
     pub pml_cosine_blend: f32,
     /// Increment to re-run `clearBuffers` + `loadPreset` on the GPU.
     pub sim_apply_serial: u32,
