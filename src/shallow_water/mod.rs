@@ -16,6 +16,7 @@
 //! surface into the shared [`WaterLodData`](crate::water::WaterLodData) each frame, so the ocean surface material and
 //! [`OceanQueries`](crate::ocean::OceanQueries) show it and it fades into the ocean at its edges.
 
+mod nest;
 mod render;
 mod river;
 mod solver;
@@ -38,6 +39,9 @@ use bevy::{
 
 use crate::water::{WaterHeightfield, WaterHeightfieldDry};
 
+pub use nest::{
+    NEST_REFINEMENT, ShallowWaterNest, ShallowWaterNestDescriptor, ShallowWaterNestPipelines,
+};
 pub use render::{
     ShallowWaterGpuResources, ShallowWaterSimLabel, ShallowWaterTimestamp,
     plug_shallow_water_render_app, prepare_shallow_water_gpu, run_shallow_water_sim,
@@ -523,6 +527,7 @@ pub struct ShallowWaterSurfaceTag;
 pub mod shaders {
     pub const SHALLOW_WATER_SIMULATOR: &str = "embedded://bevy_fft/shallow_water/simulator.wesl";
     pub const SHALLOW_WATER_SURFACE: &str = "embedded://bevy_fft/shallow_water/surface.wesl";
+    pub const SHALLOW_WATER_NEST: &str = "embedded://bevy_fft/shallow_water/nest.wesl";
 }
 
 fn sync_shallow_water_mesh_material(
@@ -586,11 +591,14 @@ pub struct ShallowWaterSolverPlugin;
 impl Plugin for ShallowWaterSolverPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "simulator.wesl");
+        embedded_asset!(app, "nest.wesl");
     }
 
     fn finish(&self, app: &mut App) {
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-            render_app.init_resource::<ShallowWaterPipelines>();
+            render_app
+                .init_resource::<ShallowWaterPipelines>()
+                .init_resource::<ShallowWaterNestPipelines>();
         }
     }
 }

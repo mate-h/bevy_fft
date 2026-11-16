@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ShallowWaterNest` runs a fine shallow water grid inside a coarse one at refinement 3, coupled both ways after Debreu and Blayo. The child's edge band takes the parent's state, the parent takes the child's interior back, and a reflux on the faces between them keeps the parent's water. See [docs/shallow_water_nesting.md](docs/shallow_water_nesting.md).
 - Rivers through a shallow water grid. `ShallowWaterController::border_profile` sets single faces along the grid's edges to a fixed inflow discharge, a Manning normal-depth outflow or a wall, and `ShallowWaterBorderProfile::add_river` places a river's inflow and outflow where a `RiverSpline` crosses the grid.
 - `bodies::voxelize` turns a closed mesh into voxels with the hull's volume, plus surface patches with their outward normal and area. `FloatingBodyPlugin` evaluates buoyancy, ITTC 1957 friction, pressure drag and slamming on each `FloatingBody` against the water LOD data on the GPU, and reads back one force and torque per body.
 - `DispersiveController::follow` keeps a placed dispersive patch on a moving point, such as a boat, by moving it whole cells at a time. The water moves with it without resampling, the strip that comes in over the leading edge starts at rest, and floating bodies' pressure heads carry over. The `wake` example's patch follows its boat.

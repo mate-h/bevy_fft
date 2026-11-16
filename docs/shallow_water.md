@@ -70,6 +70,10 @@ Before the depth update, `limitOutflow` scales each cell's outgoing fluxes so on
 
 [`tests/shallow_water_solver_gpu.rs`](../tests/shallow_water_solver_gpu.rs) drives the core this way over a bed that changes every frame, with a source texture and no presets, and checks that the bed matches the input and that water volume is conserved. Run it with `cargo test --test shallow_water_solver_gpu -- --ignored`, since it needs a graphics adapter.
 
+## Nesting
+
+A fine grid can run inside a coarse one, coupled both ways at refinement 3. See [Nested shallow water grids](shallow_water_nesting.md).
+
 ## Try it
 
 ```bash

@@ -65,6 +65,9 @@ pub struct ShallowWaterPipelines {
     pub update_particles: CachedComputePipelineId,
     pub seed_height: CachedComputePipelineId,
     pub seed_faces: CachedComputePipelineId,
+    pub accumulate_face_volumes_u: CachedComputePipelineId,
+    pub accumulate_face_volumes_w: CachedComputePipelineId,
+    pub clear_face_volumes: CachedComputePipelineId,
 }
 
 impl FromWorld for ShallowWaterPipelines {
@@ -155,6 +158,9 @@ impl FromWorld for ShallowWaterPipelines {
             update_particles: q("shallow_water_particles", "updateParticles"),
             seed_height: q("shallow_water_seed_height", "seedOceanHeight"),
             seed_faces: q("shallow_water_seed_faces", "seedOceanFaces"),
+            accumulate_face_volumes_u: q("shallow_water_volumes_u", "accumulateFaceVolumesU"),
+            accumulate_face_volumes_w: q("shallow_water_volumes_w", "accumulateFaceVolumesW"),
+            clear_face_volumes: q("shallow_water_clear_volumes", "clearFaceVolumes"),
             layout_buffers,
             layout_settings,
         }
@@ -198,6 +204,9 @@ impl ShallowWaterPipelines {
             update_particles: get(self.update_particles)?,
             seed_height: get(self.seed_height)?,
             seed_faces: get(self.seed_faces)?,
+            accumulate_face_volumes_u: get(self.accumulate_face_volumes_u)?,
+            accumulate_face_volumes_w: get(self.accumulate_face_volumes_w)?,
+            clear_face_volumes: get(self.clear_face_volumes)?,
         })
     }
 }
@@ -237,6 +246,9 @@ pub struct ShallowWaterKernels {
     update_particles: ComputePipeline,
     seed_height: ComputePipeline,
     seed_faces: ComputePipeline,
+    accumulate_face_volumes_u: ComputePipeline,
+    accumulate_face_volumes_w: ComputePipeline,
+    clear_face_volumes: ComputePipeline,
 }
 
 /// Views of the grid textures the solver binds for storage. For a grid of `nx × ny` cells,
@@ -772,6 +784,24 @@ impl ShallowWaterSolver {
     /// One time step: MacCormack advection of the face velocities, the depth update with sources,
     /// pressure, domain edges, wet and dry faces, friction, the PML, and the overshoot limiter.
     pub fn encode_step(&self, pass: &mut ComputePass) {
+        self.encode_step_inner(pass, false);
+    }
+
+    /// [`Self::encode_step`], adding the volume per unit width that passes each face to the `.z`
+    /// lane of `mac_u_temps` and `mac_w_temps`, positive along +x and +y. A
+    /// [`ShallowWaterNest`](super::ShallowWaterNest) reads them for its reflux.
+    /// [`Self::encode_clear_face_volumes`] zeroes them.
+    pub fn encode_step_with_face_volumes(&self, pass: &mut ComputePass) {
+        self.encode_step_inner(pass, true);
+    }
+
+    /// Zeroes the face volumes [`Self::encode_step_with_face_volumes`] adds up.
+    pub fn encode_clear_face_volumes(&self, pass: &mut ComputePass) {
+        self.bind(pass);
+        self.dispatch(pass, &self.kernels.clear_face_volumes, self.border_groups());
+    }
+
+    fn encode_step_inner(&self, pass: &mut ComputePass, face_volumes: bool) {
         let k = &self.kernels;
         let (cell, u, w, border) = (
             self.cell_groups(),
@@ -790,6 +820,10 @@ impl ShallowWaterSolver {
         self.dispatch(pass, &k.mac_w_combine, w);
         self.dispatch(pass, &k.stage_movable_depth, cell);
         self.dispatch(pass, &k.limit_outflow, cell);
+        if face_volumes {
+            self.dispatch(pass, &k.accumulate_face_volumes_u, u);
+            self.dispatch(pass, &k.accumulate_face_volumes_w, w);
+        }
         self.dispatch(pass, &k.integrate_height, cell);
         self.dispatch(pass, &k.commit_height, cell);
         self.dispatch(pass, &k.integrate_velocity_u, u);
