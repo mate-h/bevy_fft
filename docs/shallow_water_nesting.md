@@ -22,6 +22,18 @@ The overshoot limiter and evaporation remove water outside the fluxes, so turn t
 
 [`tests/shallow_water_nest_gpu.rs`](../tests/shallow_water_nest_gpu.rs) runs a hump of water through a child over the parent's middle third. It checks that the parent's volume holds to 1e-7, that the child's mean surface matches the parent over its interior, and that the parent outside the child stays within 5% rms of a parent run alone. Still water over a sloped bed stays within 0.1 mm.
 
+## Moving over the world
+
+[`ShallowWaterShift`](../src/shallow_water/shift.rs) moves one solver's grid by whole cells, so a nest can follow the camera or a player over ground a world bed texture describes. `encode` copies the grid's depth and face velocities aside, then writes them back moved, in its own compute pass, so no thread reads a cell another thread has overwritten. `ShallowWaterShiftParams` gives the shift, the grid's corner and cell width after it, and how the cells that come in are filled:
+
+- Their bed is the mean of `subsamples`² bilinear samples of the `ShallowWaterWorldBed`. Give a child 1, its parent 3 and the parent's own parent 9. The parent's samples then fall on its child cells' centres, so a parent cell's bed is exactly the mean of the child beds over it, and the feedback's depth mean keeps the parent's surface and its volume.
+- A nest's child takes its water from the parent's surface over its own bed, wet cells only. A grid without a parent fills to `fill_level`.
+- Face velocities that come in start at zero.
+
+A shift at least the grid's size refills every cell, which is how grids start from the world. To move a child one parent cell, shift it by 3 child cells with its new `parent_offset`, and call the nest's `set_offset` with the same offset. Shift the parent before the child, so the child's new cells read the moved parent. The feedback also takes the child's mean bed for the parent cells over it.
+
+[`tests/shallow_water_nest_moving_gpu.rs`](../tests/shallow_water_nest_moving_gpu.rs) fills both grids from a bumpy world bed with the shift kernel and moves the child 20 parent cells. Still water stays within 1e-5 m, and the child's bed matches the world under its final position. With a wave running, the parent keeps its volume to 1e-7 while the child moves.
+
 ## Not yet
 
-Moving the child with the camera, filling the cells that come in from world bathymetry, and drawing several nested grids into the water LOD are the next steps. The `swe-coupling` branch's camera-following rings were the prototype for this module.
+Drawing several nested grids into the water LOD, and running the bay and the lower river as one sandbox, are the next step. The `swe-coupling` branch's camera-following rings were the prototype for this module.

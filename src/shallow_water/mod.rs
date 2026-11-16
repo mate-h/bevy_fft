@@ -19,6 +19,7 @@
 mod nest;
 mod render;
 mod river;
+mod shift;
 mod solver;
 
 use bevy::{
@@ -47,6 +48,9 @@ pub use render::{
     plug_shallow_water_render_app, prepare_shallow_water_gpu, run_shallow_water_sim,
 };
 pub use river::{GridEdge, RiverSpline, ShallowWaterBorderFace, ShallowWaterBorderProfile};
+pub use shift::{
+    ShallowWaterShift, ShallowWaterShiftParams, ShallowWaterShiftPipelines, ShallowWaterWorldBed,
+};
 pub use solver::{
     ShallowWaterInputs, ShallowWaterKernels, ShallowWaterPipelines, ShallowWaterSettings,
     ShallowWaterSolver, ShallowWaterSolverDescriptor, ShallowWaterTextures, round_particle_count,
@@ -528,6 +532,7 @@ pub mod shaders {
     pub const SHALLOW_WATER_SIMULATOR: &str = "embedded://bevy_fft/shallow_water/simulator.wesl";
     pub const SHALLOW_WATER_SURFACE: &str = "embedded://bevy_fft/shallow_water/surface.wesl";
     pub const SHALLOW_WATER_NEST: &str = "embedded://bevy_fft/shallow_water/nest.wesl";
+    pub const SHALLOW_WATER_SHIFT: &str = "embedded://bevy_fft/shallow_water/shift.wesl";
 }
 
 fn sync_shallow_water_mesh_material(
@@ -592,13 +597,15 @@ impl Plugin for ShallowWaterSolverPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "simulator.wesl");
         embedded_asset!(app, "nest.wesl");
+        embedded_asset!(app, "shift.wesl");
     }
 
     fn finish(&self, app: &mut App) {
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
                 .init_resource::<ShallowWaterPipelines>()
-                .init_resource::<ShallowWaterNestPipelines>();
+                .init_resource::<ShallowWaterNestPipelines>()
+                .init_resource::<ShallowWaterShiftPipelines>();
         }
     }
 }

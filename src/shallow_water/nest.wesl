@@ -192,8 +192,8 @@ fn is_covered(p : vec2i) -> bool {
     return all(l >= vec2i(b)) && all(l < covered() - b);
 }
 
-fn child_h(c : vec2i) -> f32 {
-    return textureLoad(srcBedWater, vec2u(c), 0).y;
+fn child_hw(c : vec2i) -> vec2f {
+    return textureLoad(srcBedWater, vec2u(c), 0).xy;
 }
 
 /// Volume per unit width through child u face `(fi, j)` this frame.
@@ -229,7 +229,7 @@ fn reflux_w(i : i32, fj : i32, side : f32) -> f32 {
 }
 
 /// Feeds the child back into the parent. Parent cells over the child's interior take the mean
-/// depth of their nine child cells, and the faces between them the mean of their three child
+/// bed and depth of their nine child cells, and the faces between them the mean of their three child
 /// faces. Parent cells beside that region swap their flux through the shared face for the
 /// child's (Berger and Colella 1989), so the parent conserves the water the child moves.
 @compute @workgroup_size(16, 16)
@@ -242,11 +242,13 @@ fn feedback(@builtin(global_invocation_id) id : vec3u) {
         var hw = textureLoad(bedWater, id.xy);
         let l = local(p);
         if (is_covered(p)) {
-            var h = 0.0;
+            var hw_child = vec2f(0.0);
             for (var k = 0; k < RHO * RHO; k++) {
-                h += child_h(l * RHO + vec2i(k % RHO, k / RHO));
+                hw_child += child_hw(l * RHO + vec2i(k % RHO, k / RHO));
             }
-            hw.y = h / f32(RHO * RHO);
+            // The bed too, so the parent's surface is the child's mean surface even where the
+            // child moved over ground the parent sampled differently.
+            hw = vec4f(hw_child / f32(RHO * RHO), hw.zw);
         } else {
             let rows = l.y >= b && l.y < m.y - b;
             let cols = l.x >= b && l.x < m.x - b;
