@@ -382,13 +382,9 @@ fn bar_sync_u_faces(@builtin(global_invocation_id) id: vec3u) {
     // Zeroing them made wall BCs that fight the periodic Airy path and launch edge lattices.
     let i_right = select(0, fi, fi < nx);
     let i_left = wrapi(i_right - 1, nx);
-    let hl = bar_h_at(i_left, jc);
-    let hr = bar_h_at(i_right, jc);
-    let ql = bar_at(i_left, jc).g;
-    let qr = bar_at(i_right, jc).g;
-    let ul = ql / max(hl, 1e-6);
-    let ur = qr / max(hr, 1e-6);
-    let u_face = 0.5 * (ul + ur);
+    // The bar's q is the flux through each cell's +x face, the face between i_left and i_right.
+    let h_face = 0.5 * (bar_h_at(i_left, jc) + bar_h_at(i_right, jc));
+    let u_face = bar_at(i_left, jc).g / max(h_face, 1e-6);
     textureStore(bar_face_u, id.xy, vec4f(bar_clamp_face_vel(u_face)));
 }
 
@@ -400,13 +396,8 @@ fn bar_sync_w_faces(@builtin(global_invocation_id) id: vec3u) {
     let fj = i32(id.y);
     let j_up = select(0, fj, fj < nx);
     let j_dn = wrapi(j_up - 1, nx);
-    let hd = bar_h_at(ic, j_dn);
-    let hu = bar_h_at(ic, j_up);
-    let qd = bar_at(ic, j_dn).b;
-    let qu = bar_at(ic, j_up).b;
-    let vd = qd / max(hd, 1e-6);
-    let vu = qu / max(hu, 1e-6);
-    let w_face = 0.5 * (vd + vu);
+    let h_face = 0.5 * (bar_h_at(ic, j_dn) + bar_h_at(ic, j_up));
+    let w_face = bar_at(ic, j_dn).b / max(h_face, 1e-6);
     textureStore(bar_face_w, id.xy, vec4f(bar_clamp_face_vel(w_face)));
 }
 
@@ -617,14 +608,11 @@ fn bar_gather_cell_q(@builtin(global_invocation_id) id: vec3u) {
     let i = i32(id.x);
     let j = i32(id.y);
     let h = max(textureLoad(d_bar, id.xy).r, 0.0);
-    let uL = bar_u_face_read(i, j);
-    let uR = bar_u_face_read(i + 1, j);
-    let wB = bar_w_face_read(i, j);
-    let wT = bar_w_face_read(i, j + 1);
-    let u_avg = 0.5 * (uL + uR);
-    let v_avg = 0.5 * (wB + wT);
-    var qx = h * u_avg;
-    var qy = h * v_avg;
+    // Flux through the +x and +y faces, where the merge's divergence reads it.
+    let h_e = 0.5 * (h + bar_h_at(i + 1, j));
+    let h_n = 0.5 * (h + bar_h_at(i, j + 1));
+    var qx = h_e * bar_u_face_read(i + 1, j);
+    var qy = h_n * bar_w_face_read(i, j + 1);
     let dx = sim.dx;
     let dt = sim.dt;
     let h_safe = max(h, 1e-3);
@@ -917,22 +905,19 @@ fn omega_disp(g: f32, k: f32, hbar: f32, dx: f32) -> f32 {
     return raw * (k / b_safe);
 }
 
-// Half-cell shift e^{-i k·Δ/2} on ĥ for x (qx) or y (qy) derivative (paper Sec. 4.3).
-// Deep mode carries q̃ from step to step, so it needs ĥ on the +x and +y faces where the merge
-// reads q: e^{+i k Δ/2} with the forward FFT's e^{-i k x}. The shift the hybrid uses lands half a
-// cell the other way. A whole-cell offset between q̃ and the merge's divergence makes a carried q̃
-// grow without bound, while the hybrid rebuilds q̃ every step and hides it.
+// Half-cell shift of ĥ onto the +x and +y faces, where the merge reads q (paper Sec. 4.3):
+// e^{+i k Δ/2} with the forward FFT's e^{-i k x}. With e^{-i k Δ/2} the Airy flux lands a whole
+// cell off the merge's divergence: the hybrid's waves drift a cell toward -x and -y within 3 s,
+// and deep mode, which carries q̃ from step to step, grows without bound.
 fn h_phase_shift_x(hre: f32, him: f32, kx: f32) -> vec2f {
-    var th = kx * sim.dx * 0.5;
-    if ((sim.spectral_flags & SPECTRAL_DEEP) != 0u) { th = -th; }
+    let th = -kx * sim.dx * 0.5;
     let ct = cos(th);
     let st = sin(th);
     return vec2f(hre * ct + him * st, him * ct - hre * st);
 }
 
 fn h_phase_shift_y(hre: f32, him: f32, ky: f32) -> vec2f {
-    var th = ky * sim.dx * 0.5;
-    if ((sim.spectral_flags & SPECTRAL_DEEP) != 0u) { th = -th; }
+    let th = -ky * sim.dx * 0.5;
     let ct = cos(th);
     let st = sin(th);
     return vec2f(hre * ct + him * st, him * ct - hre * st);

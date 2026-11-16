@@ -166,7 +166,7 @@ fn deep_mode_waves_follow_deep_water_dispersion() {
 #[ignore = "requires a graphics adapter"]
 fn deep_mode_stays_stable_over_many_periods() {
     // 20 s is about four and a half periods. A flux carried half a cell off the merge's faces
-    // grows such a wave fivefold over this run.
+    // grows such a wave fivefold over this run in deep mode.
     let steps = 1200;
     let k = TAU / WAVELENGTH;
     let left = standing_wave(Some(200.0), steps);
@@ -175,6 +175,14 @@ fn deep_mode_stays_stable_over_many_periods() {
     assert!(
         (left - expected).abs() < 0.2,
         "after {steps} steps at {left}, cos(ω t) = {expected}"
+    );
+    // The hybrid read its bulk flux, and its Airy flux, half a cell off the faces the merge
+    // reads, which damped this wave to nothing within 10 s. It keeps most of it now.
+    let hybrid = standing_wave(None, steps);
+    assert!(hybrid.abs() <= 1.0, "the hybrid's wave grew to {hybrid}");
+    assert!(
+        hybrid.abs() > 0.5,
+        "the hybrid's wave fell to {hybrid} after {steps} steps"
     );
 }
 
