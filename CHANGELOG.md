@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `bodies::voxelize` turns a closed mesh into voxels with the hull's volume, plus surface patches with their outward normal and area. `FloatingBodyPlugin` evaluates buoyancy, ITTC 1957 friction, pressure drag and slamming on each `FloatingBody` against the water LOD data on the GPU, and reads back one force and torque per body.
+- `DispersiveController::deep_water_depth` runs a dispersive patch in Airy-only deep mode: no bulk shallow water, one Airy pass at one depth, for open-sea wakes. `kelvin_wavelength` and `deep_mode_suits` tell when the water is deep enough for it.
 - The dispersive patch absorbs waves at its edges with Tessendorf's edge trim (Gilligan §3.6), so they no longer wrap around the periodic FFT domain. `DispersiveController::edge_trim_cells` sets the band, 12 cells by default, and 0 restores the periodic patch.
 - Floating bodies press shallow water down through a pressure head (Kellomäki 2014): `FloatingBodyPlugin` writes each body's displaced volume into `ShallowWaterController::pressure_head`, the solver drives the flow with the surface plus that head, and buoyancy reads it back from the flow lane of the LOD data, so bodies push water aside and make waves without sinking into their own dent.
 - The `floating` example drops crates, a log and a ball onto the ocean and moves them with Rapier from the GPU water forces. `FloatingBody::compensated` corrects the forces for the frames the readback takes.

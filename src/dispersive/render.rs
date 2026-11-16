@@ -76,6 +76,8 @@ fn write_uniform_at<T: ShaderType + WriteInto>(
 
 /// Matches `SPECTRAL_FIXED_DEPTH` in `dispersive.wgsl`.
 const SPECTRAL_FIXED_DEPTH_FLAG: u32 = 1;
+/// Matches `SPECTRAL_DEEP` in `dispersive.wesl`.
+const SPECTRAL_DEEP_FLAG: u32 = 2;
 
 /// wgpu uniform dynamic-offset alignment. Slot 0 is the base sim uniform; slots 1..4 are
 /// the four Airy reference-depth uniforms. Mid-encoder `queue.write_buffer` to one offset
@@ -156,6 +158,7 @@ pub struct DispersivePipelines {
     pub decompose_init: CachedComputePipelineId,
     pub diffuse_eta_step: CachedComputePipelineId,
     pub decompose_split: CachedComputePipelineId,
+    pub decompose_deep: CachedComputePipelineId,
     pub bar_sync_u_faces: CachedComputePipelineId,
     pub bar_sync_w_faces: CachedComputePipelineId,
     pub bar_mac_u_copy: CachedComputePipelineId,
@@ -249,6 +252,7 @@ impl FromWorld for DispersivePipelines {
             decompose_init: q("dis_decompose", "decompose_init"),
             diffuse_eta_step: q("dis_diffuse", "diffuse_eta_step"),
             decompose_split: q("dis_split", "decompose_split"),
+            decompose_deep: q("dis_deep", "decompose_deep"),
             bar_sync_u_faces: q("dis_bsu", "bar_sync_u_faces"),
             bar_sync_w_faces: q("dis_bsw", "bar_sync_w_faces"),
             bar_mac_u_copy: q("dis_bmuc", "bar_mac_u_copy"),
@@ -412,13 +416,23 @@ pub fn prepare_dispersive_gpu(
 
     write_uniform(&render_queue, fs, fs_comp);
     let ts_now = timestamp.0.load(Ordering::Relaxed);
-    let base_u = build_dispersive_sim_uniform(&controller, ts_now, 0, 0.0, 0);
+    let deep = controller.deep_water_depth;
+    let deep_flag = if deep.is_some() {
+        SPECTRAL_DEEP_FLAG
+    } else {
+        0
+    };
+    let base_u = build_dispersive_sim_uniform(&controller, ts_now, deep_flag, 0.0, 0);
     write_uniform_at(&render_queue, dsb, 0, &base_u);
     let sd = sorted_airy_depths(&controller);
     for depth_idx in 0u32..4u32 {
         let mut u = base_u;
-        u.spectral_flags = SPECTRAL_FIXED_DEPTH_FLAG;
-        u.spectral_fixed_depth = sd[depth_idx as usize];
+        u.spectral_flags = SPECTRAL_FIXED_DEPTH_FLAG | deep_flag;
+        // Deep mode runs only the last pass, at its one depth.
+        u.spectral_fixed_depth = match deep {
+            Some(depth) if depth_idx == 3 => depth,
+            _ => sd[depth_idx as usize],
+        };
         u.airy_stack_channel = depth_idx;
         let offset = (depth_idx as u64 + 1) * sim_uniform_slot_stride();
         write_uniform_at(&render_queue, dsb, offset, &u);
@@ -640,6 +654,9 @@ pub fn run_dispersive_sim(
         return;
     };
     let airy_dbg = [airy0, airy1, airy2, airy3];
+    // Deep mode runs one Airy pass, the last, at its one depth.
+    let deep = controller.deep_water_depth.is_some();
+    let airy_passes: &[&BindGroup] = if deep { &airy_dbg[3..] } else { &airy_dbg };
 
     let n = controller.n;
     let wgn = wg2(n);
@@ -687,34 +704,41 @@ pub fn run_dispersive_sim(
             return;
         }
 
-        dispatch(&mut pass, &cache, pl.decompose_init, fft, dbg, wgn);
-        for _ in 0..controller.diffusion_iters {
-            dispatch(&mut pass, &cache, pl.diffuse_eta_step, fft, dbg, wgn);
+        if deep {
+            dispatch(&mut pass, &cache, pl.decompose_deep, fft, dbg, wgn);
+        } else {
+            dispatch(&mut pass, &cache, pl.decompose_init, fft, dbg, wgn);
+            for _ in 0..controller.diffusion_iters {
+                dispatch(&mut pass, &cache, pl.diffuse_eta_step, fft, dbg, wgn);
+            }
+            dispatch(&mut pass, &cache, pl.decompose_split, fft, dbg, wgn);
         }
-        dispatch(&mut pass, &cache, pl.decompose_split, fft, dbg, wgn);
         dispatch(&mut pass, &cache, pl.brush_tilde_wake, fft, dbg, wgn);
 
+        // In deep mode the bulk has no flow, so this zeroes the face velocities transport reads.
         dispatch(&mut pass, &cache, pl.bar_sync_u_faces, fft, dbg, wu);
         dispatch(&mut pass, &cache, pl.bar_sync_w_faces, fft, dbg, ww);
-        dispatch(&mut pass, &cache, pl.bar_mac_u_copy, fft, dbg, wu);
-        dispatch(&mut pass, &cache, pl.bar_mac_u_sl_forward, fft, dbg, wu);
-        dispatch(&mut pass, &cache, pl.bar_mac_u_sl_reverse, fft, dbg, wu);
-        dispatch(&mut pass, &cache, pl.bar_mac_u_combine, fft, dbg, wu);
-        dispatch(&mut pass, &cache, pl.bar_mac_w_copy, fft, dbg, ww);
-        dispatch(&mut pass, &cache, pl.bar_mac_w_sl_forward, fft, dbg, ww);
-        dispatch(&mut pass, &cache, pl.bar_mac_w_sl_reverse, fft, dbg, ww);
-        dispatch(&mut pass, &cache, pl.bar_mac_w_combine, fft, dbg, ww);
-        dispatch(
-            &mut pass,
-            &cache,
-            pl.bar_cmf10_integrate_height,
-            fft,
-            dbg,
-            wgn,
-        );
-        dispatch(&mut pass, &cache, pl.bar_cmf10_vel_u, fft, dbg, wu);
-        dispatch(&mut pass, &cache, pl.bar_cmf10_vel_w, fft, dbg, ww);
-        dispatch(&mut pass, &cache, pl.bar_gather_cell_q, fft, dbg, wgn);
+        if !deep {
+            dispatch(&mut pass, &cache, pl.bar_mac_u_copy, fft, dbg, wu);
+            dispatch(&mut pass, &cache, pl.bar_mac_u_sl_forward, fft, dbg, wu);
+            dispatch(&mut pass, &cache, pl.bar_mac_u_sl_reverse, fft, dbg, wu);
+            dispatch(&mut pass, &cache, pl.bar_mac_u_combine, fft, dbg, wu);
+            dispatch(&mut pass, &cache, pl.bar_mac_w_copy, fft, dbg, ww);
+            dispatch(&mut pass, &cache, pl.bar_mac_w_sl_forward, fft, dbg, ww);
+            dispatch(&mut pass, &cache, pl.bar_mac_w_sl_reverse, fft, dbg, ww);
+            dispatch(&mut pass, &cache, pl.bar_mac_w_combine, fft, dbg, ww);
+            dispatch(
+                &mut pass,
+                &cache,
+                pl.bar_cmf10_integrate_height,
+                fft,
+                dbg,
+                wgn,
+            );
+            dispatch(&mut pass, &cache, pl.bar_cmf10_vel_u, fft, dbg, wu);
+            dispatch(&mut pass, &cache, pl.bar_cmf10_vel_w, fft, dbg, ww);
+            dispatch(&mut pass, &cache, pl.bar_gather_cell_q, fft, dbg, wgn);
+        }
 
         dispatch(&mut pass, &cache, pl.pack_h_t_to_a, fft, dbg, wgn);
         run_forward_fft(&pl_fft, &cache, &mut pass, fft, settings);
@@ -728,7 +752,7 @@ pub fn run_dispersive_sim(
         dispatch(&mut pass, &cache, pl.airy_stack_clear_qx, fft, dbg, wgn);
     }
 
-    for &dbg_d in &airy_dbg {
+    for &dbg_d in airy_passes {
         let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
             label: Some("dispersive_airy_qx_depth"),
             ..default()
@@ -765,7 +789,7 @@ pub fn run_dispersive_sim(
         dispatch(&mut pass, &cache, pl.airy_stack_clear_qy, fft, dbg, wgn);
     }
 
-    for &dbg_d in &airy_dbg {
+    for &dbg_d in airy_passes {
         let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
             label: Some("dispersive_airy_qy_depth"),
             ..default()

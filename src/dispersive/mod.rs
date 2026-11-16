@@ -173,6 +173,20 @@ impl DispersiveGridImages {
     }
 }
 
+/// Wavelength in meters of the transverse waves in the Kelvin wake of a boat moving at `speed`
+/// m/s: the deep-water waves whose phase speed matches the boat, λ = 2π U² / g.
+pub fn kelvin_wavelength(speed: f32, gravity: f32) -> f32 {
+    std::f32::consts::TAU * speed * speed / gravity.max(1e-6)
+}
+
+/// Whether water `depth` meters deep is deep enough for the Airy-only mode
+/// ([`DispersiveController::deep_water_depth`]) for waves of `wavelength` meters. Waves feel the
+/// bottom once it is shallower than about half their wavelength, where the full hybrid has to take
+/// over so they shoal and run up.
+pub fn deep_mode_suits(depth: f32, wavelength: f32) -> bool {
+    depth >= 0.5 * wavelength
+}
+
 /// How a placed dispersive patch combines with the water LOD data below it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Reflect)]
 pub enum DispersiveLodBlend {
@@ -237,6 +251,14 @@ pub struct DispersiveController {
     /// Exponent of the trim's taper, `(d / edge_trim_cells)^alpha` at distance `d` from an edge.
     /// Gilligan uses 0.05. Larger values reflect more.
     pub edge_trim_alpha: f32,
+    /// Runs the patch in Airy-only deep mode at this depth in meters. It skips the bulk shallow
+    /// water and the decomposition, and evolves every wave in Fourier space with
+    /// ω² = g k tanh(k depth): Jeschke and Wojtan's Algorithm 2 on its own, in effect Tessendorf's
+    /// eWave. Kelvin wakes and their angle come out right at any boat speed, and each step skips
+    /// the decomposition's diffusion passes, the bulk step, and three of the four Airy passes.
+    /// `None` runs the full hybrid, which shallow water needs for shoaling and run-up.
+    /// [`deep_mode_suits`] says which to pick.
+    pub deep_water_depth: Option<f32>,
     pub paused: bool,
     /// Bump while paused to run one hybrid step.
     pub step_serial: u32,
@@ -293,6 +315,7 @@ impl DispersiveController {
             vel_clamp_alpha: 0.5,
             edge_trim_cells: 12.0,
             edge_trim_alpha: 0.05,
+            deep_water_depth: None,
             paused: false,
             step_serial: 0,
             sim_apply_serial: 0,
@@ -320,6 +343,7 @@ impl DispersiveController {
         let h_avgmax_beta = self.h_avgmax_beta;
         let vel_clamp_alpha = self.vel_clamp_alpha;
         let (edge_trim_cells, edge_trim_alpha) = (self.edge_trim_cells, self.edge_trim_alpha);
+        let deep_water_depth = self.deep_water_depth;
         let paused = self.paused;
         let step_serial = self.step_serial;
         let brush_active = self.brush_active;
@@ -342,6 +366,7 @@ impl DispersiveController {
         next.vel_clamp_alpha = vel_clamp_alpha;
         next.edge_trim_cells = edge_trim_cells;
         next.edge_trim_alpha = edge_trim_alpha;
+        next.deep_water_depth = deep_water_depth;
         next.paused = paused;
         next.step_serial = step_serial;
         next.brush_active = brush_active;
@@ -468,5 +493,19 @@ impl Plugin for DispersivePlugin {
                         .in_set(crate::water::WaterLodGraphSystems::Blend),
                 );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deep_mode_suits_water_deeper_than_half_the_wake() {
+        // A boat at 6 m/s trails transverse waves about 23 m long.
+        let wavelength = kelvin_wavelength(6.0, 9.81);
+        assert!((wavelength - 23.06).abs() < 0.05, "{wavelength}");
+        assert!(deep_mode_suits(12.0, wavelength));
+        assert!(!deep_mode_suits(8.0, wavelength));
     }
 }

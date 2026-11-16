@@ -41,6 +41,8 @@ struct DispersiveSim {
 }
 
 const SPECTRAL_FIXED_DEPTH: u32 = 1u;
+/// Airy-only deep mode: no bulk shallow water, one Airy pass at a deep depth.
+const SPECTRAL_DEEP: u32 = 2u;
 
 @group(1) @binding(0) var<uniform> sim: DispersiveSim;
 @group(1) @binding(1) var d_state: texture_storage_2d<rgba32float, read_write>;
@@ -177,6 +179,24 @@ fn decompose_split(@builtin(global_invocation_id) id: vec3u) {
     let qyb = s.b;
     textureStore(d_bar, id.xy, vec4(h_bar, qxb, qyb, 0.0));
     textureStore(d_tilde, id.xy, vec4(h_t, 0.0, 0.0, prev_h));
+}
+
+// Airy-only deep mode (Jeschke and Wojtan's Algorithm 2 on its own, in effect eWave). The
+// whole deviation from rest is surface wave, the flux stays with it, and the bulk keeps only the
+// rest depth and no flow, so the transport and merge steps leave it alone.
+@compute @workgroup_size(16, 16, 1)
+fn decompose_deep(@builtin(global_invocation_id) id: vec3u) {
+    let n = sim.n;
+    if (id.x >= n || id.y >= n) { return; }
+    let ix = i32(id.x);
+    let iy = i32(id.y);
+    let b = b_at(ix, iy);
+    let s = s_at(ix, iy);
+    let hw = max(s.r, 0.0);
+    let h_bar = max(-b, 0.0);
+    let prev_h = textureLoad(d_tilde, id.xy).a;
+    textureStore(d_bar, id.xy, vec4(h_bar, 0.0, 0.0, 0.0));
+    textureStore(d_tilde, id.xy, vec4(hw - h_bar, s.g, s.b, prev_h));
 }
 
 // --- Bulk bar: Chentanez–Müller 2010 (CMF10), same order as `src/shallow_water/simulator.wesl` MacCormack + upwind h + η pressure.
@@ -775,6 +795,8 @@ fn blend_airy_qx_to_tilde(@builtin(global_invocation_id) id: vec3u) {
     let st = textureLoad(d_airy_stack_qx, id.xy);
     let t = textureLoad(d_tilde, id.xy);
     var qx_b = lerp_depth_sample(hb, sim.airy_depth_0, sim.airy_depth_1, sim.airy_depth_2, sim.airy_depth_3, st);
+    // Deep mode runs one Airy pass, into the last channel.
+    if ((sim.spectral_flags & SPECTRAL_DEEP) != 0u) { qx_b = st.w; }
     if (!is_finite_f(qx_b)) { qx_b = 0.0; }
     textureStore(d_tilde, id.xy, vec4(t.r, qx_b, t.b, t.a));
 }
@@ -787,6 +809,7 @@ fn blend_airy_qy_to_tilde(@builtin(global_invocation_id) id: vec3u) {
     let st = textureLoad(d_airy_stack_qy, id.xy);
     let t = textureLoad(d_tilde, id.xy);
     var qy_b = lerp_depth_sample(hb, sim.airy_depth_0, sim.airy_depth_1, sim.airy_depth_2, sim.airy_depth_3, st);
+    if ((sim.spectral_flags & SPECTRAL_DEEP) != 0u) { qy_b = st.w; }
     if (!is_finite_f(qy_b)) { qy_b = 0.0; }
     let qcl = clamp_q_cell(max(hb + t.r, 1e-3), t.g, qy_b);
     textureStore(d_tilde, id.xy, vec4(t.r, qcl.x, qcl.y, t.a));

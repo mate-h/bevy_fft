@@ -5,8 +5,8 @@
 //! patch. A scripted disturbance circles the patch like a boat. Turn it off in the panel and drag
 //! with the left mouse button to make your own wake.
 //!
-//! The patch is still periodic and fades out over a band at its edge. Following the boat and
-//! trimming the edges are separate steps.
+//! The patch absorbs waves at its edges with Tessendorf's trim. Following the boat is a separate
+//! step.
 
 use bevy::{
     anti_alias::fxaa::Fxaa,
