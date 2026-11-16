@@ -58,7 +58,7 @@ The examples are the best starting point for each feature. `bevy_fft::prelude` e
 | `shallow_water` | The shallow water solver with a brush on a PBR plane | `cargo run --example shallow_water --features free_camera` |
 | `dispersive` | Dispersive waves on their own, with mouse-drawn wakes | `cargo run --example dispersive --features free_camera` |
 | `floating` | Crates, a log and a ball floating on the ocean, with water forces from the GPU applied by Rapier | `cargo run --example floating --features free_camera` |
-| `wake` | A dispersive patch on the FFT ocean, with a scripted boat | `cargo run --example wake --features free_camera` |
+| `wake` | A dispersive patch on the FFT ocean that follows a scripted boat | `cargo run --example wake --features free_camera` |
 | `ewave` | A periodic eWave height field | `cargo run --example ewave --features free_camera` |
 | `beach` | Surf over real terrain: the ocean, a shallow water grid and terrain-aware optics | `cargo run --release --example beach --features free_camera` |
 

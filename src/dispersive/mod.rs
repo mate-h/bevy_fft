@@ -289,6 +289,9 @@ pub struct DispersiveController {
     /// World placement. When set and [`WaterPlugin`](crate::water::WaterPlugin) is present, the
     /// patch is written into the shared water LOD data every frame.
     pub placement: Option<DispersivePlacement>,
+    /// Whole cells [`Self::follow`] has moved the patch by in all. The GPU moves the water by
+    /// whatever this has changed by since the last frame it ran.
+    pub moved: IVec2,
 }
 
 impl DispersiveController {
@@ -323,6 +326,28 @@ impl DispersiveController {
             pressure_head: map(images, 0.0),
             obstruction: map(images, 1.0),
         });
+    }
+
+    /// Keeps the patch centred on world `xz`, such as a boat's position, by moving it whole cells
+    /// at a time once `xz` is `margin_cells` or more from the centre along X or Z. The water moves
+    /// with the patch without resampling, and the strip that comes in over the leading edge
+    /// starts at rest, so the ocean below shows through it. [`Self::pointer`] and
+    /// [`Self::pointer_prev`] move with the cells. Call it each frame before setting the brush;
+    /// it needs a [`Self::placement`].
+    pub fn follow(&mut self, xz: Vec2, margin_cells: f32) {
+        let Some(placement) = &mut self.placement else {
+            return;
+        };
+        let cell = self.tile_world / self.n.max(1) as f32;
+        let offset = (xz - placement.center) / cell;
+        if offset.abs().max_element() < margin_cells.max(1.0) {
+            return;
+        }
+        let step = offset.round().as_ivec2();
+        placement.center += step.as_vec2() * cell;
+        self.moved += step;
+        self.pointer -= step.as_vec2();
+        self.pointer_prev -= step.as_vec2();
     }
 
     pub fn cell_size(&self) -> f32 {
@@ -374,6 +399,7 @@ impl DispersiveController {
             pointer: Vec2::ZERO,
             pointer_prev: Vec2::ZERO,
             placement: None,
+            moved: IVec2::ZERO,
         }
     }
 
@@ -423,6 +449,8 @@ impl DispersiveController {
         next.pointer = pointer;
         next.pointer_prev = pointer_prev;
         next.placement = placement;
+        // The render side compares against the total it last applied, which a rebuild keeps.
+        next.moved = self.moved;
         next.sim_apply_serial = sim_apply_serial;
         next.init_serial = 1;
         *self = next;

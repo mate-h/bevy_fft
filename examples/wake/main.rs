@@ -1,12 +1,12 @@
 //! Boat-wake style waves from the dispersive solver, riding on the FFT ocean.
 //!
-//! A 256 m dispersive patch sits at the origin and adds its waves onto the ocean through the
-//! shared water LOD data, so one surface draws both and the ocean swell runs straight through the
-//! patch. A scripted disturbance circles the patch like a boat. Turn it off in the panel and drag
-//! with the left mouse button to make your own wake.
+//! A 256 m dispersive patch adds its waves onto the ocean through the shared water LOD data, so
+//! one surface draws both and the ocean swell runs straight through the patch. A scripted
+//! disturbance circles like a boat, and the patch follows it by whole cells. Turn it off in the
+//! panel and drag with the left mouse button to make your own wake; the patch then stays put.
 //!
 //! The patch runs in Airy-only deep mode, as open-sea wakes need, and absorbs waves at its edges
-//! with Tessendorf's trim. Following the boat is a separate step.
+//! with Tessendorf's trim.
 
 use bevy::{
     anti_alias::fxaa::Fxaa,
@@ -50,6 +50,8 @@ const PATCH_WORLD: f32 = 256.0;
 const BOAT_RADIUS: f32 = 55.0;
 /// Speed in m/s of the scripted boat.
 const BOAT_SPEED: f32 = 6.0;
+/// The patch moves to recentre on the boat once it is this many cells off centre.
+const FOLLOW_MARGIN_CELLS: f32 = 4.0;
 /// Depth in meters of the open sea under the patch.
 const OPEN_SEA_DEPTH: f32 = 100.0;
 
@@ -260,6 +262,8 @@ fn drive_brush(
             let heading = Vec2::from_angle(boat.angle + std::f32::consts::FRAC_PI_2);
             transform.translation = Vec3::new(xz.x, 0.3, xz.y);
             transform.rotation = Quat::from_rotation_y(heading.x.atan2(heading.y));
+            // Keep the patch on the boat, a few whole cells at a time, so it can sail anywhere.
+            controller.follow(xz, FOLLOW_MARGIN_CELLS);
             let sim = controller.world_to_cells(xz);
             controller.pointer_prev = controller.pointer;
             controller.pointer = sim;

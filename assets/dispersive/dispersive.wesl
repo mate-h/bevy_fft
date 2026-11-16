@@ -40,8 +40,10 @@ struct DispersiveSim {
     edge_trim_alpha: f32,
     /// 1 when `body_pressure` and `body_obstruction` are the patch's maps.
     body_maps: u32,
-    _pad0: u32,
-    _pad1: u32,
+    /// Whole cells the patch moves by this frame, 0 on frames it stays. The cell at `id` takes
+    /// over the water of the cell at `id + shift`.
+    shift_x: i32,
+    shift_y: i32,
     _pad2: u32,
 }
 
@@ -672,7 +674,18 @@ fn brush_pressure_head(id: vec2u) -> f32 {
 /// moving hull trails a wake.
 fn body_pressure_head(id: vec2u) -> f32 {
     if ((sim.spectral_flags & SPECTRAL_DEEP) == 0u || sim.body_maps == 0u) { return 0.0; }
-    return textureLoad(body_pressure, id, 0).r;
+    let c = body_map_cell(id);
+    if (c.x < 0) { return 0.0; }
+    return textureLoad(body_pressure, vec2u(c), 0).r;
+}
+
+/// Cell of the body maps for patch cell `id`, or -1 off the maps. The footprint pass wrote them
+/// last frame, so on a frame the patch moves they are still on the old cells.
+fn body_map_cell(id: vec2u) -> vec2i {
+    let c = vec2i(id) + vec2i(sim.shift_x, sim.shift_y);
+    let n = i32(sim.n);
+    if (any(c < vec2i(0)) || any(c >= vec2i(n))) { return vec2i(-1); }
+    return c;
 }
 
 /// Head the brush and floating bodies press the surface down by, 0 outside deep mode.
@@ -1317,8 +1330,9 @@ fn merge_to_state(@builtin(global_invocation_id) id: vec3u) {
 
 fn obstruction_at(ix: i32, iy: i32) -> f32 {
     let n = i32(sim.n);
-    let c = vec2u(u32(wrapi(ix, n)), u32(wrapi(iy, n)));
-    return clamp(textureLoad(body_obstruction, c, 0).r, 0.0, 1.0);
+    let c = body_map_cell(vec2u(u32(wrapi(ix, n)), u32(wrapi(iy, n))));
+    if (c.x < 0) { return 1.0; }
+    return clamp(textureLoad(body_obstruction, vec2u(c), 0).r, 0.0, 1.0);
 }
 
 fn edge_trim_1d(i: u32) -> f32 {
@@ -1514,4 +1528,62 @@ fn brush_tilde_wake(@builtin(global_invocation_id) id: vec3u) {
     td.g += h_ref * u_along * tangent.x;
     td.b += h_ref * u_along * tangent.y;
     textureStore(d_tilde, id.xy, vec4(td.r, td.g, td.b, td.a));
+}
+
+// --- Following a moving point (`DispersiveController::follow`). The patch moves by whole cells,
+// so its water moves by whole cells too and nothing is resampled. Cells that come in over the
+// edge start at rest, where the ocean below shows through. Each pair of passes goes through
+// `d_scratch`, which the step rebuilds before it reads it.
+
+fn shift_source(id: vec2u) -> vec2i {
+    return vec2i(id) + vec2i(sim.shift_x, sim.shift_y);
+}
+
+fn shift_inside(c: vec2i) -> bool {
+    let n = i32(sim.n);
+    return all(c >= vec2i(0)) && all(c < vec2i(n));
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn shift_state_to_scratch(@builtin(global_invocation_id) id: vec3u) {
+    let n = sim.n;
+    if (id.x >= n || id.y >= n) { return; }
+    let c = shift_source(id.xy);
+    // The rest depth over this cell's own bed, still and level with the ocean.
+    var v = vec4(max(-textureLoad(d_bed, id.xy).r, 0.0), 0.0, 0.0, 0.0);
+    if (shift_inside(c)) {
+        let s = textureLoad(d_state, vec2u(c));
+        // The hybrid keeps last step's surface height in tilde.a for its time average.
+        v = vec4(s.r, s.g, s.b, textureLoad(d_tilde, vec2u(c)).a);
+    }
+    textureStore(d_scratch, id.xy, v);
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn shift_state_commit(@builtin(global_invocation_id) id: vec3u) {
+    let n = sim.n;
+    if (id.x >= n || id.y >= n) { return; }
+    let v = textureLoad(d_scratch, id.xy);
+    textureStore(d_state, id.xy, vec4(v.r, v.g, v.b, 0.0));
+    let t = textureLoad(d_tilde, id.xy);
+    textureStore(d_tilde, id.xy, vec4(t.r, t.g, t.b, v.a));
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn shift_vel_to_scratch(@builtin(global_invocation_id) id: vec3u) {
+    let n = sim.n;
+    if (id.x >= n || id.y >= n) { return; }
+    let c = shift_source(id.xy);
+    var v = vec4(0.0);
+    if (shift_inside(c)) {
+        v = textureLoad(bar_vel_prev, vec2u(c));
+    }
+    textureStore(d_scratch, id.xy, v);
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn shift_vel_commit(@builtin(global_invocation_id) id: vec3u) {
+    let n = sim.n;
+    if (id.x >= n || id.y >= n) { return; }
+    textureStore(bar_vel_prev, id.xy, textureLoad(d_scratch, id.xy));
 }

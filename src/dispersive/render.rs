@@ -1,7 +1,7 @@
 //! Compute pipelines, GPU buffers, and render-graph schedule for the hybrid dispersive sim.
 
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
 use bevy::app::SubApp;
 use bevy::ecs::world::FromWorld;
@@ -63,8 +63,9 @@ pub struct DispersiveSimUniform {
     pub edge_trim_alpha: f32,
     /// 1 when the body pressure head and obstruction maps are bound.
     pub body_maps: u32,
-    pub _pad0: u32,
-    pub _pad1: u32,
+    /// Whole cells the patch moves by this frame: the change in [`DispersiveController::moved`].
+    pub shift_x: i32,
+    pub shift_y: i32,
     pub _pad2: u32,
 }
 
@@ -159,8 +160,8 @@ fn build_dispersive_sim_uniform(
         edge_trim_cells: controller.edge_trim_cells,
         edge_trim_alpha: controller.edge_trim_alpha,
         body_maps: u32::from(controller.body_maps.is_some()),
-        _pad0: 0,
-        _pad1: 0,
+        shift_x: 0,
+        shift_y: 0,
         _pad2: 0,
     }
 }
@@ -215,6 +216,10 @@ pub struct DispersivePipelines {
     pub unpack_b_to_state_qy_clamp: CachedComputePipelineId,
     pub store_bar_vel_prev: CachedComputePipelineId,
     pub edge_trim: CachedComputePipelineId,
+    pub shift_state_to_scratch: CachedComputePipelineId,
+    pub shift_state_commit: CachedComputePipelineId,
+    pub shift_vel_to_scratch: CachedComputePipelineId,
+    pub shift_vel_commit: CachedComputePipelineId,
     pub init_basin: CachedComputePipelineId,
     pub brush_flow_impulse: CachedComputePipelineId,
     pub brush_tilde_wake: CachedComputePipelineId,
@@ -313,6 +318,10 @@ impl FromWorld for DispersivePipelines {
             unpack_b_to_state_qy_clamp: q("dis_usy", "unpack_b_to_state_qy_clamp"),
             store_bar_vel_prev: q("dis_svp", "store_bar_vel_prev"),
             edge_trim: q("dis_edge_trim", "edge_trim"),
+            shift_state_to_scratch: q("dis_shift_s", "shift_state_to_scratch"),
+            shift_state_commit: q("dis_shift_sc", "shift_state_commit"),
+            shift_vel_to_scratch: q("dis_shift_v", "shift_vel_to_scratch"),
+            shift_vel_commit: q("dis_shift_vc", "shift_vel_commit"),
             init_basin: q("dis_init", "init_basin"),
             brush_flow_impulse: q("dis_brush", "brush_flow_impulse"),
             brush_tilde_wake: q("dis_brush_t", "brush_tilde_wake"),
@@ -339,6 +348,10 @@ pub struct DispersiveGpuResources {
     pub last_apply_serial: u32,
     /// Bound in place of the body maps while the patch has none.
     pub no_body_map: Option<TextureView>,
+    /// [`DispersiveController::moved`] as of the last shift the GPU ran.
+    pub applied_moved: [AtomicI32; 2],
+    /// Cells the patch moves by this frame, the change in `moved` since `applied_moved`.
+    pub pending_shift: [AtomicI32; 2],
 }
 
 impl Default for DispersiveGpuResources {
@@ -354,6 +367,8 @@ impl Default for DispersiveGpuResources {
             last_step_serial: AtomicU32::new(0),
             no_body_map: None,
             last_apply_serial: 0,
+            applied_moved: [AtomicI32::new(0), AtomicI32::new(0)],
+            pending_shift: [AtomicI32::new(0), AtomicI32::new(0)],
         }
     }
 }
@@ -461,7 +476,16 @@ pub fn prepare_dispersive_gpu(
     } else {
         0
     };
-    let base_u = build_dispersive_sim_uniform(&controller, ts_now, deep_flag, 0.0, 0);
+    let mut base_u = build_dispersive_sim_uniform(&controller, ts_now, deep_flag, 0.0, 0);
+    let applied = IVec2::new(
+        gpu.applied_moved[0].load(Ordering::Relaxed),
+        gpu.applied_moved[1].load(Ordering::Relaxed),
+    );
+    let pending = controller.moved - applied;
+    gpu.pending_shift[0].store(pending.x, Ordering::Relaxed);
+    gpu.pending_shift[1].store(pending.y, Ordering::Relaxed);
+    base_u.shift_x = pending.x;
+    base_u.shift_y = pending.y;
     write_uniform_at(&render_queue, dsb, 0, &base_u);
     let sd = sorted_airy_depths(&controller);
     for depth_idx in 0u32..4u32 {
@@ -745,6 +769,30 @@ pub fn run_dispersive_sim(
                     "dispersive: init_basin pipeline not ready; will retry"
                 ));
             }
+        }
+
+        // Move the water with the patch before anything reads it, paused or not, since the
+        // placement already moved.
+        let shift = [
+            pl.shift_state_to_scratch,
+            pl.shift_state_commit,
+            pl.shift_vel_to_scratch,
+            pl.shift_vel_commit,
+        ];
+        let pending = IVec2::new(
+            gpu.pending_shift[0].load(Ordering::Relaxed),
+            gpu.pending_shift[1].load(Ordering::Relaxed),
+        );
+        if pending != IVec2::ZERO
+            && shift
+                .iter()
+                .all(|&p| cache.get_compute_pipeline(p).is_some())
+        {
+            for p in shift {
+                dispatch(&mut pass, &cache, p, fft, dbg, wgn);
+            }
+            gpu.applied_moved[0].store(controller.moved.x, Ordering::Relaxed);
+            gpu.applied_moved[1].store(controller.moved.y, Ordering::Relaxed);
         }
 
         // Brush before the hybrid step so the impulse is decomposed and evolved (paper Sec. 4.6).

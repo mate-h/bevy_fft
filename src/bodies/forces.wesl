@@ -357,8 +357,14 @@ fn resolve_pressure(@builtin(global_invocation_id) gid: vec3<u32>) {
     // The volume is measured against the surface plus last frame's head, which the head itself
     // just moved. Taken whole, the head swings between none and the full draft from frame to
     // frame, so it only moves part of the way.
-    let head = mix(previous_head[index], target_head, grid.relaxation);
-    previous_head[index] = head;
+    // The memory is kept per world cell, wrapped onto the grid, so a grid that moves by whole
+    // cells, such as a dispersive patch that follows a boat, finds each cell's last head again.
+    let origin = vec2<i32>(round(grid.center / grid.cell_size));
+    let cells = vec2<i32>(grid.cells);
+    let world = ((vec2<i32>(gid.xy) + origin) % cells + cells) % cells;
+    let memory = u32(world.y) * grid.cells.x + u32(world.x);
+    let head = mix(previous_head[memory], target_head, grid.relaxation);
+    previous_head[memory] = head;
     textureStore(pressure_out, gid.xy, vec4<f32>(head, 0.0, 0.0, 0.0));
     if grid.has_obstruction != 0u {
         let n_cells = grid.cells.x * grid.cells.y;
