@@ -206,6 +206,58 @@ pub struct ShallowWaterController {
     /// World placement. When set and [`WaterPlugin`](crate::water::WaterPlugin) is present, the
     /// surface is blended into the shared water LOD data every frame.
     pub placement: Option<ShallowWaterPlacement>,
+    /// A finer grid nested in this one that follows a point, such as the camera. Needs
+    /// [`Self::placement`]. See [`ShallowWaterNestedGrid`].
+    pub nested: Option<ShallowWaterNestedGrid>,
+}
+
+/// A world bed height image for the cells a nested grid moves over.
+#[derive(Clone, Debug, Reflect)]
+pub struct ShallowWaterWorldBedImage {
+    /// `R32Float` bed heights in the solver's height units.
+    pub image: Handle<Image>,
+    /// World XZ of the image's corner in meters.
+    pub origin: Vec2,
+    /// Width of one texel in meters.
+    pub texel_size: f32,
+}
+
+/// A grid with a third of the cell width, nested in a placed [`ShallowWaterController`] grid and
+/// coupled to it both ways by a [`ShallowWaterNest`]. It moves by whole parent cells to stay
+/// centred on [`Self::follow`] and takes the bed of the ground it moves over from
+/// [`Self::world_bed`]. It blends into the water LOD data over its parent. Floating bodies, the
+/// brush and the border profile act on the parent only.
+#[derive(Clone, Debug, Reflect)]
+pub struct ShallowWaterNestedGrid {
+    /// Cells per edge, a multiple of 3. The grid covers a third as many parent cells.
+    pub cells: u32,
+    pub images: ShallowWaterImages,
+    /// World XZ the grid centres on. It stays inside its parent.
+    pub follow: Vec2,
+    /// Width of the band along its edge that takes the parent's state, in parent cells.
+    pub band: u32,
+    /// World bed for the cells the grid moves over. Without one it interpolates the parent's
+    /// [`ShallowWaterController::bed_source`].
+    pub world_bed: Option<ShallowWaterWorldBedImage>,
+    /// Width in its own cells of the band where it fades into its parent in the LOD data.
+    pub blend_cells: f32,
+}
+
+impl ShallowWaterNestedGrid {
+    pub fn new(images: &mut Assets<Image>, cells: u32) -> Self {
+        assert!(
+            cells.is_multiple_of(NEST_REFINEMENT),
+            "nested grid cells must be a multiple of {NEST_REFINEMENT}"
+        );
+        Self {
+            cells,
+            images: ShallowWaterImages::new(images, cells, cells),
+            follow: Vec2::ZERO,
+            band: 1,
+            world_bed: None,
+            blend_cells: 12.0,
+        }
+    }
 }
 
 impl ShallowWaterController {
@@ -252,6 +304,7 @@ impl ShallowWaterController {
             source: None,
             pressure_head: None,
             border_profile: None,
+            nested: None,
             pointer_sim: Vec2::ZERO,
             pointer_prev_sim: Vec2::ZERO,
             preset_index: 0,
@@ -294,6 +347,29 @@ impl ShallowWaterController {
             pml_state: self.pml_state.clone(),
             ocean_eta: self.ocean_eta.clone(),
         }
+    }
+
+    /// Parent cell under the nested grid's cell (0, 0): the grid centred on its
+    /// [`ShallowWaterNestedGrid::follow`] point, rounded to whole parent cells and kept inside.
+    pub fn nest_offset(&self) -> Option<IVec2> {
+        let (placement, nested) = (self.placement?, self.nested.as_ref()?);
+        let cells = UVec2::new(self.cells_x, self.cells_y);
+        let covered = (nested.cells / NEST_REFINEMENT) as i32;
+        let at = placement.world_to_cells(nested.follow, cells) - 0.5 * covered as f32;
+        Some(
+            at.round()
+                .as_ivec2()
+                .clamp(IVec2::ZERO, cells.as_ivec2() - covered),
+        )
+    }
+
+    /// World XZ of the nested grid's centre, from [`Self::nest_offset`].
+    pub fn nest_center(&self) -> Option<Vec2> {
+        let (placement, nested) = (self.placement?, self.nested.as_ref()?);
+        let cells = UVec2::new(self.cells_x, self.cells_y).as_vec2();
+        let covered = (nested.cells / NEST_REFINEMENT) as f32;
+        let corner = self.nest_offset()?.as_vec2() + 0.5 * covered;
+        Some(placement.center + (corner - 0.5 * cells) * placement.cell_size)
     }
 
     /// Step parameters for the solver at step `timestamp`.
@@ -560,10 +636,17 @@ struct ShallowWaterHeightfield;
 fn sync_shallow_water_heightfield(
     mut commands: Commands,
     sim: Res<ShallowWaterController>,
-    mut existing: Query<(Entity, &mut WaterHeightfield), With<ShallowWaterHeightfield>>,
+    mut existing: Query<
+        (
+            Entity,
+            &mut WaterHeightfield,
+            Has<ShallowWaterNestHeightfield>,
+        ),
+        With<ShallowWaterHeightfield>,
+    >,
 ) {
     let Some(placement) = sim.placement else {
-        for (entity, _) in &existing {
+        for (entity, _, _) in &existing {
             commands.entity(entity).despawn();
         }
         return;
@@ -581,13 +664,44 @@ fn sync_shallow_water_heightfield(
             UVec2::new(sim.cells_x, sim.cells_y),
         )
     };
-    match existing.single_mut() {
-        Ok((_, mut current)) => *current = heightfield,
-        Err(_) => {
-            commands.spawn((heightfield, ShallowWaterHeightfield));
+    match existing.iter_mut().find(|(_, _, nested)| !nested) {
+        Some((_, mut current, _)) => *current = heightfield.clone(),
+        None => {
+            commands.spawn((heightfield.clone(), ShallowWaterHeightfield));
         }
     }
+    let nested = sim
+        .nested
+        .as_ref()
+        .zip(sim.nest_center())
+        .map(|(nested, center)| WaterHeightfield {
+            center,
+            cell_size: placement.cell_size / NEST_REFINEMENT as f32,
+            blend_cells: nested.blend_cells,
+            pressure_head: None,
+            order: heightfield.order + 1,
+            dry: heightfield.dry,
+            datum: heightfield.datum,
+            ..WaterHeightfield::new(
+                nested.images.bed_water.clone(),
+                nested.images.velocity.clone(),
+                UVec2::splat(nested.cells),
+            )
+        });
+    let current = existing.iter_mut().find(|(_, _, nested)| *nested);
+    match (nested, current) {
+        (Some(nested), Some((_, mut current, _))) => *current = nested,
+        (Some(nested), None) => {
+            commands.spawn((nested, ShallowWaterHeightfield, ShallowWaterNestHeightfield));
+        }
+        (None, Some((entity, _, _))) => commands.entity(entity).despawn(),
+        (None, None) => {}
+    }
 }
+
+/// Marks the [`WaterHeightfield`] of the controller's nested grid.
+#[derive(Component)]
+struct ShallowWaterNestHeightfield;
 
 /// Registers the solver shader and queues [`ShallowWaterPipelines`] in the render world, for
 /// callers that build and step a [`ShallowWaterSolver`] themselves. [`ShallowWaterPlugin`] adds it.

@@ -18,7 +18,9 @@
 //! edges to walls or drains for comparison. Drag with the left mouse button to add water.
 //!
 //! The grid runs with 2 m cells. `BEACH_CELL_SIZE=1` matches the 1 m data for finer surf, at about
-//! 43 instead of 33 ms per frame at 2560x1440 on an M5.
+//! 43 instead of 33 ms per frame at 2560x1440 on an M5. A grid with a third of the cell width
+//! follows the camera inside it, nested both ways, and takes its bed from the 1 m data as it
+//! moves. `BEACH_NEST` sets its cells per edge, 288 by default, and 0 turns it off.
 //!
 //! The elevation and class rasters come from the matching 1 m shoreline square in
 //! `~/Downloads/hawaii_topobathy`. Prepare the CC0 texture arrays, class map, sand capillary mask,
@@ -100,6 +102,16 @@ fn cell_size() -> f32 {
 fn grid() -> u32 {
     (TERRAIN_SIDE / cell_size()).round() as u32
 }
+
+/// Cells per edge of the finer grid nested around the camera, with a third of the cell width,
+/// 288 unless `BEACH_NEST` sets it. 0 turns it off. It rounds down to a multiple of 3.
+fn nest_cells() -> u32 {
+    let cells = std::env::var("BEACH_NEST")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(288);
+    (cells / NEST_REFINEMENT * NEST_REFINEMENT).min(grid() * NEST_REFINEMENT / 2)
+}
 /// Depth in meters of the solver's zero level below sea level. It sits under the deepest bed in
 /// the data, so solver heights stay positive, and the still sea is at this solver height.
 const SEA_LEVEL: f32 = 30.0;
@@ -168,6 +180,7 @@ fn main() {
                 pan_camera_for_lag_repro,
                 trace_breaking_fronts,
                 draw_breaking_fronts,
+                nest_follows_camera,
             ),
         )
         .add_systems(EguiPrimaryContextPass, beach_panel)
@@ -182,6 +195,19 @@ fn main() {
             ),
         )
         .run();
+}
+
+/// Keeps the nested grid centred under the camera.
+fn nest_follows_camera(
+    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    mut controller: ResMut<ShallowWaterController>,
+) {
+    let Ok(camera) = cameras.single() else {
+        return;
+    };
+    if let Some(nested) = controller.nested.as_mut() {
+        nested.follow = camera.translation().xz();
+    }
 }
 
 #[derive(Component)]
@@ -337,6 +363,24 @@ fn setup(
     controller.gravity = 9.81;
     controller.dt = 1.0 / 60.0;
     controller.brush_radius = 6.0;
+    // A grid with a third of the cell width follows the camera, so the surf around the viewer
+    // resolves shorter waves. It takes the bed of the ground it moves over from the 1 m data.
+    if nest_cells() > 0 {
+        let side = TERRAIN_SIDE as u32;
+        let world: Vec<f32> = (0..side * side)
+            .map(|i| {
+                let xz = Vec2::new((i % side) as f32, (i / side) as f32) + 0.5 - 0.5 * TERRAIN_SIDE;
+                bed.height(xz) + SEA_LEVEL
+            })
+            .collect();
+        let mut nested = ShallowWaterNestedGrid::new(&mut images, nest_cells());
+        nested.world_bed = Some(ShallowWaterWorldBedImage {
+            image: images.add(bed_source_image(side, side, &world)),
+            origin: Vec2::splat(-0.5 * TERRAIN_SIDE),
+            texel_size: 1.0,
+        });
+        controller.nested = Some(nested);
+    }
     commands.insert_resource(controller);
 
     let buoy_mesh = meshes.add(Sphere::new(1.2).mesh().uv(24, 12));

@@ -17,8 +17,10 @@ use bevy::{
 };
 
 use super::{
-    GpuInteractionUniform, ShallowWaterController, ShallowWaterInputs, ShallowWaterPipelines,
-    ShallowWaterSolver, ShallowWaterSolverDescriptor, ShallowWaterTextures,
+    GpuInteractionUniform, NEST_REFINEMENT, ShallowWaterBorder, ShallowWaterController,
+    ShallowWaterInputs, ShallowWaterNest, ShallowWaterNestDescriptor, ShallowWaterNestPipelines,
+    ShallowWaterPipelines, ShallowWaterShift, ShallowWaterShiftParams, ShallowWaterShiftPipelines,
+    ShallowWaterSolver, ShallowWaterSolverDescriptor, ShallowWaterTextures, ShallowWaterWorldBed,
 };
 
 /// Monotonic step counter passed to the simulation shader (wave boundaries, particle RNG).
@@ -41,11 +43,26 @@ pub struct ShallowWaterGpuResources {
     /// Set for this frame when the ocean forcing pass wrote a target height for every cell.
     /// The sim consumes it to seed the wet interior after `loadPreset`.
     pub ocean_seed_written: AtomicBool,
+    /// The controller's nested grid, built after the solver.
+    pub nested: Option<ShallowWaterNestedGpu>,
+}
+
+/// The render-world side of a [`ShallowWaterNestedGrid`](super::ShallowWaterNestedGrid).
+pub struct ShallowWaterNestedGpu {
+    pub child: ShallowWaterSolver,
+    nest: ShallowWaterNest,
+    shift: ShallowWaterShift,
+    bed: ShallowWaterWorldBed,
+    /// Parent cell under the child's first cell, once the child holds water.
+    applied: Option<IVec2>,
+    /// Whether the child shifts this frame, with the parameters already written.
+    shifting: bool,
 }
 
 impl Default for ShallowWaterGpuResources {
     fn default() -> Self {
         Self {
+            nested: None,
             solver: None,
             last_applied_serial: AtomicU32::new(0),
             ocean_seed_written: AtomicBool::new(false),
@@ -62,6 +79,8 @@ pub fn prepare_shallow_water_gpu(
     lod: Option<Res<crate::water::WaterLodData>>,
     timestamp: Res<ShallowWaterTimestamp>,
     pipelines: Res<ShallowWaterPipelines>,
+    nest_pipelines: Res<ShallowWaterNestPipelines>,
+    shift_pipelines: Res<ShallowWaterShiftPipelines>,
     pipeline_cache: Res<PipelineCache>,
     mut gpu: ResMut<ShallowWaterGpuResources>,
 ) {
@@ -81,6 +100,7 @@ pub fn prepare_shallow_water_gpu(
     ) = (textures, bed, &source, &pressure_head, &border)
     else {
         gpu.solver = None;
+        gpu.nested = None;
         return;
     };
     let inputs = ShallowWaterInputs {
@@ -95,6 +115,7 @@ pub fn prepare_shallow_water_gpu(
         .as_ref()
         .is_some_and(|s| s.matches(cells, &textures, controller.particle_count))
     {
+        gpu.nested = None;
         gpu.solver = ShallowWaterSolver::new(
             &render_device,
             &pipelines,
@@ -136,10 +157,140 @@ pub fn prepare_shallow_water_gpu(
         .as_ref()
         .map(|lod| Vec2::from_angle(lod.slices.wind_direction))
         .unwrap_or(Vec2::X);
-    solver.write_settings(
+    let settings = controller.settings(timestamp.0.load(Ordering::Relaxed), wind_dir);
+    solver.write_settings(&render_queue, &settings);
+
+    let apply_init = controller.sim_apply_serial != gpu.last_applied_serial.load(Ordering::Relaxed);
+    let gpu = &mut *gpu;
+    let (Some(nested), Some(offset), Some(placement)) = (
+        controller.nested.as_ref(),
+        controller.nest_offset(),
+        controller.placement,
+    ) else {
+        gpu.nested = None;
+        return;
+    };
+    let solver = gpu.solver.as_ref().unwrap();
+    let child_cells = UVec2::splat(nested.cells);
+    let child_textures = ShallowWaterTextures::from_images(&nested.images, &gpu_images);
+    let bed = match &nested.world_bed {
+        Some(bed) => view(&bed.image).map(|view| ShallowWaterWorldBed {
+            view,
+            origin: bed.origin,
+            texel_size: bed.texel_size,
+        }),
+        None => view(&controller.bed_source).map(|view| ShallowWaterWorldBed {
+            view,
+            origin: placement.center - 0.5 * cells.as_vec2() * placement.cell_size,
+            texel_size: placement.cell_size,
+        }),
+    };
+    let (Some(child_textures), Some(bed)) = (child_textures, bed) else {
+        gpu.nested = None;
+        return;
+    };
+    let descriptor = |offset: IVec2| ShallowWaterNestDescriptor {
+        offset,
+        band: nested.band,
+        parent_cell_size: placement.cell_size,
+    };
+    let stale = gpu.nested.as_ref().is_none_or(|n| {
+        !n.child.matches(child_cells, &child_textures, 0) || n.bed.view.id() != bed.view.id()
+    });
+    if stale {
+        gpu.nested = None;
+        let Some(child) = ShallowWaterSolver::new(
+            &render_device,
+            &pipelines,
+            &pipeline_cache,
+            ShallowWaterSolverDescriptor {
+                cells: child_cells,
+                textures: child_textures,
+                inputs: ShallowWaterInputs::default(),
+                particle_count: 0,
+            },
+        ) else {
+            return;
+        };
+        let nest = ShallowWaterNest::new(
+            &render_device,
+            &nest_pipelines,
+            &pipeline_cache,
+            solver,
+            &child,
+            descriptor(offset),
+        );
+        let shift = ShallowWaterShift::new(
+            &render_device,
+            &shift_pipelines,
+            &pipeline_cache,
+            &child,
+            &bed,
+            Some(solver),
+        );
+        let (Some(nest), Some(shift)) = (nest, shift) else {
+            return;
+        };
+        gpu.nested = Some(ShallowWaterNestedGpu {
+            child,
+            nest,
+            shift,
+            bed,
+            applied: None,
+            shifting: false,
+        });
+    }
+    let n = gpu.nested.as_mut().unwrap();
+    let rho = NEST_REFINEMENT as f32;
+    n.child.write_settings(
         &render_queue,
-        &controller.settings(timestamp.0.load(Ordering::Relaxed), wind_dir),
+        &super::ShallowWaterSettings {
+            dt: settings.dt / rho,
+            cell_size: settings.cell_size / rho,
+            left_border: ShallowWaterBorder::Wall,
+            right_border: ShallowWaterBorder::Wall,
+            bottom_border: ShallowWaterBorder::Wall,
+            top_border: ShallowWaterBorder::Wall,
+            pml_width: 0,
+            ocean_band_cells: 0.0,
+            ocean_forcing: false,
+            ..settings
+        },
     );
+    // A reset or the first frame refills the whole child from the parent. A move shifts what it
+    // holds by three child cells per parent cell.
+    let covered = (nested.cells / NEST_REFINEMENT) as i32;
+    let shift = match n.applied {
+        Some(old) if !apply_init => {
+            let delta = offset - old;
+            (delta != IVec2::ZERO).then(|| {
+                if delta.abs().max_element() >= covered {
+                    IVec2::splat(nested.cells as i32)
+                } else {
+                    delta * NEST_REFINEMENT as i32
+                }
+            })
+        }
+        _ => Some(IVec2::splat(nested.cells as i32)),
+    };
+    n.shifting = shift.is_some();
+    if let Some(shift) = shift {
+        let corner = placement.center - 0.5 * cells.as_vec2() * placement.cell_size;
+        n.shift.write_params(
+            &render_queue,
+            &n.bed,
+            &ShallowWaterShiftParams {
+                shift,
+                origin: corner + offset.as_vec2() * placement.cell_size,
+                cell_size: placement.cell_size / rho,
+                subsamples: 1,
+                fill_level: controller.fill_level,
+                parent_offset: Some(offset),
+            },
+        );
+        n.nest.set_offset(&render_queue, descriptor(offset));
+        n.applied = Some(offset);
+    }
 }
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash)]
@@ -186,10 +337,28 @@ pub fn run_shallow_water_sim(
         solver.encode_interact(&mut pass);
         if !controller.paused && !defer_init {
             solver.encode_ocean_band(&mut pass);
-            solver.encode_step(&mut pass);
-            solver.encode_reconstruct_velocity(&mut pass);
-            solver.encode_particles(&mut pass);
         }
+    }
+    // The nested grid moves or refills after the parent's reset, so it reads the parent's
+    // fresh surface.
+    let nested = gpu_res.nested.as_ref();
+    if let Some(n) = nested.filter(|n| n.shifting && !defer_init) {
+        n.shift.encode(enc);
+    }
+    if !controller.paused && !defer_init {
+        let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("shallow_water_step"),
+            timestamp_writes: None,
+        });
+        match nested {
+            Some(n) => {
+                n.nest.encode_frame(&mut pass, solver, &n.child);
+                n.child.encode_reconstruct_velocity(&mut pass);
+            }
+            None => solver.encode_step(&mut pass),
+        }
+        solver.encode_reconstruct_velocity(&mut pass);
+        solver.encode_particles(&mut pass);
     }
     time_span.end(enc);
 

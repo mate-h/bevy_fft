@@ -78,6 +78,9 @@ pub struct WaterHeightfield {
     /// the bodies, and [`FloatingBodyPlugin`](crate::bodies::FloatingBodyPlugin) writes the bodies'
     /// footprints into it.
     pub pressure_head: Option<Handle<Image>>,
+    /// Blend order. Heightfields blend from the lowest order up, so a higher one draws over a
+    /// lower one where they overlap, such as a nested grid over its parent.
+    pub order: i32,
 }
 
 impl WaterHeightfield {
@@ -96,6 +99,7 @@ impl WaterHeightfield {
             velocity_scale: 1.0,
             dry: WaterHeightfieldDry::Bed,
             pressure_head: None,
+            order: 0,
         }
     }
 }
@@ -285,7 +289,9 @@ pub(super) fn prepare_water_heightfields(
     let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
     let res = lod.slices.resolution;
     let dispatch = UVec3::new(res.div_ceil(8), res.div_ceil(8), lod.slices.count);
-    for heightfield in &heightfields {
+    let mut ordered: Vec<&WaterHeightfield> = heightfields.iter().collect();
+    ordered.sort_by_key(|h| h.order);
+    for heightfield in ordered {
         let (Some(bed_water), Some(velocity)) = (
             images.get(&heightfield.bed_water),
             images.get(&heightfield.velocity),

@@ -34,6 +34,14 @@ A shift at least the grid's size refills every cell, which is how grids start fr
 
 [`tests/shallow_water_nest_moving_gpu.rs`](../tests/shallow_water_nest_moving_gpu.rs) fills both grids from a bumpy world bed with the shift kernel and moves the child 20 parent cells. Still water stays within 1e-5 m, and the child's bed matches the world under its final position. With a wave running, the parent keeps its volume to 1e-7 while the child moves.
 
+## With the plugin
+
+`ShallowWaterController::nested` adds a nested grid to the plugin's placed grid. `ShallowWaterNestedGrid::new` makes its images for a cell count that is a multiple of 3. Set `follow` to a world point each frame, such as the camera's. `nest_offset` rounds it to the parent cell the grid starts at, kept inside the parent, and the plugin shifts the grid whenever that changes, by 3 child cells per parent cell, or refills it after a reset or a jump past its own size. `world_bed` gives the bed of the ground it moves over. Without it the grid interpolates the parent's `bed_source`. The parent's bed is point-sampled, so the feedback replaces it with the child's mean over the child, and the parent's volume shifts a little as the grid moves. A world bed that the parent also samples three times per cell avoids that.
+
+The grid steps with a third of the parent's time step and cell width, with walls on its own edges, no PML and no ocean forcing. Floating bodies, the brush, sources and the border profile act on the parent only. It gets a `WaterHeightfield` one `order` above the parent's, so it blends over it in the water LOD data and fades into it over `blend_cells`. Heightfields now blend in `order`.
+
+The `beach` example nests a 288-cell grid of 2/3 m cells, 192 m across, around the camera inside its 2 m grid, with its bed from the 1 m data. `BEACH_NEST` sets its cells per edge, and 0 turns it off. [`tests/shallow_water_nested_plugin_gpu.rs`](../tests/shallow_water_nested_plugin_gpu.rs) walks a nested grid across a placed pool and checks its offset, its heightfield, its bed and its still water.
+
 ## Not yet
 
-Drawing several nested grids into the water LOD, and running the bay and the lower river as one sandbox, are the next step. The `swe-coupling` branch's camera-following rings were the prototype for this module.
+Bodies on the nested grid, a river inflow for the beach's map, and a cost measurement of the nest in the beach are follow-ups. The `swe-coupling` branch's camera-following rings were the prototype for this module.
