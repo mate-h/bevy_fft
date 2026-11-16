@@ -38,6 +38,11 @@ fn step(app: &mut App) {
 /// A standing wave `AMPLITUDE cos(k x)` released from rest, stepped `steps` times. Returns the
 /// share of the initial amplitude left in the same mode, cos(ω t) for a linear wave.
 fn standing_wave(deep_water_depth: Option<f32>, steps: u32) -> f32 {
+    standing_wave_at(deep_water_depth, &[steps])[0]
+}
+
+/// The same, read after each step count in `checkpoints`, which must rise.
+fn standing_wave_at(deep_water_depth: Option<f32>, checkpoints: &[u32]) -> Vec<f32> {
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -108,30 +113,37 @@ fn standing_wave(deep_water_depth: Option<f32>, steps: u32) -> f32 {
     }
 
     let deadline = Instant::now() + Duration::from_secs(120);
-    for _ in 0..steps {
-        app.world_mut()
-            .resource_mut::<DispersiveController>()
-            .step_serial += 1;
-        step(&mut app);
-        assert!(Instant::now() < deadline, "dispersive run timed out");
-    }
-    let serial = app.world().resource::<Capture>().serial;
-    while app.world().resource::<Capture>().serial <= serial + 1 {
-        step(&mut app);
-        assert!(Instant::now() < deadline, "dispersive readback timed out");
-    }
-    let bytes = &app.world().resource::<Capture>().bytes;
-    let texel = bytes.len() / (N * N) as usize;
-    let (mut projection, mut norm) = (0.0f32, 0.0f32);
-    for y in 0..N {
-        for x in 0..N {
-            let i = (y * N + x) as usize;
-            let h = f32::from_le_bytes(bytes[i * texel..i * texel + 4].try_into().unwrap());
-            projection += (h - REST_DEPTH) * column(x);
-            norm += column(x) * column(x);
+    let mut stepped = 0;
+    let mut out = Vec::new();
+    for &steps in checkpoints {
+        for _ in stepped..steps {
+            app.world_mut()
+                .resource_mut::<DispersiveController>()
+                .step_serial += 1;
+            step(&mut app);
+            assert!(Instant::now() < deadline, "dispersive run timed out");
         }
+        stepped = steps;
+        // The patch is paused, so it holds this step while the readback catches up.
+        let serial = app.world().resource::<Capture>().serial;
+        while app.world().resource::<Capture>().serial <= serial + 1 {
+            step(&mut app);
+            assert!(Instant::now() < deadline, "dispersive readback timed out");
+        }
+        let bytes = &app.world().resource::<Capture>().bytes;
+        let texel = bytes.len() / (N * N) as usize;
+        let (mut projection, mut norm) = (0.0f32, 0.0f32);
+        for y in 0..N {
+            for x in 0..N {
+                let i = (y * N + x) as usize;
+                let h = f32::from_le_bytes(bytes[i * texel..i * texel + 4].try_into().unwrap());
+                projection += (h - REST_DEPTH) * column(x);
+                norm += column(x) * column(x);
+            }
+        }
+        out.push(projection / norm);
     }
-    projection / norm
+    out
 }
 
 /// ω for wavenumber `k` at `depth`, with the solver's grid correction (Jeschke and Wojtan eq. 27).
@@ -177,12 +189,14 @@ fn deep_mode_stays_stable_over_many_periods() {
         "after {steps} steps at {left}, cos(ω t) = {expected}"
     );
     // The hybrid read its bulk flux, and its Airy flux, half a cell off the faces the merge
-    // reads, which damped this wave to nothing within 10 s. It keeps most of it now.
-    let hybrid = standing_wave(None, steps);
-    assert!(hybrid.abs() <= 1.0, "the hybrid's wave grew to {hybrid}");
+    // reads, which damped this wave to nothing within 10 s. It keeps most of it now, while its
+    // phase runs a few percent fast, so look for its crest over the last half period.
+    let hybrid = standing_wave_at(None, &[1050, 1100, 1150, 1200]);
+    let crest = hybrid.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    assert!(crest <= 1.0, "the hybrid's wave grew to {hybrid:?}");
     assert!(
-        hybrid.abs() > 0.5,
-        "the hybrid's wave fell to {hybrid} after {steps} steps"
+        crest > 0.6,
+        "the hybrid's wave fell to {hybrid:?} after about {steps} steps"
     );
 }
 

@@ -141,8 +141,11 @@ fn grad_h2(ix: i32, iy: i32) -> f32 {
     return gx * gx + gy * gy;
 }
 
-@compute @workgroup_size(16, 16, 1)
-fn diffuse_eta_step(@builtin(global_invocation_id) id: vec3u) {
+// One explicit diffusion step of the free surface in `d_scratch`, from lane `lane` (0 for .r, 1
+// for .g) into the other. Reading the neighbours from one lane and writing the other keeps every
+// read on the previous iterate: diffusing in place let each workgroup see whichever neighbours
+// had already run, so the bulk, and with it the whole hybrid, changed from run to run.
+fn diffuse_eta(id: vec3u, lane: u32) {
     let n = sim.n;
     if (id.x >= n || id.y >= n) { return; }
     let ix = i32(id.x);
@@ -156,17 +159,30 @@ fn diffuse_eta_step(@builtin(global_invocation_id) id: vec3u) {
     // dx≈1 m; with finer grids it NaNs the field on the first step.
     let dT_max = 0.24 * dx * dx / max(4.0 * ax, 1e-8);
     let dT = min(0.25, dT_max);
-    let Hc = textureLoad(d_scratch, id.xy).r;
-    let Hl = textureLoad(d_scratch, vec2u(u32(wrapi(ix - 1, n1)), u32(iy))).r;
-    let Hr = textureLoad(d_scratch, vec2u(u32(wrapi(ix + 1, n1)), u32(iy))).r;
-    let Hd = textureLoad(d_scratch, vec2u(u32(ix), u32(wrapi(iy - 1, n1)))).r;
-    let Hu = textureLoad(d_scratch, vec2u(u32(ix), u32(wrapi(iy + 1, n1)))).r;
+    let c = textureLoad(d_scratch, id.xy);
+    let Hc = c[lane];
+    let Hl = textureLoad(d_scratch, vec2u(u32(wrapi(ix - 1, n1)), u32(iy)))[lane];
+    let Hr = textureLoad(d_scratch, vec2u(u32(wrapi(ix + 1, n1)), u32(iy)))[lane];
+    let Hd = textureLoad(d_scratch, vec2u(u32(ix), u32(wrapi(iy - 1, n1))))[lane];
+    let Hu = textureLoad(d_scratch, vec2u(u32(ix), u32(wrapi(iy + 1, n1))))[lane];
     let lap = (Hl + Hr + Hd + Hu - 4.0 * Hc) / (dx * dx);
     var H_new = Hc + ax * lap * dT;
     if (!is_finite_f(H_new)) {
         H_new = Hc;
     }
-    textureStore(d_scratch, id.xy, vec4(H_new, 0.0, 0.0, 0.0));
+    var out = vec4(c.r, c.g, 0.0, 0.0);
+    out[1u - lane] = H_new;
+    textureStore(d_scratch, id.xy, out);
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn diffuse_eta_step(@builtin(global_invocation_id) id: vec3u) {
+    diffuse_eta(id, 0u);
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn diffuse_eta_step_back(@builtin(global_invocation_id) id: vec3u) {
+    diffuse_eta(id, 1u);
 }
 
 @compute @workgroup_size(16, 16, 1)
@@ -557,10 +573,19 @@ fn bar_cmf10_integrate_height(@builtin(global_invocation_id) id: vec3u) {
     let f_n = bar_upwind_h_flux(h_c, h_u, wT, aj, aj_t);
     let f_s = bar_upwind_h_flux(h_d, h_c, wB, aj_b, aj);
     let div = f_e - f_w + f_n - f_s;
+    // The new height goes to .a, which `bar_cmf10_commit_height` moves into .r, so the
+    // neighbours this dispatch reads keep their old height.
     var db = textureLoad(d_bar, id.xy);
-    db.x += -dt / dx * div;
-    db.x = max(0.0, db.x);
+    db.a = max(0.0, db.x - dt / dx * div);
     textureStore(d_bar, id.xy, db);
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn bar_cmf10_commit_height(@builtin(global_invocation_id) id: vec3u) {
+    let n = sim.n;
+    if (id.x >= n || id.y >= n) { return; }
+    let db = textureLoad(d_bar, id.xy);
+    textureStore(d_bar, id.xy, vec4(db.a, db.g, db.b, 0.0));
 }
 
 @compute @workgroup_size(16, 16, 1)
@@ -650,6 +675,11 @@ fn body_pressure_head(id: vec2u) -> f32 {
     return textureLoad(body_pressure, id, 0).r;
 }
 
+/// Head the brush and floating bodies press the surface down by, 0 outside deep mode.
+fn surface_head(id: vec2u) -> f32 {
+    return brush_pressure_head(id) + body_pressure_head(id);
+}
+
 @compute @workgroup_size(16, 16, 1)
 fn pack_h_t_to_a(@builtin(global_invocation_id) id: vec3u) {
     let n = sim.n;
@@ -662,7 +692,7 @@ fn pack_h_t_to_a(@builtin(global_invocation_id) id: vec3u) {
     // brush's pressure head, which `unpack_b_re_to_tilde_h` takes back out.
     var h_avg = 0.5 * (t.r + t.a);
     if ((sim.spectral_flags & SPECTRAL_DEEP) != 0u) {
-        h_avg = t.r + brush_pressure_head(id.xy) + body_pressure_head(id.xy);
+        h_avg = t.r + surface_head(id.xy);
     }
     let z = vec4f(0.0, 0.0, 0.0, 0.0);
     textureStore(buffer_a_re, id.xy, vec4(h_avg, 0.0, 0.0, 0.0));
@@ -694,8 +724,7 @@ fn unpack_b_re_to_tilde_h(@builtin(global_invocation_id) id: vec3u) {
     if (id.x >= n || id.y >= n) { return; }
     let t = textureLoad(d_tilde, id.xy);
     // The band-limited height, without the brush's pressure head, stays as h̃.
-    var h = textureLoad(buffer_b_re, id.xy).x - brush_pressure_head(id.xy)
-        - body_pressure_head(id.xy);
+    var h = textureLoad(buffer_b_re, id.xy).x - surface_head(id.xy);
     if (!is_finite_f(h)) { h = 0.0; }
     textureStore(d_tilde, id.xy, vec4(h, t.g, t.b, t.a));
 }
@@ -1286,6 +1315,12 @@ fn merge_to_state(@builtin(global_invocation_id) id: vec3u) {
 // edge. A small α, 0.05 in Gilligan, absorbs waves before they wrap without reflecting them as a
 // linear taper does. The rest surface is η = 0, where `init_basin` puts it.
 
+fn obstruction_at(ix: i32, iy: i32) -> f32 {
+    let n = i32(sim.n);
+    let c = vec2u(u32(wrapi(ix, n)), u32(wrapi(iy, n)));
+    return clamp(textureLoad(body_obstruction, c, 0).r, 0.0, 1.0);
+}
+
 fn edge_trim_1d(i: u32) -> f32 {
     let d = min(f32(i) + 0.5, f32(sim.n) - f32(i) - 0.5);
     if (d >= sim.edge_trim_cells) { return 1.0; }
@@ -1306,16 +1341,20 @@ fn edge_trim(@builtin(global_invocation_id) id: vec3u) {
         t = edge_trim_1d(id.x) * edge_trim_1d(id.y);
     }
     var o = 1.0;
+    var o_e = 1.0;
+    var o_n = 1.0;
     if (sim.body_maps != 0u) {
-        o = clamp(textureLoad(body_obstruction, id.xy, 0).r, 0.0, 1.0);
+        o = obstruction_at(i32(id.x), i32(id.y));
+        o_e = o * obstruction_at(i32(id.x) + 1, i32(id.y));
+        o_n = o * obstruction_at(i32(id.x), i32(id.y) + 1);
     }
-    if (t >= 1.0 && o >= 1.0) { return; }
+    if (t >= 1.0 && o >= 1.0 && o_e >= 1.0 && o_n >= 1.0) { return; }
     let s = textureLoad(d_state, id.xy);
     let head = body_pressure_head(id.xy);
     let eta = textureLoad(d_bed, id.xy).r + s.r;
     let trimmed = ((eta + head) * o - head) * t;
     let h = max(s.r + trimmed - eta, 0.0);
-    textureStore(d_state, id.xy, vec4(h, s.g * t * o, s.b * t * o, s.a));
+    textureStore(d_state, id.xy, vec4(h, s.g * t * o_e, s.b * t * o_n, s.a));
 }
 
 // --- Post-merge spectral damp of total η and q (matches NumPy damp_state_fields).
@@ -1327,7 +1366,11 @@ fn pack_state_eta_to_a(@builtin(global_invocation_id) id: vec3u) {
     let n = sim.n;
     if (id.x >= n || id.y >= n) { return; }
     let h = max(textureLoad(d_state, id.xy).r, 0.0);
-    let eta = b_at(i32(id.x), i32(id.y)) + h;
+    // Deep mode damps the surface plus the heads that press it down, which is smooth where the
+    // water rests against a hull. Damping the bare surface smeared a hull's sharp dent onto the
+    // open water around it every step, and the obstruction put it back under the hull, so the
+    // hull pulled water from beside itself and radiated waves without end.
+    let eta = b_at(i32(id.x), i32(id.y)) + h + surface_head(id.xy);
     let z = vec4f(0.0, 0.0, 0.0, 0.0);
     textureStore(buffer_a_re, id.xy, vec4(eta, 0.0, 0.0, 0.0));
     textureStore(buffer_a_im, id.xy, z);
@@ -1351,7 +1394,7 @@ fn unpack_b_to_state_h(@builtin(global_invocation_id) id: vec3u) {
     let n = sim.n;
     if (id.x >= n || id.y >= n) { return; }
     let s = textureLoad(d_state, id.xy);
-    var eta = textureLoad(buffer_b_re, id.xy).x;
+    var eta = textureLoad(buffer_b_re, id.xy).x - surface_head(id.xy);
     if (!is_finite_f(eta)) {
         eta = b_at(i32(id.x), i32(id.y)) + max(s.r, 0.0);
     }

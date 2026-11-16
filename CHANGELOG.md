@@ -35,6 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - The dispersive hybrid's waves no longer drift toward -x and -y or fade. Its bulk solver now keeps the flux on each cell's +x and +y faces, where the merge reads it, and the Airy step shifts the surface half a cell onto the same faces. A standing wave that used to decay to nothing within 10 s now keeps most of its amplitude.
+- A still hull on a deep-mode dispersive patch no longer radiates waves without end. The step's high-wavenumber damping now acts on the surface plus the heads that press it down, so it no longer smears a hull's dent onto the open water beside it. Hulls block flux on all four faces, and the head under a hull is measured at cell centres, so passing waves no longer move it.
+- The dispersive hybrid gives the same result on every run. Its free-surface diffusion and bulk height update no longer overwrite cells their neighbours are still reading.
 
 ## [0.2.0] - 2026-10-14
 

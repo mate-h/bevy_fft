@@ -320,7 +320,15 @@ fn body_footprints(
         if any(g < vec2(0.0)) || any(g >= n) {
             continue;
         }
-        let water = water_at(p.xz);
+        // A grid with an obstruction map holds the surface plus the head at its open level in
+        // every cell a hull fills, so the head there is the hull's draft below that level. Read it
+        // at the cell's centre: at a voxel's own position the bilinear surface mixes in the waves
+        // in the open cells next to the hull, the head follows them, and the hull radiates.
+        var at = p.xz;
+        if grid.has_obstruction != 0u {
+            at = grid.center + (floor(g) + 0.5 - 0.5 * n) * grid.cell_size;
+        }
+        let water = water_at(at);
         let fraction = clamp((water.height - (p.y - 0.5 * s)) / s, 0.0, 1.0);
         let volume = voxel.w * fraction;
         if volume <= 0.0 {

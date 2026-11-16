@@ -158,6 +158,8 @@ fn splash(app: &mut App, x: f32) {
         controller.pointer = at;
         controller.pointer_prev = at;
         controller.brush_radius = 3.0;
+        // 1.4 m of head, so the splash's waves stand well above the float rounding of the dent.
+        controller.brush_strength = 2.8;
         controller.brush_active = true;
         step(app);
     }
@@ -190,6 +192,31 @@ fn a_hull_at_the_waterline_obstructs_its_cells() {
     assert!(o[cell(Vec2::new(0.0, 10.0))] > 0.95);
 }
 
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn a_still_hull_holds_its_dent_without_radiating() {
+    // Band-limiting the bare surface each step smeared the dent onto the open water next to the
+    // hull, the obstruction put it back under the hull, and the waves around it grew past 1 m in
+    // 20 s.
+    let mut app = patch_app();
+    app.world_mut().spawn((wall(), Transform::IDENTITY));
+    for _ in 0..1200 {
+        step(&mut app);
+    }
+    settle(&mut app);
+    let e = eta(&app);
+    assert!(
+        (e[cell(Vec2::ZERO)] + 1.0).abs() < 0.02,
+        "dent {}",
+        e[cell(Vec2::ZERO)]
+    );
+    let waves = (0..N * N)
+        .filter(|&i| ((i % N) as i32 - 64).abs() > 3 || ((i / N) as i32 - 64).abs() > 12)
+        .map(|i| e[i as usize].abs())
+        .fold(0.0f32, f32::max);
+    assert!(waves < 0.05, "waves around the hull reach {waves} m");
+}
+
 /// A 4 m wide, 24 m long barge across the X axis, half under water.
 fn wall() -> FloatingBody {
     let hull = Arc::new(voxelize(&Mesh::from(Cuboid::new(4.0, 2.0, 24.0)), 0.25).unwrap());
@@ -219,13 +246,19 @@ fn after_splash(with_barge: bool, with_splash: bool) -> Vec<f32> {
     for _ in 0..900 {
         step(&mut app);
     }
+    // Hold the patch while the readback catches up, so both runs stop at the same step and the
+    // barge's own settling cancels exactly.
+    app.world_mut()
+        .resource_mut::<DispersiveController>()
+        .paused = true;
     settle(&mut app);
     eta(&app)
 }
 
-/// Energy of the splash's waves behind the barge (x from -50 to -4 m) and on its side (x from 4
-/// to 50 m), along the band |z| < 12 m it spans. Subtracting the run without the splash leaves out
-/// the barge's own settling.
+/// Energy of the splash's waves behind the barge (x from -50 to -4 m) and beyond the splash (x
+/// from 24 to 50 m), where the waves the barge reflects have arrived by then, along the band
+/// |z| < 12 m it spans. Subtracting the run without the splash leaves out the barge's own
+/// settling.
 fn shadow_and_front(with_barge: bool) -> (f32, f32) {
     let with = after_splash(with_barge, true);
     let without = after_splash(with_barge, false);
@@ -236,24 +269,25 @@ fn shadow_and_front(with_barge: bool) -> (f32, f32) {
     };
     (
         energy(&waves, band(-50.0, -4.0)),
-        energy(&waves, band(4.0, 50.0)),
+        energy(&waves, band(24.0, 50.0)),
     )
 }
 
 #[test]
 #[ignore = "requires a graphics adapter"]
 fn a_hull_reflects_waves_and_shadows_the_water_behind_it() {
-    // A 4 m wide barge, 1 m deep, against waves about 10 m long blocks part of them: about 30% less
-    // energy behind it and 10% more in front. The Airy step is global, so some energy crosses the
-    // obstructed cells, as in Gilligan's eWave.
+    // A 4 m wide barge, 1 m deep, against waves 10 to 20 m long leaves about half the energy
+    // behind it and sends about a quarter more back past the splash. The Airy step is global and
+    // long waves bend around the barge's ends, so some energy still reaches the water behind it,
+    // as in Gilligan's eWave.
     let (open_behind, open_front) = shadow_and_front(false);
     let (barge_behind, barge_front) = shadow_and_front(true);
     assert!(
-        barge_behind < 0.8 * open_behind,
+        barge_behind < 0.7 * open_behind,
         "behind the barge {barge_behind} against {open_behind} without it, front {barge_front} against {open_front}"
     );
     assert!(
-        barge_front > 1.05 * open_front,
+        barge_front > 1.1 * open_front,
         "in front of the barge {barge_front} against {open_front} without it"
     );
 }

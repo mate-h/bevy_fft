@@ -170,6 +170,7 @@ pub struct DispersivePipelines {
     pub data_layout: BindGroupLayoutDescriptor,
     pub decompose_init: CachedComputePipelineId,
     pub diffuse_eta_step: CachedComputePipelineId,
+    pub diffuse_eta_step_back: CachedComputePipelineId,
     pub decompose_split: CachedComputePipelineId,
     pub decompose_deep: CachedComputePipelineId,
     pub bar_sync_u_faces: CachedComputePipelineId,
@@ -183,6 +184,7 @@ pub struct DispersivePipelines {
     pub bar_mac_w_sl_reverse: CachedComputePipelineId,
     pub bar_mac_w_combine: CachedComputePipelineId,
     pub bar_cmf10_integrate_height: CachedComputePipelineId,
+    pub bar_cmf10_commit_height: CachedComputePipelineId,
     pub bar_cmf10_vel_u: CachedComputePipelineId,
     pub bar_cmf10_vel_w: CachedComputePipelineId,
     pub bar_gather_cell_q: CachedComputePipelineId,
@@ -266,6 +268,7 @@ impl FromWorld for DispersivePipelines {
             data_layout: data_layout.clone(),
             decompose_init: q("dis_decompose", "decompose_init"),
             diffuse_eta_step: q("dis_diffuse", "diffuse_eta_step"),
+            diffuse_eta_step_back: q("dis_diffuse_back", "diffuse_eta_step_back"),
             decompose_split: q("dis_split", "decompose_split"),
             decompose_deep: q("dis_deep", "decompose_deep"),
             bar_sync_u_faces: q("dis_bsu", "bar_sync_u_faces"),
@@ -279,6 +282,7 @@ impl FromWorld for DispersivePipelines {
             bar_mac_w_sl_reverse: q("dis_bmwr", "bar_mac_w_sl_reverse"),
             bar_mac_w_combine: q("dis_bmwk", "bar_mac_w_combine"),
             bar_cmf10_integrate_height: q("dis_bh", "bar_cmf10_integrate_height"),
+            bar_cmf10_commit_height: q("dis_bhc", "bar_cmf10_commit_height"),
             bar_cmf10_vel_u: q("dis_bvu", "bar_cmf10_vel_u"),
             bar_cmf10_vel_w: q("dis_bvw", "bar_cmf10_vel_w"),
             bar_gather_cell_q: q("dis_bgq", "bar_gather_cell_q"),
@@ -756,8 +760,11 @@ pub fn run_dispersive_sim(
             dispatch(&mut pass, &cache, pl.decompose_deep, fft, dbg, wgn);
         } else {
             dispatch(&mut pass, &cache, pl.decompose_init, fft, dbg, wgn);
-            for _ in 0..controller.diffusion_iters {
+            // Pairs of steps there and back between the scratch lanes, so the result lands in .r:
+            // an odd count runs one more.
+            for _ in 0..controller.diffusion_iters.div_ceil(2) {
                 dispatch(&mut pass, &cache, pl.diffuse_eta_step, fft, dbg, wgn);
+                dispatch(&mut pass, &cache, pl.diffuse_eta_step_back, fft, dbg, wgn);
             }
             dispatch(&mut pass, &cache, pl.decompose_split, fft, dbg, wgn);
         }
@@ -783,6 +790,7 @@ pub fn run_dispersive_sim(
                 dbg,
                 wgn,
             );
+            dispatch(&mut pass, &cache, pl.bar_cmf10_commit_height, fft, dbg, wgn);
             dispatch(&mut pass, &cache, pl.bar_cmf10_vel_u, fft, dbg, wu);
             dispatch(&mut pass, &cache, pl.bar_cmf10_vel_w, fft, dbg, ww);
             dispatch(&mut pass, &cache, pl.bar_gather_cell_q, fft, dbg, wgn);
