@@ -34,8 +34,10 @@ struct DispersiveSim {
     pointer_y: f32,
     pointer_ox: f32,
     pointer_oy: f32,
-    _pad0: f32,
-    _pad1: f32,
+    /// Width in cells of the edge trim's taper, 0 for none.
+    edge_trim_cells: f32,
+    /// Exponent of the edge trim's taper.
+    edge_trim_alpha: f32,
 }
 
 const SPECTRAL_FIXED_DEPTH: u32 = 1u;
@@ -1220,6 +1222,30 @@ fn merge_to_state(@builtin(global_invocation_id) id: vec3u) {
     }
     let qcl = clamp_q_cell(h1, qx1, qy1);
     textureStore(d_state, id.xy, vec4(h1, qcl.x, qcl.y, 0.0));
+}
+
+// --- Edge trim (Tessendorf, Gilligan §3.6). The FFTs make the patch periodic, so waves that
+// leave one edge would come back through the opposite one. Near each edge the surface deviation
+// from rest and the flux are scaled by T(x) T(y), with T = (d / L)^α at distance d < L from the
+// edge. A small α, 0.05 in Gilligan, absorbs waves before they wrap without reflecting them as a
+// linear taper does. The rest surface is η = 0, where `init_basin` puts it.
+
+fn edge_trim_1d(i: u32) -> f32 {
+    let d = min(f32(i) + 0.5, f32(sim.n) - f32(i) - 0.5);
+    if (d >= sim.edge_trim_cells) { return 1.0; }
+    return pow(d / sim.edge_trim_cells, sim.edge_trim_alpha);
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn edge_trim(@builtin(global_invocation_id) id: vec3u) {
+    let n = sim.n;
+    if (id.x >= n || id.y >= n || sim.edge_trim_cells <= 0.0) { return; }
+    let t = edge_trim_1d(id.x) * edge_trim_1d(id.y);
+    if (t >= 1.0) { return; }
+    let s = textureLoad(d_state, id.xy);
+    let eta = textureLoad(d_bed, id.xy).r + s.r;
+    let h = max(s.r + (t - 1.0) * eta, 0.0);
+    textureStore(d_state, id.xy, vec4(h, s.g * t, s.b * t, s.a));
 }
 
 // --- Post-merge spectral damp of total η and q (matches NumPy damp_state_fields).

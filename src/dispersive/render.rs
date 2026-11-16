@@ -55,8 +55,8 @@ pub struct DispersiveSimUniform {
     pub pointer_y: f32,
     pub pointer_ox: f32,
     pub pointer_oy: f32,
-    pub _pad0: f32,
-    pub _pad1: f32,
+    pub edge_trim_cells: f32,
+    pub edge_trim_alpha: f32,
 }
 
 fn write_uniform<T: ShaderType + WriteInto>(queue: &RenderQueue, buffer: &Buffer, v: &T) {
@@ -145,8 +145,8 @@ fn build_dispersive_sim_uniform(
         pointer_y: controller.pointer.y,
         pointer_ox: controller.pointer_prev.x,
         pointer_oy: controller.pointer_prev.y,
-        _pad0: 0.0,
-        _pad1: 0.0,
+        edge_trim_cells: controller.edge_trim_cells,
+        edge_trim_alpha: controller.edge_trim_alpha,
     }
 }
 
@@ -196,6 +196,7 @@ pub struct DispersivePipelines {
     pub pack_state_qy_to_a: CachedComputePipelineId,
     pub unpack_b_to_state_qy_clamp: CachedComputePipelineId,
     pub store_bar_vel_prev: CachedComputePipelineId,
+    pub edge_trim: CachedComputePipelineId,
     pub init_basin: CachedComputePipelineId,
     pub brush_flow_impulse: CachedComputePipelineId,
     pub brush_tilde_wake: CachedComputePipelineId,
@@ -288,6 +289,7 @@ impl FromWorld for DispersivePipelines {
             pack_state_qy_to_a: q("dis_psy", "pack_state_qy_to_a"),
             unpack_b_to_state_qy_clamp: q("dis_usy", "unpack_b_to_state_qy_clamp"),
             store_bar_vel_prev: q("dis_svp", "store_bar_vel_prev"),
+            edge_trim: q("dis_edge_trim", "edge_trim"),
             init_basin: q("dis_init", "init_basin"),
             brush_flow_impulse: q("dis_brush", "brush_flow_impulse"),
             brush_tilde_wake: q("dis_brush_t", "brush_tilde_wake"),
@@ -820,6 +822,7 @@ pub fn run_dispersive_sim(
             dbg,
             wgn,
         );
+        dispatch(&mut pass, &cache, pl.edge_trim, fft, dbg, wgn);
         dispatch(&mut pass, &cache, pl.store_bar_vel_prev, fft, dbg, wgn);
     }
     ts.0.fetch_add(1, Ordering::Relaxed);

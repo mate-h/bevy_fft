@@ -124,8 +124,11 @@ fn rgba32_wh(w: u32, h: u32) -> Image {
         TextureFormat::Rgba32Float,
         RenderAssetUsages::default(),
     );
-    image.texture_descriptor.usage =
-        TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    // Copyable out too, so tools and tests can read the state back.
+    image.texture_descriptor.usage = TextureUsages::STORAGE_BINDING
+        | TextureUsages::TEXTURE_BINDING
+        | TextureUsages::COPY_DST
+        | TextureUsages::COPY_SRC;
     image
 }
 
@@ -227,6 +230,13 @@ pub struct DispersiveController {
     pub h_avgmax_beta: f32,
     /// CMF10 face velocity clamp: `± alpha * dx / dt`.
     pub vel_clamp_alpha: f32,
+    /// Width in cells of the band along each edge where Tessendorf's edge trim (Gilligan §3.6)
+    /// absorbs waves, so they neither wrap around the periodic patch nor reflect. Zero turns it
+    /// off and leaves the patch periodic.
+    pub edge_trim_cells: f32,
+    /// Exponent of the trim's taper, `(d / edge_trim_cells)^alpha` at distance `d` from an edge.
+    /// Gilligan uses 0.05. Larger values reflect more.
+    pub edge_trim_alpha: f32,
     pub paused: bool,
     /// Bump while paused to run one hybrid step.
     pub step_serial: u32,
@@ -281,6 +291,8 @@ impl DispersiveController {
             airy_reference_depths: [1.0, 4.0, 16.0, 64.0],
             h_avgmax_beta: 2.0,
             vel_clamp_alpha: 0.5,
+            edge_trim_cells: 12.0,
+            edge_trim_alpha: 0.05,
             paused: false,
             step_serial: 0,
             sim_apply_serial: 0,
@@ -307,6 +319,7 @@ impl DispersiveController {
         let airy_reference_depths = self.airy_reference_depths;
         let h_avgmax_beta = self.h_avgmax_beta;
         let vel_clamp_alpha = self.vel_clamp_alpha;
+        let (edge_trim_cells, edge_trim_alpha) = (self.edge_trim_cells, self.edge_trim_alpha);
         let paused = self.paused;
         let step_serial = self.step_serial;
         let brush_active = self.brush_active;
@@ -327,6 +340,8 @@ impl DispersiveController {
         next.airy_reference_depths = airy_reference_depths;
         next.h_avgmax_beta = h_avgmax_beta;
         next.vel_clamp_alpha = vel_clamp_alpha;
+        next.edge_trim_cells = edge_trim_cells;
+        next.edge_trim_alpha = edge_trim_alpha;
         next.paused = paused;
         next.step_serial = step_serial;
         next.brush_active = brush_active;
