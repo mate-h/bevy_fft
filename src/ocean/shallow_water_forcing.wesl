@@ -1,8 +1,8 @@
 // Writes the ocean's long-wave surface height over a placed shallow water grid.
 //
 // The shallow water ocean band and PML blend toward this height, so waves from the FFT ocean enter
-// the grid. Only cascades the grid's cells can resolve contribute, using the same weight the LOD
-// writer applies per slice. The horizontal displacement is undone with a few fixed-point steps, so each cell gets the
+// the grid. Only cascades the grid's cells carry contribute, with the split the heightfield
+// blend uses. The horizontal displacement is undone with a few fixed-point steps, so each cell gets the
 // surface height above its centre rather than at its undisplaced point. Each frame writes the edge
 // strip the band reads. On reset `full_grid` writes every cell so the solver can seed the interior.
 
@@ -65,10 +65,14 @@ fn displacement_z_cascade(i: u32, uv: vec2<f32>) -> f32 {
     return bilinear_wrap(foam_3, uv).g;
 }
 
-/// Matches `cascade_weight` in the ocean LOD writer, with the grid cell as the texel.
+/// Share of cascade `i` the grid carries. A cascade's band runs from a sixth of its tile down to
+/// a sixth of the next, about an eighth as long, and the shallow water solver carries a wave only
+/// across eight cells or more. So the grid takes a cascade while its longest wave spans 16 cells,
+/// `tile / 96`, and leaves it by 8 cells. The rest stays FFT detail on top of the grid, with
+/// `grid_cascade_weight` in the heightfield blend.
 fn cascade_weight(i: u32) -> f32 {
     let tile = params.cascade_tile_sizes[i];
-    return 1.0 - smoothstep(tile / 24.0, tile / 8.0, params.cell_size);
+    return 1.0 - smoothstep(tile / 96.0, tile / 48.0, params.cell_size);
 }
 
 /// Height in `.x` and horizontal displacement X and Z in `.yz`, in meters, at undisplaced point `xz`.

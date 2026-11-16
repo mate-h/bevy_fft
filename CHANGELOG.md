@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Shallow water grids keep the ocean's short waves and whitecaps. The split between the grid and the FFT detail counted a cascade as resolved by its longest wave, so a 2 m grid was fed the 48 m cascade's 1.5 to 8 m waves, damped them away, and drew no detail in their place. Grids now take a cascade only while its longest wave spans 16 cells. The `beach` example's water bed no longer reads the terrain's last texel rows, which the terrain processor fills toward 0 m, raising a ridge to sea level along the map edge.
 - Water coming in over a shallow water grid's edge, from a river inflow or a source border, is no longer scaled down by the outflow limit of the cell it enters.
 - Deep-mode dispersive patches now carry waves shorter than 2π h / 44, 14 m at 100 m deep. Metal evaluates `tanh(k h)` through an exponential that overflowed, and the NaN zeroed those waves, so a boat's wake lost its divergent waves and cusps and narrowed to about 9 degrees. A towed pressure now trails a Kelvin wake at 19 degrees. The ocean's directional spread clamps its `tanh` argument the same way.
 - The dispersive hybrid's waves no longer drift toward -x and -y or fade. Its bulk solver now keeps the flux on each cell's +x and +y faces, where the merge reads it, and the Airy step shifts the surface half a cell onto the same faces. A standing wave that used to decay to nothing within 10 s now keeps most of its amplitude.

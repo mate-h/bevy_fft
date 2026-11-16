@@ -143,6 +143,15 @@ fn cascade_weight(i: u32, texel: f32) -> f32 {
     return 1.0 - smoothstep(tile / 24.0, tile / 8.0, texel);
 }
 
+/// Share of cascade `i` a grid with cells `cell` meters wide carries. Matches `cascade_weight` in
+/// the shallow water forcing: the grid takes a cascade while its longest wave, a sixth of the
+/// tile, spans 16 cells, and leaves it by 8. A grid fed the cascade's shorter waves would damp
+/// them away, so they stay FFT detail on top.
+fn grid_cascade_weight(i: u32, cell: f32) -> f32 {
+    let tile = params.cascade_tile_sizes[i];
+    return 1.0 - smoothstep(tile / 96.0, tile / 48.0, cell);
+}
+
 /// FFT displacement the grid cells do not own, scaled the same way as the ocean LOD writer.
 struct Unresolved {
     /// Slopes in `.rg`, height in `.b`, and horizontal displacement X in `.a`.
@@ -156,7 +165,7 @@ fn unresolved_displacement(xz: vec2<f32>, texel: f32) -> Unresolved {
     var dz = 0.0;
     let count = min(params.cascade_count, 4u);
     for (var i = 0u; i < count; i++) {
-        let w = cascade_weight(i, texel) * (1.0 - cascade_weight(i, params.cell_size));
+        let w = cascade_weight(i, texel) * (1.0 - grid_cascade_weight(i, params.cell_size));
         if w > 0.0 {
             let uv = xz / params.cascade_tile_sizes[i];
             disp += displacement_cascade(i, uv) * w;
@@ -287,8 +296,10 @@ fn water_heightfield(@builtin(global_invocation_id) gid: vec3<u32>) {
     let strain = sqrt(2.0 * (ux.x * ux.x + uz.y * uz.y) + (ux.y + uz.x) * (ux.y + uz.x)) * inv;
     let turbulence = breaking_turbulence(strain) * wet;
     let breaking = max(max(front, swash), turbulence);
+    // The ocean's whitecaps come from the short waves the grid leaves to the FFT, so they stay
+    // where that detail does.
     let foam = vec4<f32>(
-        mix(base_f.r, breaking, w),
+        mix(base_f.r, max(breaking, base_f.r * fade), w),
         mix(base_f.g, bw.y, w),
         mix(base_f.b, detail.displacement_z * fade, w),
         base_f.a,
