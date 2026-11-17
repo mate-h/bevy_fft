@@ -75,7 +75,7 @@ The beach puts a shallow water grid over a 2 km square of the Lumahaʻi shorelin
 python3 tools/prepare_beach_materials.py --bake-terrain
 ```
 
-The script needs NumPy and GDAL, the Hawaii topobathy dataset in `~/Downloads/hawaii_topobathy`, and the bevy_terrain processor built in a neighboring checkout. The [material notes](assets/examples/beach_materials.md) describe the texture sources, their real-world scale and the sand wetness.
+The script needs NumPy and GDAL, the Hawaii topobathy dataset in `~/Downloads/hawaii_topobathy`, and the bevy_terrain processor built in a neighboring checkout. It pads the map's edge tiles with the data inside them afterwards, since the processor fills past the raster with 0 m; [`tools/pad_terrain_borders.py`](tools/pad_terrain_borders.py) does the same for tiles baked before. The [material notes](assets/examples/beach_materials.md) describe the texture sources, their real-world scale and the sand wetness.
 
 These environment variables change the beach:
 

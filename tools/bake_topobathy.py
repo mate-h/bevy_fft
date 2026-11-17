@@ -269,6 +269,9 @@ def main():
         subprocess.run([str(args.processor), str(out / 'source/height.tif'), '--terrain-path', str(out.relative_to(ROOT)),
                         '--overwrite', '--data-type', 'float32', '--format', 'r32f', '--planar', '--side-length', f'{side:g}'],
                        cwd=ROOT, check=True)
+        # The processor fills past the raster with 0 m; give the edge tiles the data inside them.
+        from pad_terrain_borders import pad_terrain
+        pad_terrain(out)
 
 
 if __name__ == '__main__':

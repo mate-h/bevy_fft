@@ -147,6 +147,9 @@ def main():
     (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     if args.bake_terrain:
         subprocess.run([str(args.processor), str(args.source_root / 'geotiff_1m_lidar' / f'{GRID}.tif'), '--terrain-path', 'assets/terrains/kauai_shoreline', '--overwrite', '--data-type', 'float32', '--format', 'r32f', '--planar', '--side-length', '2048'], cwd=ROOT, check=True)
+        # The processor fills past the raster with 0 m; give the edge tiles the data inside them.
+        from pad_terrain_borders import pad_terrain
+        pad_terrain(ROOT / 'assets/terrains/kauai_shoreline')
     print(f'Prepared material arrays and coastline masks in {output}')
 
 

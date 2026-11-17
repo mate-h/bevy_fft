@@ -851,17 +851,10 @@ impl TerrainBed {
         Some(Self { tiles, size })
     }
 
-    /// Meters at the map's outer edge that `height` does not read. The terrain processor fills
-    /// outside the source raster with 0 m and blends that into the last texel row, which would
-    /// raise a ridge to sea level along the edge of the water grid.
-    const EDGE_MARGIN: f32 = 2.0;
-
-    /// Bilinear height at world `xz`, clamped to the terrain square less `EDGE_MARGIN`.
+    /// Bilinear height at world `xz`, clamped to the terrain square.
     fn height(&self, xz: Vec2) -> f32 {
         let n = TERRAIN_BED_TILE_COUNT as f32;
         let center = (self.size - 2 * Self::BORDER) as f32;
-        let half = 0.5 * TERRAIN_SIDE - Self::EDGE_MARGIN;
-        let xz = xz.clamp(Vec2::splat(-half), Vec2::splat(half));
         let uv = (xz / TERRAIN_SIDE + 0.5).clamp(Vec2::ZERO, Vec2::splat(1.0 - 1e-6)) * n;
         let tile = uv.floor();
         let texel = (uv - tile) * center - 0.5 + Self::BORDER as f32;
