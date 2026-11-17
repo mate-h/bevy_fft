@@ -331,6 +331,8 @@ fn setup(
         AtmosphereEnvironmentMapLight::default(),
         Msaa::Off,
         Fxaa::default(),
+        // The water particles fade into the depth behind them.
+        bevy::core_pipeline::prepass::DepthPrepass,
     ));
     commands.spawn((
         DirectionalLight {

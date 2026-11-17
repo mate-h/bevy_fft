@@ -5,7 +5,9 @@
 //! pool, overwriting the oldest slots once it is full, and moves every live particle under gravity
 //! and quadratic air drag against [`WaterParticleSettings::wind`]. The pool is drawn as
 //! camera-facing quads with premultiplied alpha in the transparent pass, one quad per slot, read
-//! by vertex index. Free slots collapse to nothing.
+//! by vertex index. Free slots collapse to nothing. Drops scatter the sun forward and take the
+//! sky's light, smear along their motion, keep a minimum size on screen with their opacity cut to
+//! match, and fade into the depth prepass behind them; `draw.wesl` describes the details.
 //!
 //! With [`WaterParticleSettings::collide`] on, a particle that falls through the water surface in
 //! the [`WaterLodData`] dies there and leaves active foam in the foam sim's
@@ -107,10 +109,26 @@ pub struct WaterParticleSettings {
     pub drag: f32,
     /// Wind velocity in m/s.
     pub wind: Vec3,
-    /// Premultiplied colour and opacity of a particle's centre.
+    /// Albedo of a drop in `.rgb` and its opacity at the centre in `.a`.
     pub color: LinearRgba,
+    /// Sky light on the drops in lux, per channel. Sunlight comes from the scene's directional
+    /// lights.
+    pub ambient: LinearRgba,
     /// Seconds over which a particle fades before it dies.
     pub fade: f32,
+    /// Seconds of motion a drop is smeared over on screen, like a camera exposure.
+    pub stretch_time: f32,
+    /// Henyey-Greenstein asymmetry of the light the drops scatter, from -1 to 1. Water drops
+    /// throw most of it forward, so spray glows when it is between the camera and the sun.
+    pub anisotropy: f32,
+    /// Distance in meters over which a drop fades into the geometry behind it, read from the
+    /// depth prepass when the camera has one.
+    pub soft_distance: f32,
+    /// Smallest and largest size of a drop on screen in pixels. A smaller drop is drawn at the
+    /// smallest size with its opacity cut by the area it lacks, so distant spray thins into a
+    /// haze; a larger one is capped to bound the fill.
+    pub min_pixels: f32,
+    pub max_pixels: f32,
     /// Runs the simulation. Off holds every particle where it is.
     pub enabled: bool,
     /// Tests particles against the water surface in the [`WaterLodData`].
@@ -170,8 +188,14 @@ impl Default for WaterParticleSettings {
             gravity: Vec3::new(0.0, -9.81, 0.0),
             drag: 0.4,
             wind: Vec3::ZERO,
-            color: LinearRgba::new(0.8, 0.85, 0.9, 0.9),
+            color: LinearRgba::new(0.85, 0.9, 0.95, 0.9),
+            ambient: LinearRgba::new(14000.0, 17000.0, 22000.0, 1.0),
             fade: 0.3,
+            stretch_time: 1.0 / 30.0,
+            anisotropy: 0.5,
+            soft_distance: 0.3,
+            min_pixels: 1.5,
+            max_pixels: 96.0,
             enabled: true,
             collide: true,
             surface_y: 0.0,
@@ -247,11 +271,18 @@ pub struct WaterParticleMaterial {
     pub look: WaterParticleLook,
 }
 
+/// The draw shader's view of [`WaterParticleSettings`].
 #[derive(Clone, Copy, Debug, Default, ShaderType)]
 pub struct WaterParticleLook {
     pub color: Vec4,
+    pub ambient: Vec4,
     pub fade: f32,
-    pub _pad: Vec3,
+    pub stretch_time: f32,
+    pub anisotropy: f32,
+    pub soft_distance: f32,
+    pub min_pixels: f32,
+    pub max_pixels: f32,
+    pub _pad: Vec2,
 }
 
 impl Material for WaterParticleMaterial {
@@ -377,8 +408,14 @@ fn setup_water_particles(
 fn look(settings: &WaterParticleSettings) -> WaterParticleLook {
     WaterParticleLook {
         color: settings.color.to_vec4(),
+        ambient: settings.ambient.to_vec4(),
         fade: settings.fade,
-        _pad: Vec3::ZERO,
+        stretch_time: settings.stretch_time,
+        anisotropy: settings.anisotropy.clamp(-0.99, 0.99),
+        soft_distance: settings.soft_distance,
+        min_pixels: settings.min_pixels.max(0.1),
+        max_pixels: settings.max_pixels.max(settings.min_pixels),
+        _pad: Vec2::ZERO,
     }
 }
 

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Water particles look like spray: drops scatter the sun forward with a Henyey-Greenstein phase function and take the sky's light, smear along their motion, keep at least 1.5 pixels on screen with their opacity cut by the area they lack, and fade into the depth prepass behind them. `WaterParticleSettings` sets each.
 - Floating bodies splash into the water particles: surface at a body's waterline that moves into the water faster than `FloatingBodySplash::min_speed` throws up particles from the force pass on the GPU, through `WaterParticleQueue`, a GPU spawn queue other passes can append to. The `floating` example splashes.
 - `WaterCrestSpray` emits water particles from breaking crests on the GPU, from the breaking intensity the ocean, shallow water and dispersive patches write into the LOD foam lane, in proportion to texel area and how fast the surface rises. Nested slices emit each patch once. The `beach` and `ocean` examples have a Spray panel.
 - Water particles land on the water surface in the LOD data and leave active foam where they hit, through `WaterFoamDeposit`, an atomic per-texel buffer the foam sim adds that same frame. Other passes can deposit foam there in `WaterFoamDepositSystems`.
