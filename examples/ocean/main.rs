@@ -42,6 +42,8 @@ const CASCADE_HANDOFF_WAVES: f32 = 6.0;
 
 #[path = "../common/screenshot.rs"]
 mod screenshot;
+#[path = "../common/spray.rs"]
+mod spray;
 
 fn main() {
     App::new()
@@ -55,6 +57,7 @@ fn main() {
             FreeCameraPlugin,
             FftPlugin,
             OceanPlugin,
+            spray::CrestSprayPlugin,
             EguiPlugin::default(),
             screenshot::ScreenshotOnEnvPlugin,
         ))

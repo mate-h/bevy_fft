@@ -41,6 +41,10 @@ fn particle_app(settings: WaterParticleSettings) -> App {
             resolution: RES,
             base_texel_size: TEXEL,
         });
+    particle_app_with(app, settings)
+}
+
+fn particle_app_with(mut app: App, settings: WaterParticleSettings) -> App {
     app.add_plugins(
         DefaultPlugins
             .build()
@@ -280,4 +284,81 @@ fn a_particle_lands_on_still_water_and_foams_its_texel() {
             }
         }
     }
+}
+
+/// Spawned count after `frames` frames of crest spray at `rate` over a breaking patch covering
+/// world `x` 8..24 and `z` -4..4, which runs across the edge of slice 0 at x = 16. Without
+/// `breaking` the water is still.
+fn crest_spray(rate: f32, frames: u32, breaking: bool) -> (u32, f32) {
+    let mut app = App::new();
+    // Two slices of 64 texels, 0.5 m and 1 m wide, around the origin. No writer touches them, so
+    // the breaking uploaded here stays.
+    app.insert_resource(WaterLodSettings {
+        slice_count: 2,
+        resolution: RES,
+        base_texel_size: TEXEL,
+    });
+    let mut app = particle_app_with(
+        app,
+        WaterParticleSettings {
+            collide: false,
+            ..default()
+        },
+    );
+    let lod = app.world().resource::<WaterLodData>().clone();
+    if breaking {
+        let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+        let mut foam = images.get_mut(&lod.foam).unwrap();
+        let data = foam.data.as_mut().unwrap();
+        for slice in 0..2u32 {
+            let texel = TEXEL * (1 << slice) as f32;
+            let centre = lod.slices.slices[slice as usize].truncate().truncate();
+            for y in 0..RES {
+                for x in 0..RES {
+                    let p =
+                        centre + (Vec2::new(x as f32, y as f32) + 0.5 - 0.5 * RES as f32) * texel;
+                    if (8.0..24.0).contains(&p.x) && (-4.0..4.0).contains(&p.y) {
+                        let o = (((slice * RES + y) * RES + x) * 8) as usize;
+                        // 1.0 as f16.
+                        data[o..o + 2].copy_from_slice(&0x3c00u16.to_le_bytes());
+                    }
+                }
+            }
+        }
+    }
+    for _ in 0..5 {
+        step(&mut app);
+    }
+    {
+        let mut settings = app.world_mut().resource_mut::<WaterParticleSettings>();
+        settings.crest_spray.rate = rate;
+        settings.crest_spray.cap = 1 << 20;
+    }
+    for _ in 0..frames {
+        step(&mut app);
+    }
+    let (_, [_, spawned, ..]) = read(&mut app);
+    // The slices sit where the test placed the patch only if they centre on the origin.
+    let centre = lod.slices.slices[0].truncate().truncate();
+    (spawned, centre.length())
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn breaking_crests_spray_in_proportion_to_their_area() {
+    let (rate, frames) = (3000.0, 40);
+    let (still, _) = crest_spray(rate, frames, false);
+    assert_eq!(still, 0, "still water sprayed {still} particles");
+    let (spawned, offset) = crest_spray(rate, frames, true);
+    assert!(offset < 1e-3, "the slices are off the origin by {offset} m");
+    // 128 m² of full breaking on a surface that does not rise emits at half the rate. The
+    // emitter runs for `frames` frames, give or take one.
+    let per_frame = rate * 128.0 / 60.0 * 0.5;
+    let low = (frames - 1) as f32 * per_frame * 0.98;
+    let high = (frames + 1) as f32 * per_frame * 1.02;
+    assert!(
+        (low..high).contains(&(spawned as f32)),
+        "{spawned} particles, expected {} per frame over {frames} frames",
+        per_frame
+    );
 }

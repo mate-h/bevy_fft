@@ -68,6 +68,8 @@ use bevy_terrain::prelude::{
 
 #[path = "../common/screenshot.rs"]
 mod screenshot;
+#[path = "../common/spray.rs"]
+mod spray;
 
 /// World-space tile edge in meters for each FFT cascade, largest first.
 const CASCADE_TILES: [f32; 3] = [256.0, 48.0, 9.0];
@@ -162,6 +164,7 @@ fn main() {
             FreeCameraPlugin,
             FftPlugin,
             OceanPlugin,
+            spray::CrestSprayPlugin,
             ShallowWaterPlugin,
             TerrainPlugin,
             TerrainMaterialPlugin::<KauaiGroundMaterial>::default(),

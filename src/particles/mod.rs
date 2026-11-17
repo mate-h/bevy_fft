@@ -95,6 +95,45 @@ pub struct WaterParticleSettings {
     /// Active foam a landing particle leaves over its own footprint, from 0 to 1. A particle as
     /// wide as an LOD texel with 1 foams that texel fully.
     pub foam_per_drop: f32,
+    /// Spray from breaking crests. See [`WaterCrestSpray`].
+    pub crest_spray: WaterCrestSpray,
+}
+
+/// Spray that breaking crests in the water LOD data throw up. The ocean, shallow water grids and
+/// dispersive patches all write their breaking intensity into the LOD foam lane, and each texel
+/// of the finest [`Self::slices`] slices with breaking emits particles. A texel a finer slice
+/// also covers is left to it, so nested slices emit a patch once.
+#[derive(Clone, Copy, Debug, Reflect)]
+pub struct WaterCrestSpray {
+    /// Particles per m² per second at full breaking. Zero turns the emitter off. The rate rises
+    /// to its full value where the surface rises as fast as [`Self::speed`] and falls to half
+    /// where it stands still.
+    pub rate: f32,
+    pub slices: u32,
+    /// Most particles one frame emits.
+    pub cap: u32,
+    /// Upward launch speed at full breaking in m/s, on top of the water's own velocity, and the
+    /// random speed added in any direction.
+    pub speed: f32,
+    pub spread: f32,
+    /// Mean quad edge in meters and mean lifetime in seconds. Each particle takes 0.5 to 1.5
+    /// times them.
+    pub size: f32,
+    pub lifetime: f32,
+}
+
+impl Default for WaterCrestSpray {
+    fn default() -> Self {
+        Self {
+            rate: 0.0,
+            slices: 4,
+            cap: 4096,
+            speed: 2.5,
+            spread: 1.0,
+            size: 0.04,
+            lifetime: 1.5,
+        }
+    }
 }
 
 impl Default for WaterParticleSettings {
@@ -110,6 +149,7 @@ impl Default for WaterParticleSettings {
             collide: true,
             surface_y: 0.0,
             foam_per_drop: 1.0,
+            crest_spray: WaterCrestSpray::default(),
         }
     }
 }
@@ -120,8 +160,8 @@ impl Default for WaterParticleSettings {
 pub struct WaterParticleSpawns(pub Vec<WaterParticle>);
 
 /// The pool's buffers. `particles` holds [`WaterParticleSettings::capacity`] particles, and
-/// `state` four `u32` counters: the spawn cursor, particles spawned, particles that died, by age
-/// or by being overwritten, and particles alive after the last frame. Spawned minus died is
+/// `state` eight `u32` counters, the first four of which are the spawn cursor, particles spawned,
+/// particles that died, by age or by being overwritten, and particles alive after the last frame. Spawned minus died is
 /// alive. Both can be read back with [`Readback::buffer`](bevy::render::gpu_readback::Readback).
 #[derive(Resource, Clone, ExtractResource)]
 #[extract_app(RenderApp)]
@@ -277,7 +317,7 @@ fn setup_water_particles(
         RenderAssetUsages::RENDER_WORLD,
     ));
     let state = buffers.add(ShaderBuffer::new(
-        vec![0u32; 4],
+        vec![0u32; 8],
         RenderAssetUsages::RENDER_WORLD,
     ));
     // Six vertices per slot. Their positions are unused: the vertex shader reads the pool.
@@ -408,6 +448,14 @@ struct GpuParticleParams {
     collide: u32,
     surface_y: f32,
     foam_per_drop: f32,
+    spray_rate: f32,
+    spray_slices: u32,
+    spray_cap: u32,
+    spray_speed: f32,
+    spray_spread: f32,
+    spray_size: f32,
+    spray_lifetime: f32,
+    seed: u32,
     _pad: UVec3,
 }
 
@@ -417,6 +465,7 @@ struct WaterParticlePipeline {
     begin: CachedComputePipelineId,
     spawn: CachedComputePipelineId,
     simulate: CachedComputePipelineId,
+    spray: CachedComputePipelineId,
 }
 
 impl FromWorld for WaterParticlePipeline {
@@ -431,13 +480,14 @@ impl FromWorld for WaterParticlePipeline {
                 ShaderStages::COMPUTE,
                 (
                     storage_buffer::<WaterParticle>(false),
-                    storage_buffer::<[u32; 4]>(false),
+                    storage_buffer::<[u32; 8]>(false),
                     storage_buffer_read_only::<WaterParticle>(false),
                     uniform_buffer::<GpuParticleParams>(false),
                     uniform_buffer::<WaterLodSlices>(false),
                     texture_2d_array(TextureSampleType::Float { filterable: false }),
                     texture_2d_array(TextureSampleType::Float { filterable: false }),
                     storage_buffer::<u32>(false),
+                    texture_2d_array(TextureSampleType::Float { filterable: false }),
                 ),
             ),
         );
@@ -457,6 +507,7 @@ impl FromWorld for WaterParticlePipeline {
             begin: queue("water_particles_begin", "beginFrame"),
             spawn: queue("water_particles_spawn", "spawnParticles"),
             simulate: queue("water_particles_simulate", "simulateParticles"),
+            spray: queue("water_particles_crest_spray", "emitCrestSpray"),
             layout,
         }
     }
@@ -470,6 +521,9 @@ struct WaterParticleGpu {
     group: Option<BindGroup>,
     capacity: u32,
     spawn_count: u32,
+    frame: u32,
+    /// Workgroups of the crest emitter, when it runs this frame.
+    spray: Option<UVec3>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -497,9 +551,10 @@ fn prepare_water_particles(
     else {
         return;
     };
-    let (Some(displacement), Some(foam_lane), Some(slices), Some(deposit)) = (
+    let (Some(displacement), Some(foam_lane), Some(flow), Some(slices), Some(deposit)) = (
         images.get(&lod.displacement),
         images.get(&lod.foam),
+        images.get(&lod.flow),
         lod_gpu.slices.binding(),
         foam.deposit.buffer.as_ref(),
     ) else {
@@ -541,8 +596,22 @@ fn prepare_water_particles(
         collide: u32::from(settings.collide),
         surface_y: settings.surface_y,
         foam_per_drop: settings.foam_per_drop.max(0.0),
+        spray_rate: settings.crest_spray.rate.max(0.0),
+        spray_slices: settings.crest_spray.slices,
+        spray_cap: settings.crest_spray.cap,
+        spray_speed: settings.crest_spray.speed,
+        spray_spread: settings.crest_spray.spread,
+        spray_size: settings.crest_spray.size,
+        spray_lifetime: settings.crest_spray.lifetime,
+        seed: gpu.frame.wrapping_mul(0x9e37_79b9),
         _pad: UVec3::ZERO,
     };
+    gpu.frame = gpu.frame.wrapping_add(1);
+    gpu.spray = (settings.crest_spray.rate > 0.0 && frame.dt > 0.0).then(|| {
+        let slices = settings.crest_spray.slices.min(lod.slices.count);
+        let res = lod.slices.resolution;
+        UVec3::new(res.div_ceil(8), res.div_ceil(8), slices)
+    });
     let mut bytes = Vec::new();
     params.write_into(&mut Writer::new(&params, &mut bytes, 0).unwrap());
     queue.write_buffer(&params_buffer, 0, &bytes);
@@ -560,6 +629,7 @@ fn prepare_water_particles(
             &displacement.texture_view,
             &foam_lane.texture_view,
             deposit.as_entire_buffer_binding(),
+            &flow.texture_view,
         )),
     ));
 }
@@ -573,30 +643,30 @@ fn run_water_particles(
     let Some(group) = &gpu.group else {
         return;
     };
-    let (Some(begin), Some(spawn), Some(simulate)) = (
+    let (Some(begin), Some(spawn), Some(simulate), Some(spray)) = (
         cache.get_compute_pipeline(pipeline.begin),
         cache.get_compute_pipeline(pipeline.spawn),
         cache.get_compute_pipeline(pipeline.simulate),
+        cache.get_compute_pipeline(pipeline.spray),
     ) else {
         return;
     };
     let encoder = ctx.command_encoder();
-    if gpu.spawn_count > 0 {
-        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("water_particles_spawn"),
-            timestamp_writes: None,
-        });
-        pass.set_bind_group(0, group, &[]);
-        pass.set_pipeline(spawn);
-        pass.dispatch_workgroups(gpu.spawn_count.div_ceil(64), 1, 1);
-    }
     let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-        label: Some("water_particles_simulate"),
+        label: Some("water_particles_pass"),
         timestamp_writes: None,
     });
     pass.set_bind_group(0, group, &[]);
     pass.set_pipeline(begin);
     pass.dispatch_workgroups(1, 1, 1);
+    if let Some(groups) = gpu.spray {
+        pass.set_pipeline(spray);
+        pass.dispatch_workgroups(groups.x, groups.y, groups.z);
+    }
+    if gpu.spawn_count > 0 {
+        pass.set_pipeline(spawn);
+        pass.dispatch_workgroups(gpu.spawn_count.div_ceil(64), 1, 1);
+    }
     pass.set_pipeline(simulate);
     pass.dispatch_workgroups(gpu.capacity.div_ceil(64), 1, 1);
 }

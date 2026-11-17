@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `WaterCrestSpray` emits water particles from breaking crests on the GPU, from the breaking intensity the ocean, shallow water and dispersive patches write into the LOD foam lane, in proportion to texel area and how fast the surface rises. Nested slices emit each patch once. The `beach` and `ocean` examples have a Spray panel.
 - Water particles land on the water surface in the LOD data and leave active foam where they hit, through `WaterFoamDeposit`, an atomic per-texel buffer the foam sim adds that same frame. Other passes can deposit foam there in `WaterFoamDepositSystems`.
 - `WaterParticlesPlugin` keeps a GPU pool of water particles in world space: spawns from `WaterParticleSpawns` or a `WaterParticleEmitter` land at an atomic cursor in a ring, a compute pass moves them under gravity and quadratic air drag against the wind, and they are drawn as soft camera-facing dots. The `pool` example has a fountain.
 - The `pool` example drops a crate into a shallow water channel with a river running through it, tows a log across it and lays one across it as a dam, with Rapier moving the bodies and their pressure heads pressing the water.

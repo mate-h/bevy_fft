@@ -5,7 +5,9 @@
 // the LOD data's reach dies too. The state counters satisfy spawned - died = alive after each
 // frame.
 
-import bevy_fft::water::lod::{WaterLodSlices, lod_coverage, lod_uv, sample_lod_finest};
+import bevy_fft::water::lod::{
+    WaterLodSlices, lod_coverage, lod_texel_world, lod_uv, sample_lod_finest,
+};
 
 struct Particle {
     position: vec3<f32>,
@@ -23,6 +25,11 @@ struct ParticleState {
     died: atomic<u32>,
     /// Live particles after this frame's simulation.
     alive: atomic<u32>,
+    /// Spray emitted from breaking crests this frame, for the per-frame cap.
+    frame_spray: atomic<u32>,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 struct ParticleParams {
@@ -39,6 +46,19 @@ struct ParticleParams {
     surface_y: f32,
     /// Active foam a landing particle leaves over its own footprint, capped at a whole texel.
     foam_per_drop: f32,
+    /// Spray from breaking crests in particles per m² per second at full breaking. Zero is off.
+    spray_rate: f32,
+    /// Slices the crest emitter scans, finest first.
+    spray_slices: u32,
+    /// Most spray particles one frame emits.
+    spray_cap: u32,
+    /// Upward launch speed at full breaking, and the random speed added in any direction.
+    spray_speed: f32,
+    spray_spread: f32,
+    spray_size: f32,
+    spray_lifetime: f32,
+    /// Changes every frame, for the emitter's random numbers.
+    seed: u32,
     _pad: vec3<u32>,
 }
 
@@ -49,10 +69,12 @@ struct ParticleParams {
 @group(0) @binding(4) var<uniform> lod: WaterLodSlices;
 /// Slopes in `.rg`, height in `.b` and horizontal displacement X in `.a`.
 @group(0) @binding(5) var lod_displacement: texture_2d_array<f32>;
-/// Horizontal displacement Z in `.b`.
+/// Breaking intensity this frame in `.r` and horizontal displacement Z in `.b`.
 @group(0) @binding(6) var lod_foam: texture_2d_array<f32>;
 /// The foam sim's deposit, `WaterFoamDeposit`.
 @group(0) @binding(7) var<storage, read_write> deposit: array<atomic<u32>>;
+/// Water velocity: horizontal in `.xy` and the rate the surface rises in `.z`.
+@group(0) @binding(8) var lod_flow: texture_2d_array<f32>;
 
 const FOAM_DEPOSIT_UNIT: f32 = 65536.0;
 
@@ -87,10 +109,97 @@ fn deposit_foam(p: Particle) {
     }
 }
 
-/// Clears the live count before the frame's simulation counts it again.
+/// Clears the per-frame counts.
 @compute @workgroup_size(1)
 fn beginFrame() {
     atomicStore(&state.alive, 0u);
+    atomicStore(&state.frame_spray, 0u);
+}
+
+/// Writes `p` at the next slot, counting the particle it overwrites as dead.
+fn emit(p: Particle) {
+    let slot = atomicAdd(&state.cursor, 1u) % params.capacity;
+    if particles[slot].life > 0.0 {
+        atomicAdd(&state.died, 1u);
+    }
+    particles[slot] = p;
+    atomicAdd(&state.spawned, 1u);
+}
+
+fn hash(v: u32) -> u32 {
+    var x = v;
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    return x ^ (x >> 16u);
+}
+
+/// A uniform number in [0, 1) from `state`, which it advances.
+fn random(state: ptr<function, u32>) -> f32 {
+    *state = hash(*state + 0x9e3779b9u);
+    return f32(*state >> 8u) / 16777216.0;
+}
+
+/// Spray from breaking crests. One thread per texel of the finest `spray_slices` slices; a
+/// texel a finer slice also covers is left to that slice, so nested slices emit each patch once.
+/// A texel emits `spray_rate · area · dt` particles at full breaking, more where the surface rises
+/// fast, rounded at random so the mean is exact. Each starts on the displaced surface with the
+/// water's velocity plus an upward launch.
+@compute @workgroup_size(8, 8, 1)
+fn emitCrestSpray(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let res = lod.resolution;
+    let slice = gid.z;
+    if gid.x >= res || gid.y >= res || slice >= min(lod.count, params.spray_slices) {
+        return;
+    }
+    let xz = lod_texel_world(lod, gid.xy, slice);
+    if slice > 0u {
+        let finer = lod_uv(lod, xz, slice - 1u);
+        if all(finer >= vec2(0.0)) && all(finer < vec2(1.0)) {
+            return;
+        }
+    }
+    let breaking = saturate(textureLoad(lod_foam, gid.xy, slice, 0).r);
+    if breaking <= 0.0 {
+        return;
+    }
+    let flow = textureLoad(lod_flow, gid.xy, slice, 0);
+    let width = lod.slices[slice].z;
+    let rise = saturate(0.5 + 0.5 * flow.z / max(params.spray_speed, 1e-3));
+    let mean = params.spray_rate * width * width * params.dt * breaking * rise;
+    var rng = hash(((slice * res + gid.y) * res + gid.x) ^ params.seed);
+    var count = u32(floor(mean));
+    if random(&rng) < fract(mean) {
+        count += 1u;
+    }
+    if count == 0u {
+        return;
+    }
+    let first = atomicAdd(&state.frame_spray, count);
+    if first >= params.spray_cap {
+        return;
+    }
+    count = min(count, params.spray_cap - first);
+    let displacement = textureLoad(lod_displacement, gid.xy, slice, 0);
+    let dz = textureLoad(lod_foam, gid.xy, slice, 0).b;
+    for (var k = 0u; k < count; k++) {
+        var p: Particle;
+        let jitter = vec2<f32>(random(&rng), random(&rng)) - 0.5;
+        p.position = vec3<f32>(
+            xz.x + displacement.a + jitter.x * width,
+            params.surface_y + displacement.b,
+            xz.y + dz + jitter.y * width,
+        );
+        var cone = vec3<f32>(random(&rng), random(&rng), random(&rng)) * 2.0 - 1.0;
+        cone /= max(length(cone), 1.0);
+        p.velocity = vec3<f32>(flow.x, max(flow.z, 0.0), flow.y)
+            + vec3<f32>(0.0, params.spray_speed * (0.5 + 0.5 * breaking), 0.0)
+            + cone * params.spray_spread;
+        p.size = params.spray_size * (0.5 + random(&rng));
+        p.life = params.spray_lifetime * (0.5 + random(&rng));
+        emit(p);
+    }
 }
 
 @compute @workgroup_size(64)
@@ -98,12 +207,7 @@ fn spawnParticles(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= params.spawn_count {
         return;
     }
-    let slot = atomicAdd(&state.cursor, 1u) % params.capacity;
-    if particles[slot].life > 0.0 {
-        atomicAdd(&state.died, 1u);
-    }
-    particles[slot] = spawns[id.x];
-    atomicAdd(&state.spawned, 1u);
+    emit(spawns[id.x]);
 }
 
 @compute @workgroup_size(64)
