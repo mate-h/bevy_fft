@@ -29,6 +29,10 @@
 //! starts from that file when it was taken with the same cell size. `BEACH_SETTLED_AFTER=<seconds>`
 //! saves it on its own after that much simulated time, to bake it without a window.
 //!
+//! `BEACH_FRONTS=1` draws the traced breaking fronts, a colour per front id. `BEACH_FRONTS_LOG=1`
+//! logs how the tracker matched them every ten seconds, and `BEACH_FRONTS_KEEP=<seconds>` sets
+//! how long a front missing from the readbacks keeps its id.
+//!
 //! The elevation and class rasters come from the matching 1 m shoreline square in
 //! `~/Downloads/hawaii_topobathy`. Prepare the CC0 texture arrays, class map, sand capillary mask,
 //! and planar height tiles with the neighboring bevy_terrain processor:
@@ -279,6 +283,7 @@ fn main() {
                 draw_breaking_fronts,
                 nest_follows_camera,
                 save_settled_after,
+                log_front_tracking,
             ),
         )
         .add_systems(EguiPrimaryContextPass, beach_panel)
@@ -718,9 +723,38 @@ fn trace_breaking_fronts(
     heightfields: Query<Entity, (With<WaterHeightfield>, Without<WaterBreakingFronts>)>,
 ) {
     for entity in &heightfields {
-        commands
-            .entity(entity)
-            .insert(WaterBreakingFronts::default());
+        let mut fronts = WaterBreakingFronts::default();
+        if let Some(keep) = std::env::var("BEACH_FRONTS_KEEP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            fronts.keep_lost = keep;
+        }
+        commands.entity(entity).insert(fronts);
+    }
+}
+
+/// With `BEACH_FRONTS_LOG`, logs how the front tracker has matched lines every ten seconds.
+fn log_front_tracking(time: Res<Time>, fronts: Query<&WaterBreakingFronts>, mut last: Local<f32>) {
+    if std::env::var_os("BEACH_FRONTS_LOG").is_none() || time.elapsed_secs() < *last + 10.0 {
+        return;
+    }
+    *last = time.elapsed_secs();
+    for f in &fronts {
+        let t = f.tracking;
+        let new = t.kept + t.revived + t.split + t.weak + t.fresh;
+        info!(
+            "fronts: {} readbacks, {} lines now; new lines {new}: kept {} revived {} split {} weak {} fresh {}; lost {} at mean age {:.2} s",
+            t.readbacks,
+            f.lines.len(),
+            t.kept,
+            t.revived,
+            t.split,
+            t.weak,
+            t.fresh,
+            t.lost,
+            t.lost_age / t.lost.max(1) as f32,
+        );
     }
 }
 
@@ -753,6 +787,7 @@ fn draw_breaking_fronts(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn beach_panel(
     mut commands: Commands,
     mut contexts: EguiContexts,

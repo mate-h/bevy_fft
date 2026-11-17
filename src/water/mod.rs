@@ -47,7 +47,7 @@ pub use foam::{
     WaterFoamSettings, WaterFoamSim,
 };
 pub use foam_texture::{WATER_FOAM_TEXTURE_SIZE, WaterFoamTexture, foam_texture_image};
-pub use fronts::{FrontLine, FrontPoint, WaterBreakingFronts};
+pub use fronts::{FrontLine, FrontPoint, FrontTrackingStats, WaterBreakingFronts};
 pub use heightfield::{WATER_HEIGHTFIELD_SHADER, WaterHeightfield, WaterHeightfieldDry};
 pub use lod_data::{
     WATER_FOAM_FLOW_FORMAT, WATER_FOAM_FLOW_LAYERS_PER_SLICE, WATER_LOD_DRIFT_FORMAT,

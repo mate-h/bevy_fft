@@ -27,8 +27,32 @@ const HEADER_BYTES: usize = 16;
 const CELL_BYTES: usize = 32;
 /// Gravity in m/s² for the wave speed that moves lines between readbacks.
 const GRAVITY: f32 = 9.81;
-/// Share of a new line's points that must lie near an old line for it to keep the old line's id.
+/// Share of a new line's points, or of an old line's, that must lie near the other line for the
+/// new line to keep the old line's id.
 const MATCH_SHARE: f32 = 0.3;
+
+/// How [`WaterBreakingFronts`] matched the lines of its readbacks, to tell where new ids come from.
+/// [`WaterBreakingFronts::tracking`] adds up every readback.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Reflect)]
+pub struct FrontTrackingStats {
+    /// Readbacks counted.
+    pub readbacks: u32,
+    /// New lines that kept the id of a line in the readback before.
+    pub kept: u32,
+    /// New lines that took the id of a line missing from the readbacks since, within
+    /// [`WaterBreakingFronts::keep_lost`]: a front that flickered out and back.
+    pub revived: u32,
+    /// New lines whose best match went to another new line, as when a front splits.
+    pub split: u32,
+    /// New lines near an old line that shared too few points with it.
+    pub weak: u32,
+    /// New lines with no old line near them.
+    pub fresh: u32,
+    /// Old lines no new line matched.
+    pub lost: u32,
+    /// Seconds the lost lines had lived, summed, for their mean age.
+    pub lost_age: f32,
+}
 
 /// One point of a [`FrontLine`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Reflect)]
@@ -80,8 +104,12 @@ pub struct FrontLine {
 /// Thuerey et al. trace lines once and then advect them. Here the solver runs on the GPU, so the
 /// lines are traced again from every readback and matched to the previous lines instead. A line
 /// that overlaps one from the last readback, moved forward at the shallow water wave speed √(gh),
-/// keeps its [`FrontLine::id`] and [`FrontLine::age`]. That gives spray, foam and the breaker curl
-/// a stable line to follow while the front itself always comes from the current solver state.
+/// keeps its [`FrontLine::id`] and [`FrontLine::age`]. Lines overlap when a share of either one's
+/// points lies near the other, so a front that grows or shrinks keeps its id. A line that goes
+/// missing is carried forward for [`WaterBreakingFronts::keep_lost`] seconds, so a front that
+/// flickers below [`WaterBreakingFronts::min_intensity`] for a moment keeps its id too. That gives
+/// spray, foam and the breaker curl a stable line to follow while the front itself always comes
+/// from the current solver state. [`WaterBreakingFronts::tracking`] counts how lines were matched.
 ///
 /// Results arrive a few frames late, like [`OceanQueries`](crate::ocean::OceanQueries).
 /// [`Self::frame`] counts the readbacks.
@@ -96,6 +124,11 @@ pub struct WaterBreakingFronts {
     pub min_points: usize,
     /// Most front cells read back per frame. Further cells are ignored.
     pub capacity: u32,
+    /// Seconds a line missing from the readbacks is still carried forward, so a front that
+    /// flickers out for a moment, below [`Self::min_intensity`], keeps its id when it comes back.
+    pub keep_lost: f32,
+    /// How the readbacks so far were matched.
+    pub tracking: FrontTrackingStats,
     /// Fronts from the latest readback.
     pub lines: Vec<FrontLine>,
     /// Readbacks taken so far. It changes when [`Self::lines`] does.
@@ -107,6 +140,10 @@ pub struct WaterBreakingFronts {
     /// Cells the current buffer holds.
     buffer_capacity: u32,
     next_id: u32,
+    /// Lines missing from the latest readbacks, carried forward, with the seconds they have been
+    /// missing.
+    #[reflect(ignore)]
+    missing: Vec<(FrontLine, f32)>,
     submitted: u32,
     last_time: Option<f32>,
 }
@@ -118,12 +155,15 @@ impl Default for WaterBreakingFronts {
             link_cells: 2.0,
             min_points: 4,
             capacity: 8192,
+            keep_lost: 0.5,
+            tracking: FrontTrackingStats::default(),
             lines: Vec::new(),
             frame: 0,
             cell_count: 0,
             buffer: Handle::default(),
             buffer_capacity: 0,
             next_id: 1,
+            missing: Vec::new(),
             submitted: 0,
             last_time: None,
         }
@@ -212,7 +252,25 @@ pub(super) fn accept_front_cells(
         .collect();
     let tolerance = (fronts.link_cells + 1.0) * heightfield.cell_size;
     let fronts = &mut *fronts;
-    fronts.lines = track_fronts(&fronts.lines, lines, dt, tolerance, &mut fronts.next_id);
+    let mut tracker = FrontTracker {
+        next_id: fronts.next_id,
+        missing: std::mem::take(&mut fronts.missing),
+        keep_lost: fronts.keep_lost,
+        stats: FrontTrackingStats::default(),
+    };
+    fronts.lines = tracker.track(&fronts.lines, lines, dt, tolerance);
+    fronts.next_id = tracker.next_id;
+    fronts.missing = tracker.missing;
+    let t = &mut fronts.tracking;
+    let s = tracker.stats;
+    t.readbacks += 1;
+    t.kept += s.kept;
+    t.revived += s.revived;
+    t.split += s.split;
+    t.weak += s.weak;
+    t.fresh += s.fresh;
+    t.lost += s.lost;
+    t.lost_age += s.lost_age;
     fronts.frame = fronts.frame.wrapping_add(1);
     fronts.cell_count = found;
 }
@@ -473,73 +531,148 @@ pub(crate) fn link_front_cells(
     lines
 }
 
-/// Gives each new line the id and age of the previous line it overlaps most, after moving the
-/// previous line forward by `dt` at the shallow water wave speed. Lines without a match get new ids.
-pub(crate) fn track_fronts(
-    previous: &[FrontLine],
-    lines: Vec<(bool, Vec<FrontPoint>)>,
-    dt: f32,
-    tolerance: f32,
-    next_id: &mut u32,
-) -> Vec<FrontLine> {
-    let moved: Vec<Vec<Vec2>> = previous
+/// Matches the lines of each readback to those of the readbacks before.
+pub(crate) struct FrontTracker {
+    pub next_id: u32,
+    /// Lines missing from the latest readbacks, with the seconds they have been missing.
+    pub missing: Vec<(FrontLine, f32)>,
+    /// Seconds a missing line is kept.
+    pub keep_lost: f32,
+    pub stats: FrontTrackingStats,
+}
+
+/// `line` moved forward by `dt` at the shallow water wave speed √(gh) of each point.
+fn advance(line: &FrontLine, dt: f32) -> FrontLine {
+    let mut moved = line.clone();
+    for p in &mut moved.points {
+        let speed = (GRAVITY * p.depth.max(0.0)).sqrt();
+        let step = p.direction * speed * dt;
+        p.position += Vec3::new(step.x, 0.0, step.y);
+    }
+    moved
+}
+
+/// Share of `points` within `tolerance` of any of `other`.
+fn near_share(points: &[Vec2], other: &[Vec2], tolerance: f32) -> f32 {
+    let near = points
         .iter()
-        .map(|line| {
-            line.points
+        .filter(|p| {
+            other
                 .iter()
-                .map(|p| {
-                    let speed = (GRAVITY * p.depth.max(0.0)).sqrt();
-                    p.position.xz() + p.direction * speed * dt
-                })
-                .collect()
+                .any(|q| q.distance_squared(**p) <= tolerance * tolerance)
         })
-        .collect();
-    let mut pairs = Vec::new();
-    for (n, (_, points)) in lines.iter().enumerate() {
-        for (o, old) in moved.iter().enumerate() {
-            let near = points
-                .iter()
-                .filter(|p| {
-                    old.iter()
-                        .any(|q| q.distance_squared(p.position.xz()) <= tolerance * tolerance)
-                })
-                .count();
-            let share = near as f32 / points.len().max(1) as f32;
-            if share >= MATCH_SHARE {
-                pairs.push((share, n, o));
-            }
-        }
-    }
-    pairs.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let mut matched_new = vec![None; lines.len()];
-    let mut used_old = HashSet::new();
-    for (_, n, o) in pairs {
-        if matched_new[n].is_none() && used_old.insert(o) {
-            matched_new[n] = Some(o);
-        }
-    }
-    lines
-        .into_iter()
-        .zip(matched_new)
-        .map(|((closed, points), old)| match old {
-            Some(o) => FrontLine {
-                id: previous[o].id,
-                age: previous[o].age + dt,
-                closed,
-                points,
-            },
-            None => {
-                let id = *next_id;
-                *next_id = next_id.wrapping_add(1).max(1);
-                FrontLine {
-                    id,
-                    age: 0.0,
-                    closed,
-                    points,
+        .count();
+    near as f32 / points.len().max(1) as f32
+}
+
+impl FrontTracker {
+    /// Gives each new line the id and age of the old line it overlaps most: a line of the readback
+    /// before, `previous`, or one missing since, all moved forward by `dt` at the shallow water
+    /// wave speed. They overlap when a share of either line's points lies near the other, so a
+    /// short piece of a long front keeps its id, and so does a front that grew. Lines without a
+    /// match get new ids. Old lines left without a match are kept as missing for
+    /// [`Self::keep_lost`] seconds.
+    pub fn track(
+        &mut self,
+        previous: &[FrontLine],
+        lines: Vec<(bool, Vec<FrontPoint>)>,
+        dt: f32,
+        tolerance: f32,
+    ) -> Vec<FrontLine> {
+        let old: Vec<FrontLine> = previous
+            .iter()
+            .map(|line| advance(line, dt))
+            .chain(self.missing.iter().map(|(line, _)| advance(line, dt)))
+            .collect();
+        let old_xz: Vec<Vec<Vec2>> = old
+            .iter()
+            .map(|l| l.points.iter().map(|p| p.position.xz()).collect())
+            .collect();
+        let mut pairs = Vec::new();
+        let mut near_any = vec![false; lines.len()];
+        for (n, (_, points)) in lines.iter().enumerate() {
+            let new_xz: Vec<Vec2> = points.iter().map(|p| p.position.xz()).collect();
+            for (o, old_points) in old_xz.iter().enumerate() {
+                let forward = near_share(&new_xz, old_points, tolerance);
+                if forward > 0.0 {
+                    near_any[n] = true;
+                }
+                let share = forward.max(near_share(old_points, &new_xz, tolerance));
+                if share >= MATCH_SHARE {
+                    // Lines of the last readback come before missing ones of the same share.
+                    pairs.push((share, o >= previous.len(), n, o));
                 }
             }
-        })
-        .collect()
+        }
+        pairs.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        let mut matched_new = vec![None; lines.len()];
+        let mut had_pair = vec![false; lines.len()];
+        let mut used_old = HashSet::new();
+        for (_, _, n, o) in pairs {
+            had_pair[n] = true;
+            if matched_new[n].is_none() && used_old.insert(o) {
+                matched_new[n] = Some(o);
+            }
+        }
+        for n in 0..lines.len() {
+            match matched_new[n] {
+                Some(o) if o < previous.len() => self.stats.kept += 1,
+                Some(_) => self.stats.revived += 1,
+                None if had_pair[n] => self.stats.split += 1,
+                None if near_any[n] => self.stats.weak += 1,
+                None => self.stats.fresh += 1,
+            }
+        }
+        // Old lines no new line took: lines of the last readback go missing, and missing ones
+        // age until they are dropped.
+        let mut missing = Vec::new();
+        for (o, line) in old.iter().enumerate() {
+            if used_old.contains(&o) {
+                continue;
+            }
+            let (gone, age) = if o < previous.len() {
+                self.stats.lost += 1;
+                self.stats.lost_age += line.age;
+                (0.0, line.age)
+            } else {
+                (self.missing[o - previous.len()].1, line.age)
+            };
+            let gone = gone + dt;
+            if gone <= self.keep_lost {
+                missing.push((
+                    FrontLine {
+                        age: age + dt,
+                        ..line.clone()
+                    },
+                    gone,
+                ));
+            }
+        }
+        let result = lines
+            .into_iter()
+            .zip(matched_new)
+            .map(|((closed, points), o)| match o {
+                Some(o) => FrontLine {
+                    id: old[o].id,
+                    age: old[o].age + dt,
+                    closed,
+                    points,
+                },
+                None => {
+                    let id = self.next_id;
+                    self.next_id = self.next_id.wrapping_add(1).max(1);
+                    FrontLine {
+                        id,
+                        age: 0.0,
+                        closed,
+                        points,
+                    }
+                }
+            })
+            .collect();
+        self.missing = missing;
+        result
+    }
 }
 
 /// The render-world copy of a [`WaterBreakingFronts`]: its readback buffer and pass settings.
@@ -849,19 +982,22 @@ mod tests {
             .collect()
     }
 
+    fn tracker(keep_lost: f32) -> FrontTracker {
+        FrontTracker {
+            next_id: 1,
+            missing: Vec::new(),
+            keep_lost,
+            stats: FrontTrackingStats::default(),
+        }
+    }
+
     #[test]
     fn tracking_keeps_ids_of_fronts_that_move_on() {
-        let mut next = 1;
-        let first = track_fronts(
-            &[],
-            vec![(false, line_at(0.0, Vec2::X))],
-            0.0,
-            3.0,
-            &mut next,
-        );
+        let mut t = tracker(0.0);
+        let first = t.track(&[], vec![(false, line_at(0.0, Vec2::X))], 0.0, 3.0);
         assert_eq!(first[0].id, 1);
         // √(g·1 m) ≈ 3.1 m/s, so 0.5 s carries the front about 1.6 m.
-        let second = track_fronts(
+        let second = t.track(
             &first,
             vec![
                 (false, line_at(1.6, Vec2::X)),
@@ -869,29 +1005,70 @@ mod tests {
             ],
             0.5,
             3.0,
-            &mut next,
         );
         assert_eq!(second[0].id, 1);
         assert_eq!(second[0].age, 0.5);
         assert_eq!(second[1].id, 2);
         assert_eq!(second[1].age, 0.0);
+        assert_eq!((t.stats.kept, t.stats.fresh), (1, 2));
+    }
+
+    #[test]
+    fn a_front_that_flickers_out_keeps_its_id() {
+        let mut t = tracker(0.5);
+        let first = t.track(&[], vec![(false, line_at(0.0, Vec2::X))], 0.0, 3.0);
+        // Gone for one readback, then back where it would have moved to.
+        let gap = t.track(&first, Vec::new(), 0.1, 3.0);
+        assert!(gap.is_empty());
+        let back = t.track(&gap, vec![(false, line_at(0.62, Vec2::X))], 0.1, 3.0);
+        assert_eq!(back[0].id, 1);
+        assert_eq!(t.stats.revived, 1);
+        // Gone for longer than `keep_lost`, it comes back as a new front.
+        let mut t = tracker(0.5);
+        let first = t.track(&[], vec![(false, line_at(0.0, Vec2::X))], 0.0, 3.0);
+        let mut lines = first;
+        for _ in 0..6 {
+            lines = t.track(&lines, Vec::new(), 0.1, 3.0);
+        }
+        let late = t.track(&lines, vec![(false, line_at(2.2, Vec2::X))], 0.1, 3.0);
+        assert_eq!(late[0].id, 2);
+    }
+
+    #[test]
+    fn a_short_piece_of_a_long_front_keeps_its_id() {
+        let mut t = tracker(0.0);
+        let long: Vec<FrontPoint> = (0..20)
+            .map(|z| FrontPoint {
+                position: Vec3::new(z as f32, 0.0, 0.0),
+                direction: Vec2::Y,
+                ..default()
+            })
+            .collect();
+        let first = t.track(&[], vec![(false, long.clone())], 0.0, 3.0);
+        // Most of the front stops breaking; the part left lies on the old line, so it keeps the id
+        // whichever way the share is taken. A longer line that grew from a short one shares few of
+        // its points with it, and keeps the id through the old line's share.
+        let grown: Vec<FrontPoint> = (0..80)
+            .map(|z| FrontPoint {
+                position: Vec3::new(z as f32 - 30.0, 0.0, 0.0),
+                direction: Vec2::Y,
+                ..default()
+            })
+            .collect();
+        let second = t.track(&first, vec![(false, grown)], 0.0, 3.0);
+        assert_eq!(second[0].id, 1);
     }
 
     #[test]
     fn a_split_front_keeps_its_id_on_one_part() {
-        let mut next = 1;
-        let first = track_fronts(
-            &[],
-            vec![(false, line_at(0.0, Vec2::X))],
-            0.0,
-            3.0,
-            &mut next,
-        );
+        let mut t = tracker(0.0);
+        let first = t.track(&[], vec![(false, line_at(0.0, Vec2::X))], 0.0, 3.0);
         let whole = line_at(0.0, Vec2::X);
         let parts = vec![(false, whole[..12].to_vec()), (false, whole[12..].to_vec())];
-        let second = track_fronts(&first, parts, 0.0, 3.0, &mut next);
+        let second = t.track(&first, parts, 0.0, 3.0);
         let ids: Vec<u32> = second.iter().map(|l| l.id).collect();
         assert!(ids.contains(&1) && ids.contains(&2), "{ids:?}");
+        assert_eq!(t.stats.split, 1);
     }
 
     #[test]

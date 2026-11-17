@@ -49,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `WaterBreakingFronts` keeps front ids steadier: lines match when a share of either line lies near the other, and a line missing from a readback is carried forward for `keep_lost` seconds, 0.5 by default. In the beach this cuts new front ids by 61% on the grid and 83% on the nested grid, and lost fronts had lived 2.5 s on average instead of 0.5 s. `WaterBreakingFronts::tracking` counts how lines were matched, and `BEACH_FRONTS_LOG` logs it.
 - The water surface lights itself with a reduced copy of Bevy's PBR model. Directional lights, their shadows, the view environment map and ambient light still apply, while point, spot and area lights and reflection probes no longer light the water.
 - `WaterOpticsUniform::trace_steps` sets the march steps of the screen-space traces.
 - Water particles draw only the live particles, with an indirect draw from a list the simulation fills in `WaterParticles::draw`, instead of six vertices for every pool slot.
