@@ -11,6 +11,8 @@
 //! it.
 //!
 //! A fountain on the near bank sprays water particles, until they spawn from the water itself.
+//! `POOL_WEIR=<meters>` raises the bed upstream of a weir by that much, and the river pours over
+//! it as a waterfall that throws spray and mist. `POOL_CAMERA=x,y,z,tx,ty,tz` places the camera.
 //!
 //! The panel drops the crate again and shows its submerged share.
 
@@ -122,9 +124,33 @@ fn cells() -> UVec2 {
     (Vec2::new(LENGTH, WIDTH) / CELL).round().as_uvec2()
 }
 
+/// The camera from `POOL_CAMERA=x,y,z,tx,ty,tz`, or the default view over the channel.
+fn start_camera() -> Transform {
+    let values: Vec<f32> = std::env::var("POOL_CAMERA")
+        .ok()
+        .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+        .unwrap_or_default();
+    if let [x, y, z, tx, ty, tz] = values[..] {
+        return Transform::from_xyz(x, y, z).looking_at(Vec3::new(tx, ty, tz), Vec3::Y);
+    }
+    Transform::from_xyz(-30.0, 14.0, -26.0).looking_at(Vec3::new(-2.0, -1.0, 2.0), Vec3::Y)
+}
+
+/// World x of the weir's lip.
+const WEIR_X: f32 = 6.0;
+
+/// Height of the weir from `POOL_WEIR`, or zero without one.
+fn weir() -> f32 {
+    std::env::var("POOL_WEIR")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0f32)
+        .max(0.0)
+}
+
 /// Bed height in solver meters at world `x`. The solver's zero sits at the downstream bed.
 fn bed(x: f32) -> f32 {
-    SLOPE * (0.5 * LENGTH - x)
+    SLOPE * (0.5 * LENGTH - x) + if x < WEIR_X { weir() } else { 0.0 }
 }
 
 fn setup(
@@ -141,7 +167,7 @@ fn setup(
         center: Vec2::ZERO,
         cell_size: CELL,
         // The still surface at the channel's middle sits at world height 0.
-        datum: -(DEPTH + bed(0.0)),
+        datum: -(DEPTH + SLOPE * 0.5 * LENGTH),
         blend_cells: 0.0,
     };
     let heights: Vec<f32> = (0..cells.x * cells.y)
@@ -149,12 +175,15 @@ fn setup(
         .collect();
     controller.bed_source = images.add(bed_source_image(cells.x, cells.y, &heights));
     controller.preset_index = SHALLOW_WATER_PRESET_BED_SOURCE;
-    controller.fill_level = DEPTH + bed(0.0);
+    controller.fill_level = DEPTH + SLOPE * 0.5 * LENGTH;
     controller.gravity = 9.81;
     controller.dt = 1.0 / 60.0;
     controller.manning_n = MANNING_N;
     controller.pressure_head = Some(images.add(shallow_r32_image(cells.x, cells.y)));
     controller.placement = Some(placement);
+    if weir() > 0.0 {
+        controller.waterfalls = Some(ShallowWaterWaterfalls::default());
+    }
     let mut profile = ShallowWaterBorderProfile::new(cells);
     profile.add_river(
         &RiverSpline {
@@ -210,11 +239,21 @@ fn setup(
     });
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(LENGTH, 0.2, WIDTH))),
-        MeshMaterial3d(gravel),
+        MeshMaterial3d(gravel.clone()),
         Transform::from_xyz(0.0, floor_y - 0.1, 0.0),
         RigidBody::Fixed,
         Collider::cuboid(0.5 * LENGTH, 0.1, 0.5 * WIDTH),
     ));
+    if weir() > 0.0 {
+        let long = WEIR_X + 0.5 * LENGTH;
+        commands.spawn((
+            Mesh3d(meshes.add(Cuboid::new(long, weir(), WIDTH))),
+            MeshMaterial3d(gravel.clone()),
+            Transform::from_xyz(WEIR_X - 0.5 * long, floor_y + 0.5 * weir(), 0.0),
+            RigidBody::Fixed,
+            Collider::cuboid(0.5 * long, 0.5 * weir(), 0.5 * WIDTH),
+        ));
+    }
     let bank_top = 0.6;
     let bank_height = bank_top - floor_y + 0.2;
     for (size, at) in [
@@ -318,7 +357,7 @@ fn setup(
     commands.spawn(Atmosphere::earth(earth_medium));
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(-30.0, 14.0, -26.0).looking_at(Vec3::new(-2.0, -1.0, 2.0), Vec3::Y),
+        start_camera(),
         FreeCamera::default(),
         WaterViewer,
         AtmosphereSettings::default(),

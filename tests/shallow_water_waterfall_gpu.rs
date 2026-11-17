@@ -1,4 +1,4 @@
-//! Spray from a waterfall in a shallow water river. Run explicitly with a graphics adapter.
+//! Spray and mist from a waterfall in a shallow water river. Run explicitly with a graphics adapter.
 use bevy::{
     app::PluginsState,
     prelude::*,
@@ -21,6 +21,9 @@ const Q: f32 = 0.25;
 const DT: f32 = 0.08;
 /// Particles per cubic meter over the lip.
 const RATE: f32 = 40.0;
+/// Puffs of mist per cubic meter over the lip per meter of head.
+const MIST: f32 = 6.0;
+const DROP: f32 = 3.0;
 
 #[derive(Resource, Default)]
 struct Counters {
@@ -36,7 +39,7 @@ fn step(app: &mut App) {
 
 /// A placed channel of 1 m cells falling along +x, walled along its sides, fed over its left edge
 /// and draining over its right edge, with a bed that drops by `drop` meters halfway along.
-fn channel_app(drop: f32) -> App {
+fn channel_app(drop: f32, rate: f32, mist: f32) -> App {
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -86,7 +89,8 @@ fn channel_app(drop: f32) -> App {
         blend_cells: 0.0,
     });
     controller.waterfalls = Some(ShallowWaterWaterfalls {
-        rate: RATE,
+        rate,
+        mist,
         ..default()
     });
     let mut profile = ShallowWaterBorderProfile::new(UVec2::new(NX, NY));
@@ -149,7 +153,7 @@ fn spawned_after(app: &mut App, frames: u32, deadline: Instant) -> u32 {
 fn a_waterfall_sprays_in_proportion_to_its_discharge() {
     let deadline = Instant::now() + Duration::from_secs(240);
     // A 3 m drop, three cell widths: past the 1.5 cap.
-    let mut app = channel_app(3.0);
+    let mut app = channel_app(DROP, RATE, 0.0);
     let before = spawned_after(&mut app, 1500, deadline);
     let frames = 250;
     let after = spawned_after(&mut app, frames, deadline);
@@ -162,10 +166,28 @@ fn a_waterfall_sprays_in_proportion_to_its_discharge() {
     );
 
     // The same river without the drop throws none.
-    let mut app = channel_app(0.0);
+    let mut app = channel_app(0.0, RATE, MIST);
     let flat = spawned_after(&mut app, 1500, deadline);
     assert_eq!(
         flat, 0,
         "a river without a waterfall threw {flat} particles"
+    );
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn a_waterfall_mists_in_proportion_to_its_discharge_and_head() {
+    let deadline = Instant::now() + Duration::from_secs(240);
+    let mut app = channel_app(DROP, 0.0, MIST);
+    let before = spawned_after(&mut app, 1500, deadline);
+    let frames = 250;
+    let after = spawned_after(&mut app, frames, deadline);
+    // The head is the drop plus the lip's v²/2g, under a tenth of a meter at critical flow.
+    let volume = Q * NY as f32 * DT * frames as f32;
+    let expected = MIST * volume * (DROP + 0.1);
+    let puffs = (after - before) as f32;
+    assert!(
+        (puffs - expected).abs() < 0.25 * expected,
+        "the waterfall threw {puffs} puffs of mist over {frames} frames, expected about {expected}"
     );
 }

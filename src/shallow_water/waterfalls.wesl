@@ -4,6 +4,9 @@
 // cell is not filled up to the higher cell's bed. Such a face throws `rate` particles per cubic
 // meter that crosses it into the water particle queue, rounded at random so the mean is exact.
 // The particles are spray for the eye: the grid still passes the water down the drop itself.
+// The face also puts `mist` puffs of mist per cubic meter per meter of energy head (bed drop plus
+// v²/2g, capped at the critical half depth) at the foot of the fall, marked by a negative size,
+// drifting slowly downstream and up.
 
 struct Params {
     size: vec2<u32>,
@@ -19,6 +22,10 @@ struct Params {
     size_m: f32,
     lifetime: f32,
     seed: u32,
+    mist: f32,
+    mist_size: f32,
+    mist_lifetime: f32,
+    gravity: f32,
     _pad: vec3<u32>,
 }
 
@@ -62,6 +69,15 @@ fn random(state: ptr<function, u32>) -> f32 {
     return f32(*state >> 8u) / 16777216.0;
 }
 
+/// Rounds `mean` down or up at random, so the expected count is exact.
+fn round_at_random(mean: f32, state: ptr<function, u32>) -> u32 {
+    var n = u32(floor(mean));
+    if random(state) < fract(mean) {
+        n += 1u;
+    }
+    return n;
+}
+
 /// Emits over the face between cells `a` and `b`, which lie along `axis` with `b = a + axis`,
 /// carrying velocity `v` from `a` to `b`. `face` is the face's centre in cells.
 fn lip(a: vec2<i32>, b: vec2<i32>, axis: vec2<f32>, v: f32, face: vec2<f32>, salt: u32) {
@@ -85,17 +101,38 @@ fn lip(a: vec2<i32>, b: vec2<i32>, axis: vec2<f32>, v: f32, face: vec2<f32>, sal
     }
     // Water over the lip this step: flux per width times the face width.
     let volume = speed * high.y * params.cell_size * params.dt;
-    let mean = params.rate * volume;
+    // Flow over a free overfall passes critical depth at the brink, where the kinetic head is
+    // half the depth. The face speed over a steep drop runs far past that in the grid, so cap it.
+    let head = drop + min(speed * speed / (2.0 * max(params.gravity, 1e-3)), 0.5 * high.y);
     var rng = hash(salt ^ hash(params.seed));
-    var count = u32(floor(mean));
-    if random(&rng) < fract(mean) {
-        count += 1u;
-    }
-    if count == 0u {
+    let count = round_at_random(params.rate * volume, &rng);
+    let mists = round_at_random(params.mist * volume * head, &rng);
+    if count + mists == 0u {
         return;
     }
-    let first = atomicAdd(&queue.count, count);
+    let first = atomicAdd(&queue.count, count + mists);
     let across = vec2<f32>(-dir.y, dir.x);
+    for (var k = 0u; k < mists; k++) {
+        let slot = first + count + k;
+        if slot >= QUEUE_CAPACITY {
+            break;
+        }
+        // Somewhere over the lower cell, where the fall lands.
+        let along = (random(&rng) - 0.5) * params.cell_size;
+        let out = (0.2 + random(&rng)) * params.cell_size;
+        let xz = params.origin + face * params.cell_size + across * along + dir * out;
+        var jitter = vec3<f32>(random(&rng), random(&rng), random(&rng)) * 2.0 - 1.0;
+        jitter /= max(length(jitter), 1.0);
+        let fall = sqrt(2.0 * params.gravity * drop);
+        var p: Particle;
+        p.position = vec3<f32>(xz.x, params.datum + low.x + low.y + 0.25 * params.mist_size, xz.y);
+        // Thrown off the plunge: a little of the impact speed, outward and up.
+        p.velocity = vec3<f32>(dir.x, 0.0, dir.y) * 0.2 * speed
+            + vec3<f32>(0.0, 0.1 * fall, 0.0) + jitter * 0.1 * fall;
+        p.size = -params.mist_size * (0.6 + 0.8 * random(&rng));
+        p.life = params.mist_lifetime * (0.5 + random(&rng));
+        queue.items[slot] = p;
+    }
     for (var k = 0u; k < count; k++) {
         let slot = first + k;
         if slot >= QUEUE_CAPACITY {
@@ -117,7 +154,7 @@ fn lip(a: vec2<i32>, b: vec2<i32>, axis: vec2<f32>, v: f32, face: vec2<f32>, sal
 
 @compute @workgroup_size(16, 16, 1)
 fn emitWaterfalls(@builtin(global_invocation_id) id: vec3<u32>) {
-    if id.x >= params.size.x || id.y >= params.size.y || params.rate <= 0.0 {
+    if id.x >= params.size.x || id.y >= params.size.y {
         return;
     }
     let c = vec2<i32>(id.xy);

@@ -2,7 +2,8 @@
 // at an atomic cursor, overwriting the oldest slots, and `simulateParticles` moves every live
 // particle under gravity and quadratic air drag. A particle that falls through the water surface
 // in the LOD data dies there and leaves active foam in the foam sim's deposit buffer, and one past
-// the LOD data's reach dies too. The state counters satisfy spawned - died = alive after each
+// the LOD data's reach dies too. Mist, marked by a negative size, drifts with its own drag and
+// a share of gravity and never lands. The state counters satisfy spawned - died = alive after each
 // frame.
 
 import bevy_fft::water::lod::{
@@ -11,7 +12,7 @@ import bevy_fft::water::lod::{
 
 struct Particle {
     position: vec3<f32>,
-    /// Quad edge in meters.
+    /// Quad edge in meters. Negative marks mist, `-size` across.
     size: f32,
     velocity: vec3<f32>,
     /// Seconds left to live. Zero or less is a free slot.
@@ -64,7 +65,10 @@ struct ParticleParams {
     spray_half_distance: f32,
     /// Nonzero replaces the spray with one still marker per emitting texel, sized by its share.
     spray_debug: u32,
-    _pad: u32,
+    /// Drag and share of gravity for mist, which never lands.
+    mist_drag: f32,
+    mist_gravity: f32,
+    _pad: vec3<u32>,
 }
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
@@ -290,8 +294,12 @@ fn simulateParticles(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let dt = params.dt;
+    let mist = p.size < 0.0;
     let relative = p.velocity - params.wind;
-    let a = params.gravity - params.drag * length(relative) * relative;
+    var a = params.gravity - params.drag * length(relative) * relative;
+    if mist {
+        a = params.gravity * params.mist_gravity - params.mist_drag * length(relative) * relative;
+    }
     // Exact for a constant acceleration, so a drag-free arc matches the ballistic one.
     p.position += p.velocity * dt + 0.5 * a * dt * dt;
     p.velocity += a * dt;
@@ -300,7 +308,7 @@ fn simulateParticles(@builtin(global_invocation_id) id: vec3<u32>) {
         let coverage = lod_coverage(lod, p.position.xz);
         if coverage <= 0.0 {
             p.life = 0.0;
-        } else if p.velocity.y < 0.0
+        } else if !mist && p.velocity.y < 0.0
             && p.position.y <= params.surface_y + surface_height(p.position.xz, coverage) {
             deposit_foam(p);
             p.life = 0.0;

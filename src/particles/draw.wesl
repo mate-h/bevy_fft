@@ -37,7 +37,9 @@ struct ParticleLook {
     soft_distance: f32,
     min_pixels: f32,
     max_pixels: f32,
-    _pad: vec2<f32>,
+    /// Opacity of mist, marked by a negative size, relative to a drop's.
+    mist_opacity: f32,
+    _pad: f32,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var<storage, read> particles: array<Particle>;
@@ -91,8 +93,11 @@ fn vertex(in: Vertex) -> VertexOutput {
 
     // Pixels per meter at this distance.
     let pixels_per_meter = view.clip_from_view[1][1] * 0.5 * view.viewport.w / distance;
-    var width = p.size;
+    var width = abs(p.size);
     var opacity = look.color.a * saturate(p.life / max(look.fade, 1e-4));
+    if p.size < 0.0 {
+        opacity *= look.mist_opacity;
+    }
     let pixels = width * pixels_per_meter;
     if pixels < look.min_pixels {
         opacity *= (pixels / look.min_pixels) * (pixels / look.min_pixels);

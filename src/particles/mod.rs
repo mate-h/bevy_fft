@@ -102,7 +102,7 @@ impl FromWorld for WaterParticleQueue {
 #[repr(C)]
 pub struct WaterParticle {
     pub position: Vec3,
-    /// Quad edge in meters.
+    /// Quad edge in meters. Negative marks [`WaterMist`], `-size` across.
     pub size: f32,
     pub velocity: Vec3,
     /// Seconds left to live.
@@ -156,6 +156,8 @@ pub struct WaterParticleSettings {
     pub foam_per_drop: f32,
     /// Spray from breaking crests. See [`WaterCrestSpray`].
     pub crest_spray: WaterCrestSpray,
+    /// How mist moves and looks. See [`WaterMist`].
+    pub mist: WaterMist,
     /// Reads the pool's counters back into [`WaterParticleStats`] every frame. Off by default,
     /// since the readback costs a copy and a map per frame.
     pub read_counters: bool,
@@ -190,6 +192,30 @@ pub struct WaterCrestSpray {
     /// Replaces the spray with one still marker per emitting texel, as wide as the texel times
     /// the square root of its share of the full rate, to show where spray comes from.
     pub debug_potential: bool,
+}
+
+/// Mist: particles spawned with a negative [`WaterParticle::size`], such as the spray cloud at
+/// the foot of a waterfall. A puff of mist is a cloud of fine droplets, so it drifts on the air
+/// and barely falls, never lands or leaves foam, and is drawn faint and `-size` meters across.
+#[derive(Clone, Copy, Debug, Reflect)]
+pub struct WaterMist {
+    /// Quadratic air drag per meter, in place of [`WaterParticleSettings::drag`].
+    pub drag: f32,
+    /// Share of [`WaterParticleSettings::gravity`] that pulls on mist. With the drag it sets the
+    /// speed mist settles at, `sqrt(gravity · g / drag)`.
+    pub gravity: f32,
+    /// Opacity of a puff relative to a drop's.
+    pub opacity: f32,
+}
+
+impl Default for WaterMist {
+    fn default() -> Self {
+        Self {
+            drag: 3.0,
+            gravity: 0.02,
+            opacity: 0.04,
+        }
+    }
 }
 
 impl Default for WaterCrestSpray {
@@ -306,6 +332,7 @@ impl Default for WaterParticleSettings {
             surface_y: 0.0,
             foam_per_drop: 1.0,
             crest_spray: WaterCrestSpray::default(),
+            mist: WaterMist::default(),
             read_counters: false,
         }
     }
@@ -395,7 +422,8 @@ pub struct WaterParticleLook {
     pub soft_distance: f32,
     pub min_pixels: f32,
     pub max_pixels: f32,
-    pub _pad: Vec2,
+    pub mist_opacity: f32,
+    pub _pad: f32,
 }
 
 impl Material for WaterParticleMaterial {
@@ -548,7 +576,8 @@ fn look(settings: &WaterParticleSettings) -> WaterParticleLook {
         soft_distance: settings.soft_distance,
         min_pixels: settings.min_pixels.max(0.1),
         max_pixels: settings.max_pixels.max(settings.min_pixels),
-        _pad: Vec2::ZERO,
+        mist_opacity: settings.mist.opacity.max(0.0),
+        _pad: 0.0,
     }
 }
 
@@ -656,7 +685,9 @@ struct GpuParticleParams {
     seed: u32,
     spray_half_distance: f32,
     spray_debug: u32,
-    _pad: u32,
+    mist_drag: f32,
+    mist_gravity: f32,
+    _pad: UVec3,
 }
 
 #[derive(Resource)]
@@ -822,7 +853,9 @@ fn prepare_water_particles(
         seed: gpu.frame.wrapping_mul(0x9e37_79b9),
         spray_half_distance: settings.crest_spray.half_distance.max(0.0),
         spray_debug: u32::from(settings.crest_spray.debug_potential),
-        _pad: 0,
+        mist_drag: settings.mist.drag.max(0.0),
+        mist_gravity: settings.mist.gravity,
+        _pad: UVec3::ZERO,
     };
     gpu.frame = gpu.frame.wrapping_add(1);
     gpu.spray = (settings.crest_spray.rate > 0.0 && frame.dt > 0.0).then(|| {

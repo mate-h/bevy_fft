@@ -1,6 +1,7 @@
 //! Spray at waterfall lips: a compute pass over the controller's grid that finds the faces where
 //! water pours over a drop in the bed, with the CMF10 waterfall test, and appends spray to the
-//! [`WaterParticleQueue`] of the water particles. See `waterfalls.wesl`.
+//! [`WaterParticleQueue`] of the water particles, with mist where it lands. See
+//! `waterfalls.wesl`.
 
 use bevy::{
     prelude::*,
@@ -34,6 +35,15 @@ pub struct ShallowWaterWaterfalls {
     pub size: f32,
     /// Seconds a drop lives.
     pub lifetime: f32,
+    /// Puffs of [`WaterMist`](crate::particles::WaterMist) at the foot of the fall per cubic
+    /// meter that pours over, per meter of energy head it falls through: the bed drop plus
+    /// `v² / 2g` of the water's speed over the lip, at most the half depth of critical flow there.
+    /// A tall fall throws more mist for the same water. Zero turns the mist off.
+    pub mist: f32,
+    /// Meters across a puff of mist.
+    pub mist_size: f32,
+    /// Seconds a puff lives.
+    pub mist_lifetime: f32,
 }
 
 impl Default for ShallowWaterWaterfalls {
@@ -44,6 +54,9 @@ impl Default for ShallowWaterWaterfalls {
             spread: 0.3,
             size: 0.08,
             lifetime: 1.5,
+            mist: 6.0,
+            mist_size: 2.5,
+            mist_lifetime: 6.0,
         }
     }
 }
@@ -61,6 +74,10 @@ struct GpuWaterfallParams {
     size_m: f32,
     lifetime: f32,
     seed: u32,
+    mist: f32,
+    mist_size: f32,
+    mist_lifetime: f32,
+    gravity: f32,
     _pad: UVec3,
 }
 
@@ -131,7 +148,7 @@ pub(crate) fn prepare_shallow_water_waterfalls(
     else {
         return;
     };
-    if waterfalls.rate <= 0.0 || controller.paused {
+    if (waterfalls.rate <= 0.0 && waterfalls.mist <= 0.0) || controller.paused {
         return;
     }
     let (Some(bed_water), Some(face_u), Some(face_w)) = (
@@ -154,6 +171,10 @@ pub(crate) fn prepare_shallow_water_waterfalls(
         size_m: waterfalls.size,
         lifetime: waterfalls.lifetime,
         seed: gpu.frame.wrapping_mul(0x9e37_79b9),
+        mist: waterfalls.mist.max(0.0),
+        mist_size: waterfalls.mist_size,
+        mist_lifetime: waterfalls.mist_lifetime,
+        gravity: controller.gravity,
         _pad: UVec3::ZERO,
     };
     gpu.frame = gpu.frame.wrapping_add(1);
