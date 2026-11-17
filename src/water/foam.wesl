@@ -17,7 +17,7 @@
 // `foam_flow` carries the advected texture coordinates of `foam_flow.wesl` the same way, with a
 // plain semi-Lagrangian step, and restarts each phase when its latency runs out.
 
-import bevy_fft::water::lod::{WaterLodSlices, bilinear_clamp_layer, lod_texel_world};
+import bevy_fft::water::lod::{WaterLodSlices, bilinear_clamp_layer};
 import bevy_fft::water::foam_flow::{
     FOAM_FLOW_LATENCY,
     FOAM_FLOW_LAYERS_PER_SLICE,
@@ -68,17 +68,27 @@ struct WaterFoamParams {
 /// Fixed-point scale of `deposit`.
 const FOAM_DEPOSIT_UNIT: f32 = 65536.0;
 
-fn slice_uv(slices: WaterLodSlices, xz: vec2<f32>, i: u32) -> vec2<f32> {
-    let s = slices.slices[i];
+// The helpers below read `lod` and `params.previous` in place, one slice at a time. Passing a
+// `WaterLodSlices` by value copies its whole slice array into registers at each call, which made
+// these kernels spill (1.2 KiB per thread in `foam_correct` on an M5).
+
+/// UV of world `xz` in the slice placed at `s`, where 0 to 1 spans it.
+fn uv_in(s: vec4<f32>, xz: vec2<f32>) -> vec2<f32> {
     return (xz - s.xy) / s.w + 0.5;
 }
 
-/// Finest slice of `slices`, from `start` outward, whose interior holds a bilinear footprint at
-/// `xz`, or -1 when none does.
-fn slice_holding(slices: WaterLodSlices, xz: vec2<f32>, start: u32) -> i32 {
-    let margin = 1.0 / f32(max(slices.resolution, 2u));
-    for (var i = start; i < slices.count; i++) {
-        let uv = slice_uv(slices, xz, i);
+/// World XZ of the centre of `texel` in this frame's slice `i`.
+fn texel_world(texel: vec2<u32>, i: u32) -> vec2<f32> {
+    let s = lod.slices[i];
+    return s.xy + (vec2<f32>(texel) + 0.5 - f32(lod.resolution) * 0.5) * s.z;
+}
+
+/// Finest slice of `params.previous`, from `start` outward, whose interior holds a bilinear
+/// footprint at `xz`, or -1 when none does.
+fn previous_slice_holding(xz: vec2<f32>, start: u32) -> i32 {
+    let margin = 1.0 / f32(max(params.previous.resolution, 2u));
+    for (var i = start; i < params.previous.count; i++) {
+        let uv = uv_in(params.previous.slices[i], xz);
         if all(uv > vec2(margin)) && all(uv < vec2(1.0 - margin)) {
             return i32(i);
         }
@@ -97,11 +107,11 @@ struct PreviousLookup {
 /// Previous foam at world `xz`, looked up from slice `start` outward. Full-precision foam has no
 /// hardware filtering on every backend, so this blends four loads.
 fn previous_at(xz: vec2<f32>, start: u32) -> PreviousLookup {
-    let i = slice_holding(params.previous, xz, start);
+    let i = previous_slice_holding(xz, start);
     if i < 0 {
         return PreviousLookup(vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0));
     }
-    let x = slice_uv(params.previous, xz, u32(i)) * f32(params.previous.resolution) - 0.5;
+    let x = uv_in(params.previous.slices[i], xz) * f32(params.previous.resolution) - 0.5;
     let i0 = vec2<i32>(floor(x));
     let f = x - floor(x);
     let a = textureLoad(previous_foam, i0, i, 0).rg;
@@ -123,7 +133,7 @@ fn foam_forward(@builtin(global_invocation_id) gid: vec3<u32>) {
     if gid.x >= lod.resolution || gid.y >= lod.resolution || slice >= lod.count {
         return;
     }
-    let xz = lod_texel_world(lod, gid.xy, slice);
+    let xz = texel_world(gid.xy, slice);
     let u = drift_at(vec2<i32>(gid.xy), slice);
     let foam = previous_at(xz - u * params.dt, slice).foam;
     textureStore(foam_out, gid.xy, slice, vec4<f32>(foam, 0.0, 0.0));
@@ -136,7 +146,7 @@ fn foam_correct(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let texel = vec2<i32>(gid.xy);
-    let xz = lod_texel_world(lod, gid.xy, slice);
+    let xz = texel_world(gid.xy, slice);
     let u = drift_at(texel, slice);
     let step = u * params.dt;
 
@@ -144,7 +154,7 @@ fn foam_correct(@builtin(global_invocation_id) gid: vec3<u32>) {
     // round-trip error. A back lookup that leaves this slice keeps the forward result.
     let forward = textureLoad(forward_foam, texel, slice, 0).rg;
     var foam = forward;
-    let back_uv = slice_uv(lod, xz + step, slice);
+    let back_uv = uv_in(lod.slices[slice], xz + step);
     let margin = 1.0 / f32(max(lod.resolution, 2u));
     if all(back_uv > vec2(margin)) && all(back_uv < vec2(1.0 - margin)) {
         let back = bilinear_clamp_layer(forward_foam, back_uv, slice).rg;
@@ -180,12 +190,12 @@ struct FlowLookup {
 /// Previous flow state at world `xz`, looked up from slice `start` outward.
 fn previous_flow_at(xz: vec2<f32>, start: u32) -> FlowLookup {
     var out: FlowLookup;
-    let i = slice_holding(params.previous, xz, start);
+    let i = previous_slice_holding(xz, start);
     out.found = i >= 0;
     if !out.found {
         return out;
     }
-    let uv = slice_uv(params.previous, xz, u32(i));
+    let uv = uv_in(params.previous.slices[i], xz);
     let base = u32(i) * FOAM_FLOW_LAYERS_PER_SLICE;
     out.short = bilinear_clamp_layer(previous_flow, uv, base);
     out.long = bilinear_clamp_layer(previous_flow, uv, base + 1u);
@@ -204,7 +214,7 @@ fn foam_flow(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let texel = vec2<i32>(gid.xy);
-    let xz = lod_texel_world(lod, gid.xy, slice);
+    let xz = texel_world(gid.xy, slice);
     let u = drift_at(texel, slice);
     let step = u * params.dt;
 
