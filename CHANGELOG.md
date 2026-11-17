@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ShallowWaterMover` stirs shallow water with an entity's motion, only while it moves: faces within its radius on the grid and its nested grid are pulled toward its velocity where the water is slower in that direction. Floating bodies drift with the water it pushes.
 - The `beach` example feeds the Lumahaʻi River in over the map's south edge along its OpenStreetMap centreline, 4 m³/s by default (`BEACH_RIVER`).
 - [docs/particles.md](docs/particles.md) describes the water particles.
 - Water particle budget: crest spray thins with distance from the viewer while its drops grow to keep the same coverage, `WaterParticleSettings::with_quality` sets the pool and spray budgets for `WaterParticleQuality`, `WaterCrestSpray::debug_potential` marks where spray spawns, and `WaterParticleStats` reads the pool's counters back when `read_counters` is on.

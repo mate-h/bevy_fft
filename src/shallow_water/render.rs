@@ -135,6 +135,8 @@ pub fn prepare_shallow_water_gpu(
         solver.set_inputs(&render_device, inputs);
     }
 
+    let (mover_count, movers) =
+        super::pack_movers(&controller.movers, controller.placement.as_ref(), cells);
     solver.write_interaction(
         &render_queue,
         &GpuInteractionUniform {
@@ -150,6 +152,8 @@ pub fn prepare_shallow_water_gpu(
             position: controller.pointer_sim,
             preset: controller.preset_index,
             fill_level: controller.fill_level,
+            mover_count,
+            movers,
         },
     );
 
@@ -242,6 +246,24 @@ pub fn prepare_shallow_water_gpu(
     }
     let n = gpu.nested.as_mut().unwrap();
     let rho = NEST_REFINEMENT as f32;
+    let child_placement = controller
+        .nest_center()
+        .map(|center| super::ShallowWaterPlacement {
+            center,
+            cell_size: placement.cell_size / rho,
+            ..placement
+        });
+    let (mover_count, movers) =
+        super::pack_movers(&controller.movers, child_placement.as_ref(), child_cells);
+    n.child.write_interaction(
+        &render_queue,
+        &GpuInteractionUniform {
+            dt: controller.dt,
+            mover_count,
+            movers,
+            ..default()
+        },
+    );
     n.child.write_settings(
         &render_queue,
         &super::ShallowWaterSettings {
@@ -352,6 +374,7 @@ pub fn run_shallow_water_sim(
         });
         match nested {
             Some(n) => {
+                n.child.encode_interact(&mut pass);
                 n.nest.encode_frame(&mut pass, solver, &n.child);
                 n.child.encode_reconstruct_velocity(&mut pass);
             }

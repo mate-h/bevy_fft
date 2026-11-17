@@ -57,6 +57,12 @@ cargo run --release --example river_banks -- --demo
 
 `fill_level` fills each preset to a still water level on reset. Cells whose bed rises above it start dry.
 
+## Moving objects
+
+A `ShallowWaterMover` on an entity stirs the water as the entity moves through it, the way a wading character, a paddle or a dragged log does. Each frame the entity's velocity comes from how far it moved. Within `radius` of it, the grid and the nested grid pull each face velocity toward that velocity at `rate` per second, but only where the water is slower in that direction. Water already moving faster is left alone, and so is all water around an entity at rest or slower than `min_speed`, so a mover never holds the flow back. Rocks belong in the bed and floating bodies press on the water through the pressure head. The stir needs the entity's lowest point, `depth` below its position, under the water surface. Up to 16 movers stir each frame.
+
+Floating bodies read the water velocity from the LOD data for their drag, so logs and other debris drift with the river and with the water a mover pushes. [`tests/shallow_water_mover_gpu.rs`](../tests/shallow_water_mover_gpu.rs) checks that an object wading through a pool sets the water behind it moving its way, that one standing still or passing above the water leaves it still, and that the water it pushes drags a crate it stops short of.
+
 ## Driving the solver from another crate
 
 The plugin steps the grid once per frame from the controller. A crate with its own loop, such as a terrain erosion model that moves the bed every frame and runs its own sediment kernels between steps, can drive the same solver directly. Add `ShallowWaterSolverPlugin` instead of `ShallowWaterPlugin`. It registers the embedded shader and queues `ShallowWaterPipelines` in the render world, and nothing else runs.

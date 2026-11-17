@@ -213,6 +213,128 @@ pub struct ShallowWaterController {
     /// A finer grid nested in this one that follows a point, such as the camera. Needs
     /// [`Self::placement`]. See [`ShallowWaterNestedGrid`].
     pub nested: Option<ShallowWaterNestedGrid>,
+    /// This frame's [`ShallowWaterMover`]s, gathered each frame. The first
+    /// [`SHALLOW_WATER_MAX_MOVERS`] stir the water.
+    #[reflect(ignore)]
+    pub movers: Vec<ShallowWaterMoverSample>,
+}
+
+/// Most [`ShallowWaterMover`]s that stir the water in one frame.
+pub const SHALLOW_WATER_MAX_MOVERS: usize = 16;
+
+/// Stirs the shallow water with its entity's motion, only while it moves, as a wading character, a
+/// paddle or a dragged log does. Within `radius` of the entity's position, each face velocity on
+/// the grid and the nested grid is pulled toward the entity's horizontal velocity at `rate` per
+/// second, where the water is slower in that direction. Never slowed, still water stays as it is
+/// around a body at rest, so a mover is no obstacle: the bed and floating bodies' pressure head
+/// block the flow. The stir needs the entity's lowest point, `depth` below its position, under the
+/// water surface.
+#[derive(Component, Clone, Debug, Reflect)]
+#[reflect(Component)]
+pub struct ShallowWaterMover {
+    /// Meters.
+    pub radius: f32,
+    /// Share of the speed difference closed per second.
+    pub rate: f32,
+    /// Meters from the entity's position down to its lowest point.
+    pub depth: f32,
+    /// Slower motion, in m/s, doesn't stir.
+    pub min_speed: f32,
+    /// The entity's position last frame, for its velocity.
+    #[reflect(ignore)]
+    pub previous: Option<Vec3>,
+}
+
+impl Default for ShallowWaterMover {
+    fn default() -> Self {
+        Self {
+            radius: 0.5,
+            rate: 8.0,
+            depth: 1.0,
+            min_speed: 0.05,
+            previous: None,
+        }
+    }
+}
+
+/// One [`ShallowWaterMover`] this frame, in world units.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShallowWaterMoverSample {
+    pub position: Vec2,
+    pub velocity: Vec2,
+    pub radius: f32,
+    /// Share of the speed difference closed this frame, from [`ShallowWaterMover::rate`].
+    pub blend: f32,
+    /// World height of the mover's lowest point.
+    pub bottom: f32,
+}
+
+impl ShallowWaterMoverSample {
+    /// The two `vec4`s of `InteractionSettings::movers` for a grid with this `placement`, `cells`
+    /// and `datum`: position and radius in cells and the blend, then velocity in m/s and the
+    /// lowest point in solver height units.
+    fn gpu(&self, placement: &ShallowWaterPlacement, cells: UVec2) -> [Vec4; 2] {
+        let at = placement.world_to_cells(self.position, cells);
+        [
+            Vec4::new(at.x, at.y, self.radius / placement.cell_size, self.blend),
+            Vec4::new(
+                self.velocity.x,
+                self.velocity.y,
+                self.bottom - placement.datum,
+                0.0,
+            ),
+        ]
+    }
+}
+
+/// Packs `movers` for a grid into `InteractionSettings::mover_count` and `::movers`.
+pub(crate) fn pack_movers(
+    movers: &[ShallowWaterMoverSample],
+    placement: Option<&ShallowWaterPlacement>,
+    cells: UVec2,
+) -> (u32, [Vec4; 2 * SHALLOW_WATER_MAX_MOVERS]) {
+    let mut packed = [Vec4::ZERO; 2 * SHALLOW_WATER_MAX_MOVERS];
+    let Some(placement) = placement else {
+        return (0, packed);
+    };
+    let count = movers.len().min(SHALLOW_WATER_MAX_MOVERS);
+    for (i, mover) in movers[..count].iter().enumerate() {
+        let [a, b] = mover.gpu(placement, cells);
+        packed[2 * i] = a;
+        packed[2 * i + 1] = b;
+    }
+    (count as u32, packed)
+}
+
+/// Gathers the moving [`ShallowWaterMover`]s into [`ShallowWaterController::movers`].
+fn gather_shallow_water_movers(
+    time: Res<Time>,
+    controller: Option<ResMut<ShallowWaterController>>,
+    mut movers: Query<(&mut ShallowWaterMover, &GlobalTransform)>,
+) {
+    let Some(mut controller) = controller else {
+        return;
+    };
+    let dt = time.delta_secs();
+    controller.movers.clear();
+    for (mut mover, transform) in &mut movers {
+        let position = transform.translation();
+        let previous = mover.previous.replace(position);
+        let Some(previous) = previous.filter(|_| dt > 0.0) else {
+            continue;
+        };
+        let velocity = (position - previous).xz() / dt;
+        if velocity.length() < mover.min_speed {
+            continue;
+        }
+        controller.movers.push(ShallowWaterMoverSample {
+            position: position.xz(),
+            velocity,
+            radius: mover.radius,
+            blend: 1.0 - (-mover.rate.max(0.0) * dt).exp(),
+            bottom: position.y - mover.depth,
+        });
+    }
 }
 
 /// A world bed height image for the cells a nested grid moves over.
@@ -230,7 +352,7 @@ pub struct ShallowWaterWorldBedImage {
 /// coupled to it both ways by a [`ShallowWaterNest`]. It moves by whole parent cells to stay
 /// centred on [`Self::follow`] and takes the bed of the ground it moves over from
 /// [`Self::world_bed`]. It blends into the water LOD data over its parent. Floating bodies, the
-/// brush and the border profile act on the parent only.
+/// brush and the border profile act on the parent only; [`ShallowWaterMover`]s stir both.
 #[derive(Clone, Debug, Reflect)]
 pub struct ShallowWaterNestedGrid {
     /// Cells per edge, a multiple of 3. The grid covers a third as many parent cells.
@@ -309,6 +431,7 @@ impl ShallowWaterController {
             pressure_head: None,
             border_profile: None,
             nested: None,
+            movers: Vec::new(),
             pointer_sim: Vec2::ZERO,
             pointer_prev_sim: Vec2::ZERO,
             preset_index: 0,
@@ -511,6 +634,10 @@ pub struct GpuInteractionUniform {
     pub position: Vec2,
     pub preset: u32,
     pub fill_level: f32,
+    /// [`ShallowWaterMover`]s in `movers`.
+    pub mover_count: u32,
+    /// Two per mover, from [`ShallowWaterMoverSample`].
+    pub movers: [Vec4; 2 * SHALLOW_WATER_MAX_MOVERS],
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -742,6 +869,7 @@ impl Plugin for ShallowWaterPlugin {
         app.register_type::<ShallowWaterController>()
             .register_type::<ShallowWaterBorder>()
             .register_type::<ShallowWaterPlacement>()
+            .register_type::<ShallowWaterMover>()
             .register_type::<ShallowWaterMaterialUniform>()
             .add_plugins(ExtractResourcePlugin::<ShallowWaterController>::default())
             .add_plugins(MaterialPlugin::<ShallowWaterSurfaceMaterial>::default())
@@ -750,6 +878,7 @@ impl Plugin for ShallowWaterPlugin {
                 (
                     sync_shallow_water_mesh_material,
                     sync_shallow_water_heightfield,
+                    gather_shallow_water_movers.after(bevy::transform::TransformSystems::Propagate),
                 ),
             );
     }

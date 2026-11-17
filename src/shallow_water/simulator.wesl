@@ -9,6 +9,10 @@ struct InteractionSettings {
     position : vec2f,
     preset : u32,
     fill_level : f32,
+    mover_count : u32,
+    /// Per mover: position and radius in cells and the share of the speed difference closed this
+    /// frame, then velocity in m/s and the height of its lowest point.
+    movers : array<vec4f, 32>,
 }
 
 struct SimulationSettings {
@@ -535,6 +539,7 @@ fn pointToSegmentDistance(p : vec2f, s0 : vec2f, s1 : vec2f) -> f32 {
 
 @compute @workgroup_size(16, 16)
 fn interact(@builtin(global_invocation_id) id: vec3u) {
+    stir(id.xy);
     if (id.x >= simulationSettings.size.x || id.y >= simulationSettings.size.y) { return; }
     let position = vec2f(id.xy) + vec2f(0.5);
     if (interactionSettings.mode >= 1u && interactionSettings.mode <= 4u) {
@@ -563,6 +568,51 @@ fn interact(@builtin(global_invocation_id) id: vec3u) {
             wv += impulse.y;
             textureStore(faceWTexture, id.xy, vec4f(clamp_face_vel(wv), 0.0, 0.0, 0.0));
         }
+    }
+}
+
+/// Pulls the face velocity `u` toward a mover's velocity component `v`, only where the water is
+/// slower in that direction, so a mover pushes water and never holds it back.
+fn stir_face(u: f32, v: f32, blend: f32) -> f32 {
+    if (v > 0.0) { return u + max(v - u, 0.0) * blend; }
+    return u + min(v - u, 0.0) * blend;
+}
+
+/// Weight of a mover at `point` in cells, or zero where it is out of reach or above the water of
+/// `cell`.
+fn stir_weight(point: vec2f, cell: vec2i, m: u32) -> f32 {
+    let a = interactionSettings.movers[2u * m];
+    let b = interactionSettings.movers[2u * m + 1u];
+    let c = clamp(cell, vec2i(0), vec2i(simulationSettings.size) - 1);
+    let bw = textureLoad(bedWaterTexture, vec2u(c));
+    if (bw.y <= 0.0 || b.z >= bw.x + bw.y) { return 0.0; }
+    let r = max(a.z, 1e-3);
+    return a.w * (1.0 - smoothstep(0.5 * r, r, length(point - a.xy)));
+}
+
+/// [`ShallowWaterMover`]s stir the faces on the left and lower sides of cell `id`.
+fn stir(id: vec2u) {
+    let n = min(interactionSettings.mover_count, 16u);
+    if (n == 0u) { return; }
+    let i = vec2i(id);
+    // Interior faces only: the borders keep their own conditions.
+    if (id.x >= 1u && id.x < simulationSettings.size.x && id.y < simulationSettings.size.y) {
+        var u = textureLoad(faceUTexture, id).r;
+        let point = vec2f(f32(id.x), f32(id.y) + 0.5);
+        for (var m = 0u; m < n; m++) {
+            let w = max(stir_weight(point, i, m), stir_weight(point, i - vec2i(1, 0), m));
+            u = stir_face(u, interactionSettings.movers[2u * m + 1u].x, w);
+        }
+        textureStore(faceUTexture, id, vec4f(clamp_face_vel(u), 0.0, 0.0, 0.0));
+    }
+    if (id.y >= 1u && id.y < simulationSettings.size.y && id.x < simulationSettings.size.x) {
+        var w_face = textureLoad(faceWTexture, id).r;
+        let point = vec2f(f32(id.x) + 0.5, f32(id.y));
+        for (var m = 0u; m < n; m++) {
+            let w = max(stir_weight(point, i, m), stir_weight(point, i - vec2i(0, 1), m));
+            w_face = stir_face(w_face, interactionSettings.movers[2u * m + 1u].y, w);
+        }
+        textureStore(faceWTexture, id, vec4f(clamp_face_vel(w_face), 0.0, 0.0, 0.0));
     }
 }
 
