@@ -59,7 +59,12 @@ struct ParticleParams {
     spray_lifetime: f32,
     /// Changes every frame, for the emitter's random numbers.
     seed: u32,
-    _pad: vec3<u32>,
+    /// Distance from the viewer in meters at which crest spray thins to half. Zero keeps it
+    /// everywhere.
+    spray_half_distance: f32,
+    /// Nonzero replaces the spray with one still marker per emitting texel, sized by its share.
+    spray_debug: u32,
+    _pad: u32,
 }
 
 @group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
@@ -195,7 +200,31 @@ fn emitCrestSpray(@builtin(global_invocation_id) gid: vec3<u32>) {
     let flow = textureLoad(lod_flow, gid.xy, slice, 0);
     let width = lod.slices[slice].z;
     let rise = saturate(0.5 + 0.5 * flow.z / max(params.spray_speed, 1e-3));
-    let mean = params.spray_rate * width * width * params.dt * breaking * rise;
+    // Fewer, larger drops away from the viewer, at the centre of the finest slice: their count
+    // falls with the falloff and their area grows by its inverse, so the spray covers the same
+    // share of the surface.
+    var falloff = 1.0;
+    if params.spray_half_distance > 0.0 {
+        let d = length(xz - lod.slices[0].xy) / params.spray_half_distance;
+        falloff = 1.0 / (1.0 + d * d);
+    }
+    let potential = breaking * rise * falloff;
+    let displacement = textureLoad(lod_displacement, gid.xy, slice, 0);
+    let dz = textureLoad(lod_foam, gid.xy, slice, 0).b;
+    if params.spray_debug != 0u {
+        var marker: Particle;
+        marker.position = vec3<f32>(
+            xz.x + displacement.a,
+            params.surface_y + displacement.b,
+            xz.y + dz,
+        );
+        marker.size = width * sqrt(potential);
+        marker.life = 1.5 * params.dt;
+        emit(marker);
+        return;
+    }
+    let mean = params.spray_rate * width * width * params.dt * potential;
+    let grow = inverseSqrt(falloff);
     var rng = hash(((slice * res + gid.y) * res + gid.x) ^ params.seed);
     var count = u32(floor(mean));
     if random(&rng) < fract(mean) {
@@ -209,8 +238,6 @@ fn emitCrestSpray(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     count = min(count, params.spray_cap - first);
-    let displacement = textureLoad(lod_displacement, gid.xy, slice, 0);
-    let dz = textureLoad(lod_foam, gid.xy, slice, 0).b;
     for (var k = 0u; k < count; k++) {
         var p: Particle;
         let jitter = vec2<f32>(random(&rng), random(&rng)) - 0.5;
@@ -224,7 +251,7 @@ fn emitCrestSpray(@builtin(global_invocation_id) gid: vec3<u32>) {
         p.velocity = vec3<f32>(flow.x, max(flow.z, 0.0), flow.y)
             + vec3<f32>(0.0, params.spray_speed * (0.5 + 0.5 * breaking), 0.0)
             + cone * params.spray_spread;
-        p.size = params.spray_size * (0.5 + random(&rng));
+        p.size = params.spray_size * grow * (0.5 + random(&rng));
         p.life = params.spray_lifetime * (0.5 + random(&rng));
         emit(p);
     }

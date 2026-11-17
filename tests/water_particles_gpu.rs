@@ -289,7 +289,7 @@ fn a_particle_lands_on_still_water_and_foams_its_texel() {
 /// Spawned count after `frames` frames of crest spray at `rate` over a breaking patch covering
 /// world `x` 8..24 and `z` -4..4, which runs across the edge of slice 0 at x = 16. Without
 /// `breaking` the water is still.
-fn crest_spray(rate: f32, frames: u32, breaking: bool) -> (u32, f32) {
+fn crest_spray(rate: f32, frames: u32, breaking: bool, half_distance: f32) -> (u32, f32) {
     let mut app = App::new();
     // Two slices of 64 texels, 0.5 m and 1 m wide, around the origin. No writer touches them, so
     // the breaking uploaded here stays.
@@ -333,6 +333,7 @@ fn crest_spray(rate: f32, frames: u32, breaking: bool) -> (u32, f32) {
         let mut settings = app.world_mut().resource_mut::<WaterParticleSettings>();
         settings.crest_spray.rate = rate;
         settings.crest_spray.cap = 1 << 20;
+        settings.crest_spray.half_distance = half_distance;
     }
     for _ in 0..frames {
         step(&mut app);
@@ -347,9 +348,9 @@ fn crest_spray(rate: f32, frames: u32, breaking: bool) -> (u32, f32) {
 #[ignore = "requires a graphics adapter"]
 fn breaking_crests_spray_in_proportion_to_their_area() {
     let (rate, frames) = (3000.0, 40);
-    let (still, _) = crest_spray(rate, frames, false);
+    let (still, _) = crest_spray(rate, frames, false, 0.0);
     assert_eq!(still, 0, "still water sprayed {still} particles");
-    let (spawned, offset) = crest_spray(rate, frames, true);
+    let (spawned, offset) = crest_spray(rate, frames, true, 0.0);
     assert!(offset < 1e-3, "the slices are off the origin by {offset} m");
     // 128 m² of full breaking on a surface that does not rise emits at half the rate. The
     // emitter runs for `frames` frames, give or take one.
@@ -361,4 +362,67 @@ fn breaking_crests_spray_in_proportion_to_their_area() {
         "{spawned} particles, expected {} per frame over {frames} frames",
         per_frame
     );
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn crest_spray_thins_with_distance_from_the_viewer() {
+    let (rate, frames, half) = (3000.0, 40, 12.0);
+    let (spawned, offset) = crest_spray(rate, frames, true, half);
+    assert!(offset < 1e-3, "the slices are off the origin by {offset} m");
+    // The same patch as above, each texel weighted by 1 / (1 + (d / half)²) at its centre.
+    let mut per_frame = 0.0;
+    for (texel, slice_half) in [(TEXEL, 16.0), (2.0 * TEXEL, 32.0)] {
+        let n = (2.0 * slice_half / texel) as i32;
+        for j in 0..n {
+            for i in 0..n {
+                let p = (Vec2::new(i as f32, j as f32) + 0.5) * texel - slice_half;
+                let inside = (8.0..24.0).contains(&p.x) && (-4.0..4.0).contains(&p.y);
+                let finer = texel > TEXEL && p.x.abs() < 16.0 && p.y.abs() < 16.0;
+                if inside && !finer {
+                    let d = p.length() / half;
+                    per_frame += rate * texel * texel / 60.0 * 0.5 / (1.0 + d * d);
+                }
+            }
+        }
+    }
+    let low = (frames - 1) as f32 * per_frame * 0.97;
+    let high = (frames + 1) as f32 * per_frame * 1.03;
+    assert!(
+        (low..high).contains(&(spawned as f32)),
+        "{spawned} particles, expected {per_frame} per frame over {frames} frames"
+    );
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn the_counters_read_back_only_when_asked() {
+    let mut app = particle_app(WaterParticleSettings {
+        capacity: 64,
+        collide: false,
+        ..default()
+    });
+    spawn(
+        &mut app,
+        &[WaterParticle {
+            position: Vec3::ZERO,
+            size: 0.1,
+            velocity: Vec3::Y,
+            life: 100.0,
+        }; 10],
+    );
+    for _ in 0..10 {
+        step(&mut app);
+    }
+    assert_eq!(app.world().resource::<WaterParticleStats>().spawned, 0);
+    app.world_mut()
+        .resource_mut::<WaterParticleSettings>()
+        .read_counters = true;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while app.world().resource::<WaterParticleStats>().spawned == 0 {
+        step(&mut app);
+        assert!(Instant::now() < deadline, "the counters never arrived");
+    }
+    let stats = *app.world().resource::<WaterParticleStats>();
+    assert_eq!((stats.spawned, stats.died, stats.alive), (10, 0, 10));
 }

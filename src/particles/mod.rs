@@ -142,6 +142,9 @@ pub struct WaterParticleSettings {
     pub foam_per_drop: f32,
     /// Spray from breaking crests. See [`WaterCrestSpray`].
     pub crest_spray: WaterCrestSpray,
+    /// Reads the pool's counters back into [`WaterParticleStats`] every frame. Off by default,
+    /// since the readback costs a copy and a map per frame.
+    pub read_counters: bool,
 }
 
 /// Spray that breaking crests in the water LOD data throw up. The ocean, shallow water grids and
@@ -165,6 +168,14 @@ pub struct WaterCrestSpray {
     /// times them.
     pub size: f32,
     pub lifetime: f32,
+    /// Distance from the viewer in meters at which the spray thins to half, falling as
+    /// `1 / (1 + (d / half_distance)²)`. Its drops grow by the inverse square root, so the
+    /// spray covers the same share of the surface with fewer, larger drops. Zero turns the
+    /// falloff off.
+    pub half_distance: f32,
+    /// Replaces the spray with one still marker per emitting texel, as wide as the texel times
+    /// the square root of its share of the full rate, to show where spray comes from.
+    pub debug_potential: bool,
 }
 
 impl Default for WaterCrestSpray {
@@ -177,7 +188,87 @@ impl Default for WaterCrestSpray {
             spread: 1.0,
             size: 0.04,
             lifetime: 1.5,
+            half_distance: 60.0,
+            debug_potential: false,
         }
+    }
+}
+
+/// Presets for [`WaterParticleSettings::with_quality`], from cheap to rich.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Reflect)]
+pub enum WaterParticleQuality {
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
+impl WaterParticleSettings {
+    /// These settings with the pool size, the crest spray's budget and reach, and the smallest
+    /// drop on screen set for `quality`. The pool size takes effect when the plugin starts.
+    pub fn with_quality(mut self, quality: WaterParticleQuality) -> Self {
+        let (capacity, cap, slices, half_distance, min_pixels) = match quality {
+            WaterParticleQuality::Low => (1 << 14, 1024, 3, 30.0, 2.0),
+            WaterParticleQuality::Medium => (1 << 16, 4096, 4, 60.0, 1.5),
+            WaterParticleQuality::High => (1 << 18, 16384, 5, 120.0, 1.0),
+        };
+        self.capacity = capacity;
+        self.crest_spray.cap = cap;
+        self.crest_spray.slices = slices;
+        self.crest_spray.half_distance = half_distance;
+        self.min_pixels = min_pixels;
+        self
+    }
+}
+
+/// The pool's counters, read back from the GPU while [`WaterParticleSettings::read_counters`]
+/// is on, a few frames late.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct WaterParticleStats {
+    pub spawned: u32,
+    pub died: u32,
+    pub alive: u32,
+    /// Crest spray emitted in the frame read.
+    pub crest_spray: u32,
+}
+
+/// Carries the readback of the pool's counters.
+#[derive(Component)]
+struct WaterParticleStatsReadback;
+
+fn sync_water_particle_stats(
+    mut commands: Commands,
+    settings: Res<WaterParticleSettings>,
+    pool: Option<Res<WaterParticles>>,
+    readbacks: Query<Entity, With<WaterParticleStatsReadback>>,
+) {
+    let Some(pool) = pool else {
+        return;
+    };
+    match (settings.read_counters, readbacks.single()) {
+        (true, Err(_)) => {
+            commands
+                .spawn((
+                    WaterParticleStatsReadback,
+                    bevy::render::gpu_readback::Readback::buffer(pool.state.clone()),
+                ))
+                .observe(
+                    |event: On<bevy::render::gpu_readback::ReadbackComplete>,
+                     mut stats: ResMut<WaterParticleStats>| {
+                        let counters: &[u32] = bytemuck::cast_slice(&event.data);
+                        if counters.len() >= 5 {
+                            *stats = WaterParticleStats {
+                                spawned: counters[1],
+                                died: counters[2],
+                                alive: counters[3],
+                                crest_spray: counters[4],
+                            };
+                        }
+                    },
+                );
+        }
+        (false, Ok(entity)) => commands.entity(entity).despawn(),
+        _ => {}
     }
 }
 
@@ -201,6 +292,7 @@ impl Default for WaterParticleSettings {
             surface_y: 0.0,
             foam_per_drop: 1.0,
             crest_spray: WaterCrestSpray::default(),
+            read_counters: false,
         }
     }
 }
@@ -323,6 +415,7 @@ impl Plugin for WaterParticlesPlugin {
         app.init_resource::<WaterParticleSettings>()
             .init_resource::<WaterParticleSpawns>()
             .init_resource::<WaterParticleFrame>()
+            .init_resource::<WaterParticleStats>()
             .register_type::<WaterParticleSettings>()
             .register_type::<WaterParticleEmitter>()
             .add_plugins((
@@ -336,7 +429,10 @@ impl Plugin for WaterParticlesPlugin {
                 PostUpdate,
                 (emit_water_particles, record_water_particle_frame),
             )
-            .add_systems(Update, sync_water_particle_look);
+            .add_systems(
+                Update,
+                (sync_water_particle_look, sync_water_particle_stats),
+            );
     }
 
     fn finish(&self, app: &mut App) {
@@ -521,7 +617,9 @@ struct GpuParticleParams {
     spray_size: f32,
     spray_lifetime: f32,
     seed: u32,
-    _pad: UVec3,
+    spray_half_distance: f32,
+    spray_debug: u32,
+    _pad: u32,
 }
 
 #[derive(Resource)]
@@ -675,7 +773,9 @@ fn prepare_water_particles(
         spray_size: settings.crest_spray.size,
         spray_lifetime: settings.crest_spray.lifetime,
         seed: gpu.frame.wrapping_mul(0x9e37_79b9),
-        _pad: UVec3::ZERO,
+        spray_half_distance: settings.crest_spray.half_distance.max(0.0),
+        spray_debug: u32::from(settings.crest_spray.debug_potential),
+        _pad: 0,
     };
     gpu.frame = gpu.frame.wrapping_add(1);
     gpu.spray = (settings.crest_spray.rate > 0.0 && frame.dt > 0.0).then(|| {

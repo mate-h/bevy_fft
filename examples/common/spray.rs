@@ -3,7 +3,9 @@
 
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
-use bevy_fft::particles::{WaterCrestSpray, WaterParticleSettings, WaterParticlesPlugin};
+use bevy_fft::particles::{
+    WaterCrestSpray, WaterParticleSettings, WaterParticleStats, WaterParticlesPlugin,
+};
 
 /// Particles per m² per second at full breaking.
 const DEFAULT_RATE: f32 = 150.0;
@@ -34,6 +36,7 @@ fn spray_panel(
     mut contexts: EguiContexts,
     mut settings: ResMut<WaterParticleSettings>,
     mut rate: ResMut<SprayRate>,
+    stats: Res<WaterParticleStats>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -56,6 +59,17 @@ fn spray_panel(
                 && on
             {
                 settings.crest_spray.rate = rate.0;
+            }
+            ui.checkbox(
+                &mut settings.crest_spray.debug_potential,
+                "Show where spray spawns",
+            );
+            ui.checkbox(&mut settings.read_counters, "Read counters");
+            if settings.read_counters {
+                ui.label(format!(
+                    "{} alive, {} from crests last frame",
+                    stats.alive, stats.crest_spray
+                ));
             }
         });
 }
