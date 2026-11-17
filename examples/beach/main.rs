@@ -31,7 +31,8 @@
 //!
 //! `BEACH_FRONTS=1` draws the traced breaking fronts, a colour per front id. `BEACH_FRONTS_LOG=1`
 //! logs how the tracker matched them every ten seconds, and `BEACH_FRONTS_KEEP=<seconds>` sets
-//! how long a front missing from the readbacks keeps its id.
+//! how long a front missing from the readbacks keeps its id. The fronts carry a breaker curl,
+//! which `BEACH_CURL=0` turns off.
 //!
 //! The elevation and class rasters come from the matching 1 m shoreline square in
 //! `~/Downloads/hawaii_topobathy`. Prepare the CC0 texture arrays, class map, sand capillary mask,
@@ -731,6 +732,9 @@ fn trace_breaking_fronts(
             fronts.keep_lost = keep;
         }
         commands.entity(entity).insert(fronts);
+        if std::env::var("BEACH_CURL").map_or(true, |v| v != "0") {
+            commands.entity(entity).insert(WaterBreakerCurl::default());
+        }
     }
 }
 

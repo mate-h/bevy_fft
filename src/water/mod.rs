@@ -25,6 +25,7 @@
 
 mod blend;
 mod caustics;
+mod curl;
 mod foam;
 mod foam_texture;
 mod fronts;
@@ -42,6 +43,7 @@ pub use caustics::{
     CausticsLookup, WATER_CAUSTICS_FORMAT, WATER_CAUSTICS_MAX_RECEIVERS, WATER_CAUSTICS_SHADER,
     WaterCaustics, WaterCausticsSettings,
 };
+pub use curl::{WaterBreakerCurl, curl_mesh, curl_profile};
 pub use foam::{
     WATER_FOAM_SHADER, WATER_FOAM_STATE_FORMAT, WaterFoamDeposit, WaterFoamFrame, WaterFoamParams,
     WaterFoamSettings, WaterFoamSim,
@@ -128,6 +130,7 @@ impl Plugin for WaterPlugin {
             .register_type::<WaterHeightfield>()
             .register_type::<WaterHeightfieldDry>()
             .register_type::<WaterBreakingFronts>()
+            .register_type::<WaterBreakerCurl>()
             .register_type::<WaterSurfaceUniform>()
             .register_type::<WaterOpticsUniform>()
             .register_type::<WaterMediumUniform>()
@@ -158,6 +161,10 @@ impl Plugin for WaterPlugin {
             )
             .add_systems(Update, quadtree::build_water_quadtrees)
             .add_systems(PostUpdate, fronts::prepare_breaking_fronts)
+            .add_systems(
+                Update,
+                (curl::update_breaker_curls, curl::remove_breaker_curls),
+            )
             .add_systems(
                 PostUpdate,
                 (

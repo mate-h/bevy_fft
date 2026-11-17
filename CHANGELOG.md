@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `WaterBreakerCurl` draws the overhanging lip of plunging breakers: one animated cross-section, after Malan (2022), swept along each traced breaking front and played by the front's age. The beach draws it.
 - The foam lane's alpha holds the mean square slope of the ocean waves each LOD slice is too coarse for, from each cascade's slope variance (`OceanSlopeVariance`, `slope_variance`), and the water surface adds it to its roughness, so distant glitter widens as it should.
 - Flow detail normals: short ripples in the foam texture's green and blue channels, read through the foam's advected texture coordinates, roughen flowing water by drift speed and strain. `WaterSurfaceUniform::flow_detail` sets their slope, and the surface material gains a `lod_drift` binding.
 - `ShallowWaterWaterfalls` throws water particles off waterfall lips in a shallow water grid, where the CMF10 test finds water pouring over a bed drop of more than 1.5 cell widths, in proportion to the water crossing the lip.

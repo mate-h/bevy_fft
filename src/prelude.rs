@@ -38,11 +38,11 @@ pub use crate::shallow_water::{
 };
 pub use crate::water::{
     FrontLine, FrontPoint, JerlovWaterType, WATER_LOD_DRIFT_FORMAT, WATER_LOD_MAX_SLICES,
-    WATER_LOD_SURFACE_FORMAT, WaterBreakingFronts, WaterCausticsSettings, WaterFoamSettings,
-    WaterHeightfield, WaterHeightfieldDry, WaterLodClear, WaterLodData, WaterLodGraphSystems,
-    WaterLodScratch, WaterLodSettings, WaterLodSlices, WaterLodSystems, WaterMedium,
-    WaterMediumUniform, WaterOpticsUniform, WaterPlugin, WaterQuadtree, WaterQuadtreeBuffer,
-    WaterQuadtreeStats, WaterQuadtreeTile, WaterSurfaceExtension, WaterSurfaceMaterial,
-    WaterSurfaceTag, WaterSurfaceUniform, WaterTransmission, WaterUnderwater, WaterViewer,
-    WaterWaterline,
+    WATER_LOD_SURFACE_FORMAT, WaterBreakerCurl, WaterBreakingFronts, WaterCausticsSettings,
+    WaterFoamSettings, WaterHeightfield, WaterHeightfieldDry, WaterLodClear, WaterLodData,
+    WaterLodGraphSystems, WaterLodScratch, WaterLodSettings, WaterLodSlices, WaterLodSystems,
+    WaterMedium, WaterMediumUniform, WaterOpticsUniform, WaterPlugin, WaterQuadtree,
+    WaterQuadtreeBuffer, WaterQuadtreeStats, WaterQuadtreeTile, WaterSurfaceExtension,
+    WaterSurfaceMaterial, WaterSurfaceTag, WaterSurfaceUniform, WaterTransmission, WaterUnderwater,
+    WaterViewer, WaterWaterline,
 };
