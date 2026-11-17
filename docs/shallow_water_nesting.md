@@ -44,4 +44,4 @@ The `beach` example nests a 288-cell grid of 2/3 m cells, 192 m across, around t
 
 ## Not yet
 
-A cost measurement of the nest in the beach is a follow-up. The `swe-coupling` branch's camera-following rings were the prototype for this module.
+In the beach at 2560 × 1440 on an M5, with 2 m cells, the 288-cell nest, 96 m across, adds about 1.4 ms per frame to `shallow_water_step` (2.8–3.3 ms without it, 4.1–4.7 ms with it) and about 1 ms to `water_heightfield_pass`, about 3.5 ms of GPU time in all over two alternated pairs of xctrace recordings. A 192-cell nest, 64 m across, saves about 1 ms of that in the step; the frame totals were within the noise. The beach keeps 288 for the larger reach. The `swe-coupling` branch's camera-following rings were the prototype for this module.
