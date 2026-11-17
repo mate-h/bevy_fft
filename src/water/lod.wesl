@@ -17,15 +17,36 @@ struct WaterLodSlices {
     _pad1: u32,
 }
 
+/// Placement of slice `i`, with a constant index in each branch. The helpers here take the slices
+/// by value, and indexing that copy at run time makes the GPU compiler keep the whole array in
+/// registers, which spilled (1.2 KiB per thread in the foam sim on an M5). Constant indices read
+/// the caller's uniform directly.
+fn lod_slice(lod: WaterLodSlices, i: u32) -> vec4<f32> {
+    switch i {
+        case 0u: { return lod.slices[0]; }
+        case 1u: { return lod.slices[1]; }
+        case 2u: { return lod.slices[2]; }
+        case 3u: { return lod.slices[3]; }
+        case 4u: { return lod.slices[4]; }
+        case 5u: { return lod.slices[5]; }
+        case 6u: { return lod.slices[6]; }
+        case 7u: { return lod.slices[7]; }
+        case 8u: { return lod.slices[8]; }
+        case 9u: { return lod.slices[9]; }
+        case 10u: { return lod.slices[10]; }
+        default: { return lod.slices[11]; }
+    }
+}
+
 /// UV of world `xz` inside slice `i`, where 0 to 1 spans the slice.
 fn lod_uv(lod: WaterLodSlices, xz: vec2<f32>, i: u32) -> vec2<f32> {
-    let s = lod.slices[i];
+    let s = lod_slice(lod, i);
     return (xz - s.xy) / s.w + 0.5;
 }
 
 /// World `xz` of texel `texel` in slice `i`.
 fn lod_texel_world(lod: WaterLodSlices, texel: vec2<u32>, i: u32) -> vec2<f32> {
-    let s = lod.slices[i];
+    let s = lod_slice(lod, i);
     return s.xy + (vec2<f32>(texel) + 0.5 - f32(lod.resolution) * 0.5) * s.z;
 }
 
@@ -44,7 +65,7 @@ fn lod_level(lod: WaterLodSlices, xz: vec2<f32>, bias: f32) -> f32 {
 /// the slices hold no data and a clamped fetch would repeat the border texels outward, so readers
 /// fade toward a neutral value with this weight.
 fn lod_coverage(lod: WaterLodSlices, xz: vec2<f32>) -> f32 {
-    let s = lod.slices[max(lod.count, 1u) - 1u];
+    let s = lod_slice(lod, max(lod.count, 1u) - 1u);
     let d = max(abs(xz.x - s.x), abs(xz.y - s.y)) / (0.5 * s.w);
     return 1.0 - smoothstep(0.75, 1.0, d);
 }
