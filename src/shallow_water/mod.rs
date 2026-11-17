@@ -362,8 +362,9 @@ pub struct ShallowWaterWorldBedImage {
 /// A grid with a third of the cell width, nested in a placed [`ShallowWaterController`] grid and
 /// coupled to it both ways by a [`ShallowWaterNest`]. It moves by whole parent cells to stay
 /// centred on [`Self::follow`] and takes the bed of the ground it moves over from
-/// [`Self::world_bed`]. It blends into the water LOD data over its parent. Floating bodies, the
-/// brush and the border profile act on the parent only; [`ShallowWaterMover`]s stir both.
+/// [`Self::world_bed`]. It blends into the water LOD data over its parent. The brush and the
+/// border profile act on the parent only. [`ShallowWaterMover`]s stir both, and floating bodies
+/// press on both, the nested grid through [`Self::pressure_head`].
 #[derive(Clone, Debug, Reflect)]
 pub struct ShallowWaterNestedGrid {
     /// Cells per edge, a multiple of 3. The grid covers a third as many parent cells.
@@ -378,6 +379,10 @@ pub struct ShallowWaterNestedGrid {
     pub world_bed: Option<ShallowWaterWorldBedImage>,
     /// Width in its own cells of the band where it fades into its parent in the LOD data.
     pub blend_cells: f32,
+    /// The grid's own pressure head, one texel per cell, which floating bodies write into as
+    /// they do the parent's. It acts while the parent has a
+    /// [`ShallowWaterController::pressure_head`].
+    pub pressure_head: Handle<Image>,
 }
 
 impl ShallowWaterNestedGrid {
@@ -393,6 +398,7 @@ impl ShallowWaterNestedGrid {
             band: 1,
             world_bed: None,
             blend_cells: 12.0,
+            pressure_head: images.add(shallow_r32_image(cells, cells)),
         }
     }
 }
@@ -823,7 +829,11 @@ fn sync_shallow_water_heightfield(
             center,
             cell_size: placement.cell_size / NEST_REFINEMENT as f32,
             blend_cells: nested.blend_cells,
-            pressure_head: None,
+            // Bodies press on the nested grid wherever they press on the parent.
+            pressure_head: sim
+                .pressure_head
+                .as_ref()
+                .map(|_| nested.pressure_head.clone()),
             order: heightfield.order + 1,
             dry: heightfield.dry,
             datum: heightfield.datum,

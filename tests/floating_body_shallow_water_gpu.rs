@@ -285,3 +285,62 @@ fn a_dropped_body_that_presses_the_water_settles() {
         "over the last 5 s the crate was {low} to {high} under"
     );
 }
+
+/// The latest readback of the nested grid's `bed_water`.
+#[derive(Resource, Default)]
+struct NestedCapture {
+    bytes: Vec<u8>,
+    serial: u64,
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn a_body_presses_the_nested_grid_down_too() {
+    // A nested grid of 48 cells a third of a meter wide, 16 m across, around the pool centre.
+    const NESTED: u32 = 48;
+    let mut app = pool_app_with(|app| {
+        let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+        let nested = ShallowWaterNestedGrid::new(&mut images, NESTED);
+        app.world_mut()
+            .resource_mut::<ShallowWaterController>()
+            .nested = Some(nested);
+        app.init_resource::<NestedCapture>();
+    });
+    let image = app
+        .world()
+        .resource::<ShallowWaterController>()
+        .nested
+        .as_ref()
+        .unwrap()
+        .images
+        .bed_water
+        .clone();
+    app.world_mut().spawn(Readback::texture(image)).observe(
+        |event: On<ReadbackComplete>, mut capture: ResMut<NestedCapture>| {
+            capture.bytes = event.data.clone();
+            capture.serial += 1;
+        },
+    );
+    app.world_mut().spawn((slab(), Transform::IDENTITY));
+    run_for(&mut app, 600);
+    let serial = app.world().resource::<NestedCapture>().serial;
+    while app.world().resource::<NestedCapture>().serial <= serial + 1 {
+        step(&mut app);
+    }
+    let bytes = &app.world().resource::<NestedCapture>().bytes;
+    let row = bytes.len() / NESTED as usize;
+    let surface = |x: u32, z: u32| {
+        let o = z as usize * row + x as usize * 16;
+        let lane =
+            |l: usize| f32::from_le_bytes(bytes[o + 4 * l..o + 4 * l + 4].try_into().unwrap());
+        lane(0) + lane(1)
+    };
+    // The slab covers the middle 6 by 6 cells. Its hull sits 0.5 m deep.
+    let open = surface(4, 4);
+    let under = 0.25 * (surface(23, 23) + surface(24, 23) + surface(23, 24) + surface(24, 24));
+    let dent = open - under;
+    assert!(
+        (dent - 0.5).abs() < 0.05,
+        "nested dent {dent} m, open {open}, under {under}"
+    );
+}

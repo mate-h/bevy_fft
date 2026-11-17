@@ -401,7 +401,13 @@ fn body_footprints(
         let voxel = voxels[body.ranges.x + i];
         let p = body.position.xyz + rotate(body.rotation, voxel.xyz);
         let g = (p.xz - grid.center) / grid.cell_size + 0.5 * n;
-        if any(g < vec2(0.0)) || any(g >= n) {
+        // The voxel's square on the grid, in cells. Its volume and waterline area spread over the
+        // cells it overlaps, so a grid finer than the voxels gets an even footprint rather than
+        // stripes where cells catch one voxel centre or two.
+        let half = 0.5 * s / grid.cell_size;
+        let lo = g - half;
+        let hi = g + half;
+        if any(hi <= vec2(0.0)) || any(lo >= n) {
             continue;
         }
         // A grid with an obstruction map holds the surface plus the head at its open level in
@@ -410,7 +416,8 @@ fn body_footprints(
         // in the open cells next to the hull, the head follows them, and the hull radiates.
         var at = p.xz;
         if grid.has_obstruction != 0u {
-            at = grid.center + (floor(g) + 0.5 - 0.5 * n) * grid.cell_size;
+            let centre = clamp(floor(g), vec2(0.0), n - 1.0);
+            at = grid.center + (centre + 0.5 - 0.5 * n) * grid.cell_size;
         }
         let water = water_at(at);
         let fraction = clamp((water.height - (p.y - 0.5 * s)) / s, 0.0, 1.0);
@@ -418,14 +425,27 @@ fn body_footprints(
         if volume <= 0.0 {
             continue;
         }
-        let cell = vec2<u32>(g);
-        let index = cell.y * grid.cells.x + cell.x;
-        atomicAdd(&displaced[index], u32(round(volume / VOLUME_UNIT)));
         // A voxel the surface cuts through, or touches at its top, puts its horizontal area on the
         // waterline. The second half of the buffer sums that area per cell.
-        if (water.height - (p.y - 0.5 * s)) / s <= 1.0 {
-            let n_cells = grid.cells.x * grid.cells.y;
-            atomicAdd(&displaced[n_cells + index], u32(round(s * s / AREA_UNIT)));
+        let on_waterline = (water.height - (p.y - 0.5 * s)) / s <= 1.0;
+        let n_cells = grid.cells.x * grid.cells.y;
+        let c0 = vec2<i32>(max(floor(lo), vec2(0.0)));
+        let c1 = vec2<i32>(min(ceil(hi), n)) - 1;
+        let inv_area = 1.0 / (4.0 * half * half);
+        for (var cy = c0.y; cy <= c1.y; cy++) {
+            for (var cx = c0.x; cx <= c1.x; cx++) {
+                let c = vec2<f32>(f32(cx), f32(cy));
+                let overlap = max(min(hi, c + 1.0) - max(lo, c), vec2(0.0));
+                let share = overlap.x * overlap.y * inv_area;
+                if share <= 0.0 {
+                    continue;
+                }
+                let index = u32(cy) * grid.cells.x + u32(cx);
+                atomicAdd(&displaced[index], u32(round(volume * share / VOLUME_UNIT)));
+                if on_waterline {
+                    atomicAdd(&displaced[n_cells + index], u32(round(s * s * share / AREA_UNIT)));
+                }
+            }
         }
     }
 }

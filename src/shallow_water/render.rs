@@ -279,6 +279,17 @@ pub fn prepare_shallow_water_gpu(
         });
     }
     let n = gpu.nested.as_mut().unwrap();
+    // The child reads its own pressure head while the parent has one.
+    let child_inputs = ShallowWaterInputs {
+        pressure_head: controller
+            .pressure_head
+            .as_ref()
+            .and_then(|_| view(&nested.pressure_head)),
+        ..default()
+    };
+    if !n.child.inputs_match(&child_inputs) {
+        n.child.set_inputs(&render_device, child_inputs);
+    }
     let rho = NEST_REFINEMENT as f32;
     let child_placement = controller
         .nest_center()
