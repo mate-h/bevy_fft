@@ -59,6 +59,10 @@ The renderer does not lift the water mesh to hide intersections. Water geometry 
 
 Persistent moisture belongs to the ground material. Foam is separate coverage over the water and reduces transmitted light where present. Neither uses a replacement sand color inside the water shader.
 
+## Flow detail
+
+Flowing water gets short ripples that move with it, too small for any solver grid. The foam texture holds a tiling field of ripple slopes, 12 to 60 cm long, in its green and blue channels. The surface reads them through the same advected texture coordinates as the foam pattern (Neyret 2003), so they ride the drift, start over unseen and never stretch. Their slopes add to the waves' and the foam relief's. `WaterSurfaceUniform::flow_detail` is their root mean square slope at full strength, 0.06 by default and zero for none. They grow with the drift speed from 0.15 to 1 m/s, so the ocean's Stokes drift stays clear of them, and with the strain the flow puts on them, from half to twice their strength, as Chentanez and Müller-Fischer (2010) weight their subgrid waves. They fade out where a pixel covers several texels of them.
+
 ## Inspect and validate
 
 The Beach panel's Water view shows shaded water, optical distance, transmittance, coverage, or successful refraction hits. Optical distance is displayed from black at zero to white at five meters. Set Refraction to zero to inspect direct transmission without changing the depth measurement.

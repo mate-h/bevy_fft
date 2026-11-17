@@ -5,6 +5,10 @@
 //! The pattern is two octaves of Worley cell edges, which keeps foam along the boundaries between
 //! bubble cells. As coverage drops, the threshold rises and only the brightest edges stay, so
 //! thinning foam breaks into lace, as with Crest's black-point fade.
+//!
+//! The green and blue channels hold the slopes along X and Z of a tiling field of short ripples,
+//! the flow detail the water surface lays over flowing water, encoded as
+//! `0.5 + slope / (2 RIPPLE_SLOPE_RANGE)` for slopes scaled to a root mean square of one.
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -78,6 +82,57 @@ fn foam_pattern(size: u32) -> Vec<f32> {
         .collect()
 }
 
+/// Shortest and longest ripple across the foam texture's tile, as a share of the tile. With the
+/// water surface's 6 m tile they are 12 cm and 60 cm, capillary-gravity ripples a few texels or more
+/// across.
+const RIPPLE_SHORTEST: f32 = 0.02;
+const RIPPLE_LONGEST: f32 = 0.1;
+/// Slopes the encoding spans either side of zero, in root mean squares. Matches
+/// `FLOW_DETAIL_SLOPE_RANGE` in `surface.wesl`.
+pub const RIPPLE_SLOPE_RANGE: f32 = 4.0;
+
+/// Slopes along X and Z of a tiling ripple field at `size` texels per edge, scaled to a root mean
+/// square slope of one. A sum of waves with whole numbers of cycles across the tile, random
+/// directions and phases, and heights falling as the square of the wavenumber, so each band
+/// carries about the same slope.
+fn ripple_slopes(size: u32) -> Vec<Vec2> {
+    let (low, high) = (1.0 / RIPPLE_LONGEST, 1.0 / RIPPLE_SHORTEST);
+    let mut waves = Vec::new();
+    let reach = high.ceil() as i32;
+    for n in -reach..=reach {
+        for m in 0..=reach {
+            let k = Vec2::new(m as f32, n as f32);
+            let length = k.length();
+            if (m == 0 && n <= 0) || length < low || length > high {
+                continue;
+            }
+            // Keep about one in five waves, so the field has no lattice look.
+            let h = hash((m as u32) ^ hash((n + 1000) as u32 ^ hash(7)));
+            if !h.is_multiple_of(5) {
+                continue;
+            }
+            let phase = hash(h) as f32 / u32::MAX as f32 * std::f32::consts::TAU;
+            waves.push((k, phase, 1.0 / (length * length)));
+        }
+    }
+    let mut slopes: Vec<Vec2> = (0..size * size)
+        .map(|i| {
+            let uv = Vec2::new((i % size) as f32, (i / size) as f32) / size as f32;
+            waves.iter().fold(Vec2::ZERO, |sum, (k, phase, amplitude)| {
+                let angle = std::f32::consts::TAU * k.dot(uv) + phase;
+                sum - *k * (*amplitude * angle.sin())
+            })
+        })
+        .collect();
+    let rms = (slopes.iter().map(|s| s.length_squared()).sum::<f32>() / slopes.len() as f32 / 2.0)
+        .sqrt()
+        .max(1e-12);
+    for slope in &mut slopes {
+        *slope /= rms;
+    }
+    slopes
+}
+
 /// Replaces each value by its rank, so the result is evenly spread over [0, 1].
 fn flatten_histogram(values: &[f32]) -> Vec<f32> {
     let mut order: Vec<usize> = (0..values.len()).collect();
@@ -90,10 +145,18 @@ fn flatten_histogram(values: &[f32]) -> Vec<f32> {
     ranks
 }
 
-/// Foam texture of `size` texels per edge in an 8-bit red channel, repeating and linearly filtered.
+/// Foam texture of `size` texels per edge: the foam pattern in red and the ripple slopes in green
+/// and blue, 8 bits each, repeating and linearly filtered.
 pub fn foam_texture_image(size: u32) -> Image {
     let values = flatten_histogram(&foam_pattern(size));
-    let data: Vec<u8> = values.iter().map(|v| (v * 255.0).round() as u8).collect();
+    let slopes = ripple_slopes(size);
+    let encode =
+        |s: f32| ((0.5 + s / (2.0 * RIPPLE_SLOPE_RANGE)).clamp(0.0, 1.0) * 255.0).round() as u8;
+    let data: Vec<u8> = values
+        .iter()
+        .zip(&slopes)
+        .flat_map(|(v, s)| [(v * 255.0).round() as u8, encode(s.x), encode(s.y), 255])
+        .collect();
     let mut image = Image::new(
         Extent3d {
             width: size,
@@ -102,7 +165,7 @@ pub fn foam_texture_image(size: u32) -> Image {
         },
         TextureDimension::D2,
         data,
-        TextureFormat::R8Unorm,
+        TextureFormat::Rgba8Unorm,
         RenderAssetUsages::RENDER_WORLD,
     );
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
@@ -122,7 +185,7 @@ mod tests {
     #[test]
     fn histogram_is_flat() {
         let image = foam_texture_image(64);
-        let data = image.data.unwrap();
+        let data: Vec<u8> = image.data.unwrap().iter().step_by(4).copied().collect();
         let mut bins = [0usize; 4];
         for v in &data {
             bins[(*v as usize * 4 / 256).min(3)] += 1;
@@ -143,6 +206,31 @@ mod tests {
                 values.iter().filter(|v| **v > 1.0 - coverage).count() as f32 / values.len() as f32;
             assert!((share - coverage).abs() < 0.01, "{coverage} {share}");
         }
+    }
+
+    #[test]
+    fn ripples_tile_with_unit_slope() {
+        let size = 64;
+        let slopes = ripple_slopes(size);
+        let mean = slopes.iter().sum::<Vec2>() / slopes.len() as f32;
+        let rms =
+            (slopes.iter().map(|s| s.length_squared()).sum::<f32>() / slopes.len() as f32 / 2.0)
+                .sqrt();
+        assert!(
+            mean.length() < 0.05 && (rms - 1.0).abs() < 1e-3,
+            "{mean} {rms}"
+        );
+        // Almost no slope falls outside the encoded range.
+        let clipped = slopes
+            .iter()
+            .filter(|s| s.abs().max_element() > RIPPLE_SLOPE_RANGE)
+            .count();
+        assert!(clipped * 1000 < slopes.len(), "{clipped} clipped");
+        // Opposite edges continue each other: the step across the seam is like any other step.
+        let at = |x: u32, y: u32| slopes[(y * size + x) as usize];
+        let seam: f32 = (0..size).map(|y| at(0, y).distance(at(size - 1, y))).sum();
+        let inside: f32 = (0..size).map(|y| at(1, y).distance(at(0, y))).sum();
+        assert!(seam < 1.5 * inside, "{seam} {inside}");
     }
 
     #[test]

@@ -15,6 +15,7 @@ import bevy_fft::water::lod::{
 };
 import bevy_fft::water::foam_flow::{
     FOAM_FLOW_LAYERS_PER_SLICE,
+    FOAM_FLOW_TARGET_DEFORMATION,
     foam_flow_long_weight,
     foam_flow_weight,
 };
@@ -83,6 +84,8 @@ struct WaterSurfaceUniform {
     time: f32,
     /// Height of the level plane the mesh displaces from.
     plane_height: f32,
+    /// Root mean square slope of the flow detail at full strength.
+    flow_detail: f32,
 }
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(100) var<uniform> surface: WaterSurfaceUniform;
@@ -100,6 +103,8 @@ struct WaterSurfaceUniform {
 @group(constants::MATERIAL_BIND_GROUP) @binding(110) var foam_sampler: sampler;
 /// Advected texture coordinates of the foam pattern, laid out as `foam_flow.wesl` describes.
 @group(constants::MATERIAL_BIND_GROUP) @binding(111) var lod_foam_flow: texture_2d_array<f32>;
+/// Drift of floating matter in meters per second along X and Z.
+@group(constants::MATERIAL_BIND_GROUP) @binding(115) var lod_drift: texture_2d_array<f32>;
 
 /// Reflectance of dense foam. Koepke (1984, §III) takes about 55 percent from Whitlock et al.'s
 /// laboratory foam of more than 25 bubble layers. Matches `FOAM_ALBEDO` in `optics.wesl` and
@@ -394,6 +399,60 @@ fn water_foam_surface(xz: vec2<f32>, pick: LodPick, foam: vec2<f32>) -> WaterFoa
     return out;
 }
 
+/// Slopes the foam texture's green and blue channels span either side of zero, in root mean
+/// squares. Matches `RIPPLE_SLOPE_RANGE` in `foam_texture.rs`.
+const FLOW_DETAIL_SLOPE_RANGE: f32 = 4.0;
+/// Drift speeds in meters per second over which the flow detail grows from none to full. The
+/// ocean's Stokes drift stays below the first, so the detail shows on currents.
+const FLOW_DETAIL_SPEED: vec2<f32> = vec2<f32>(0.15, 1.0);
+
+/// Ripple slopes at `xz`, with a root mean square of one.
+fn water_ripple_slopes(xz: vec2<f32>) -> vec2<f32> {
+    let gb = textureSampleLevel(foam_texture, foam_sampler, xz / FOAM_TILE, 0.0).gb;
+    return (gb - 0.5) * (2.0 * FLOW_DETAIL_SLOPE_RANGE);
+}
+
+/// Weighted sum of two independent fields with unit variance, scaled back to unit variance, so the
+/// ripples keep their contrast through a blend.
+fn water_blend_slopes(a: vec2<f32>, b: vec2<f32>, w: f32) -> vec2<f32> {
+    return (w * a + (1.0 - w) * b) * inverseSqrt(max(w * w + (1.0 - w) * (1.0 - w), 1e-4));
+}
+
+/// Ripple slopes of one flow layer, read through the advected offsets of its two phases.
+fn water_flow_detail_layer(xz: vec2<f32>, offsets: vec4<f32>, layer: u32) -> vec2<f32> {
+    let a = water_ripple_slopes(xz + offsets.xy);
+    let b = water_ripple_slopes(xz + offsets.zw);
+    return water_blend_slopes(a, b, foam_flow_weight(surface.time, layer));
+}
+
+/// Slopes of the flow detail at undisplaced `xz`: short ripples that move with the water. They
+/// are read through the same advected texture coordinates as the foam (Neyret 2003), and grow
+/// with the drift speed and, as Chentanez and Müller-Fischer (2010) weight their subgrid waves,
+/// with the strain the flow puts on them, from half to twice their strength. `footprint` is the
+/// pixel's width in meters; ripples too small for it fade out.
+fn water_flow_detail(xz: vec2<f32>, pick: LodPick, footprint: f32) -> vec2<f32> {
+    if surface.flow_detail <= 0.0 {
+        return vec2<f32>(0.0);
+    }
+    let drift = sample_pick(lod_drift, pick, 1u, 0u).xy * pick.coverage;
+    let speed = smoothstep(FLOW_DETAIL_SPEED.x, FLOW_DETAIL_SPEED.y, length(drift));
+    let texel = FOAM_TILE / FOAM_TEXTURE_SIZE;
+    let resolved = 1.0 - smoothstep(2.0, 8.0, footprint / texel);
+    let strength = surface.flow_detail * speed * resolved;
+    if strength <= 0.0 {
+        return vec2<f32>(0.0);
+    }
+    let flow = water_foam_flow(pick);
+    let d = water_foam_flow_layer(pick, 2u);
+    let strain = clamp(0.5 + (d.x + d.y) / FOAM_FLOW_TARGET_DEFORMATION, 0.5, 2.0);
+    var slopes = water_flow_detail_layer(xz, flow.long, 1u);
+    if flow.long_weight < 1.0 {
+        let short = water_flow_detail_layer(xz, flow.short, 0u);
+        slopes = water_blend_slopes(slopes, short, flow.long_weight);
+    }
+    return strength * strain * slopes;
+}
+
 /// Bends `n` by the foam relief.
 fn water_foam_normal(n: vec3<f32>, foam: WaterFoamSurface) -> vec3<f32> {
     return normalize(n - vec3<f32>(foam.slope.x, 0.0, foam.slope.y));
@@ -521,7 +580,13 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
     let wave_normal = water_pixel_normal(pick);
-    let n_world = water_foam_normal(wave_normal, foam);
+    let footprint = sqrt(max(length(dpdx(xz)) * length(dpdy(xz)), 1e-12));
+    let detail = water_flow_detail(xz, pick, footprint);
+    // Surface gradients add: the ripples ride on the waves, and the foam relief on both.
+    let n_world = water_foam_normal(
+        normalize(wave_normal / max(wave_normal.y, 1e-3) - vec3<f32>(detail.x, 0.0, detail.y)),
+        foam,
+    );
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = water_mix_foam_into_material(foam.opacity, pbr_input.material.base_color);

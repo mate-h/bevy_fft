@@ -31,6 +31,10 @@ pub struct WaterSurfaceUniform {
     /// water measure depth from. [`super::WaterPlugin`] sets it each frame from the surface
     /// entity, or to zero for quadtree tiles.
     pub plane_height: f32,
+    /// Root mean square slope of the ripples laid over flowing water, the flow detail, at full
+    /// strength. They move with the water through the foam's advected texture coordinates and
+    /// grow with the flow's drift speed and strain. Zero turns them off.
+    pub flow_detail: f32,
 }
 
 /// Optical settings for a transmissive water material. Distances are in meters.
@@ -212,7 +216,7 @@ impl WaterMediumUniform {
 /// Solvers reach the material only through the LOD data, so one material shows the FFT ocean,
 /// shallow water, and dispersive patches together. The surface samples by world position, so any
 /// mesh layout works and the water stays anchored when the mesh moves. [`super::WaterPlugin`]
-/// keeps `lod`, `lod_displacement`, `lod_foam`, `lod_foam_state`, and `lod_foam_flow` in sync with the
+/// keeps `lod`, `lod_displacement`, `lod_foam`, `lod_foam_state`, `lod_foam_flow` and `lod_drift` in sync with the
 /// LOD data each frame, sets `foam_texture`, the time, and the medium, and points `quadtree` at the entity's [`WaterQuadtreeBuffer`] or at
 /// the shared fallback.
 #[derive(Asset, TypePath, AsBindGroup, Clone)]
@@ -256,6 +260,9 @@ pub struct WaterSurfaceExtension {
     pub caustic_map: Handle<Image>,
     #[uniform(114)]
     pub caustics: super::caustics::CausticsLookup,
+    /// The LOD data's drift, which sets the flow detail's strength.
+    #[texture(115, dimension = "2d_array", sample_type = "float", filterable = false)]
+    pub lod_drift: Handle<Image>,
 }
 
 impl Default for WaterSurfaceExtension {
@@ -267,6 +274,7 @@ impl Default for WaterSurfaceExtension {
                 dry_depth: 0.0,
                 time: 0.0,
                 plane_height: 0.0,
+                flow_detail: 0.06,
             },
             lod: WaterLodSlices::default(),
             lod_displacement: Handle::default(),
@@ -280,6 +288,7 @@ impl Default for WaterSurfaceExtension {
             medium: default(),
             caustic_map: Handle::default(),
             caustics: default(),
+            lod_drift: Handle::default(),
         }
     }
 }
@@ -380,6 +389,9 @@ pub(super) fn sync_water_surface_lod(
             }
             if mat.extension.lod_foam_flow != lod.foam_flow {
                 mat.extension.lod_foam_flow = lod.foam_flow.clone();
+            }
+            if mat.extension.lod_drift != lod.drift {
+                mat.extension.lod_drift = lod.drift.clone();
             }
             if let Some(foam_texture) = &foam_texture
                 && mat.extension.foam_texture != foam_texture.0
