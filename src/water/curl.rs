@@ -10,9 +10,13 @@
 //! keyframes, ending flat the same way. The inner loop of the tube is kept, since the camera can
 //! look into it, and the mesh is double-sided.
 //!
-//! The mesh is rebuilt on the CPU at each readback. It is a curtain over the water surface that
-//! the waves draw anyway: its edges lie on the water, and its height scales with the depth at the
-//! front, as a breaker's height is about 0.78 of the depth it breaks in.
+//! The mesh is rebuilt on the CPU at each readback. It is only the lip: the heightfield already
+//! draws the wave's back, its face and the bore after it, so the curl grows out of the crest, is
+//! thrown forward, falls into the water ahead, and fades out once spent. Each front point sits on
+//! the face at the water's height there, about half way up the wave, so the profile is placed
+//! relative to it. Its height scales with the depth at the front, as a breaker's height is about
+//! 0.78 of the depth it breaks in. It is drawn as water, a dark body seen partly through with a
+//! glossy surface, and foam spreads from the tip as it breaks.
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -22,71 +26,65 @@ use bevy::{
 
 use super::{FrontLine, WaterBreakingFronts};
 
-/// Samples along the cross-section, from the trough behind the front to the water ahead.
-const PROFILE_SAMPLES: usize = 24;
+/// Samples along the cross-section, from the crest to the tip of the lip.
+const PROFILE_SAMPLES: usize = 16;
 
-/// The cross-section at a few animation times, as points from the back of the wave to the front,
-/// in breaker heights: forward along the front's travel, and up from the water surface. Each
-/// starts and ends on the water, so the curl joins the surface along its edges.
-const KEYFRAMES: [(f32, [[f32; 2]; 9]); 4] = [
-    // A steep hump.
+/// The lip at a few animation times, as points from the crest to its tip, in breaker heights:
+/// forward along the front's travel from the front point, and up from the water there. The front
+/// point sits half way up the face, so the crest is at about half a height and the water ahead at
+/// minus half. Each starts on the crest, so the lip grows out of the heightfield's own wave, and
+/// ends below the water ahead once it has fallen.
+const KEYFRAMES: [(f32, [[f32; 2]; 7]); 4] = [
+    // The crest sharpens: a short hood over it.
     (
         0.0,
         [
-            [-2.0, 0.0],
-            [-1.4, 0.15],
-            [-0.9, 0.45],
-            [-0.5, 0.75],
-            [-0.2, 0.9],
-            [0.05, 0.8],
-            [0.3, 0.45],
-            [0.6, 0.15],
-            [1.0, 0.0],
+            [-0.35, 0.45],
+            [-0.25, 0.5],
+            [-0.15, 0.52],
+            [-0.05, 0.5],
+            [0.02, 0.46],
+            [0.06, 0.4],
+            [0.08, 0.34],
         ],
     ),
-    // The face steepens and the lip is thrown forward over it.
+    // The lip is thrown forward over the face.
     (
-        0.4,
+        0.35,
         [
-            [-2.0, 0.0],
-            [-1.3, 0.2],
-            [-0.8, 0.6],
-            [-0.35, 0.95],
-            [0.05, 1.05],
-            [0.45, 0.95],
-            [0.6, 0.65],
-            [0.35, 0.3],
-            [1.2, 0.0],
+            [-0.35, 0.45],
+            [-0.15, 0.58],
+            [0.1, 0.64],
+            [0.35, 0.6],
+            [0.55, 0.48],
+            [0.68, 0.32],
+            [0.74, 0.16],
         ],
     ),
-    // The lip curls down onto the water ahead, around a tube.
+    // It curls down around the tube and plunges into the water ahead.
     (
         0.7,
         [
-            [-2.0, 0.0],
-            [-1.2, 0.2],
-            [-0.7, 0.55],
-            [-0.25, 0.8],
-            [0.2, 0.85],
-            [0.75, 0.7],
-            [1.0, 0.35],
-            [0.95, 0.05],
-            [1.4, 0.0],
+            [-0.35, 0.45],
+            [-0.1, 0.6],
+            [0.2, 0.64],
+            [0.55, 0.52],
+            [0.8, 0.24],
+            [0.92, -0.12],
+            [0.95, -0.6],
         ],
     ),
-    // Spent: a low bore that ends flat.
+    // Spent: it has fallen in, and fades.
     (
         1.0,
         [
-            [-2.0, 0.0],
-            [-1.4, 0.03],
-            [-0.9, 0.06],
-            [-0.4, 0.08],
-            [0.0, 0.08],
-            [0.4, 0.07],
-            [0.8, 0.04],
-            [1.2, 0.01],
-            [1.6, 0.0],
+            [-0.35, 0.3],
+            [-0.1, 0.38],
+            [0.2, 0.36],
+            [0.5, 0.2],
+            [0.75, -0.05],
+            [0.9, -0.35],
+            [0.95, -0.7],
         ],
     ),
 ];
@@ -106,7 +104,8 @@ pub struct WaterBreakerCurl {
     /// Points at each end of a line over which the curl tapers to nothing, so it doesn't end in a
     /// wall.
     pub taper_points: usize,
-    /// Colour of the water in the curl, and of its foam toward the lip as it breaks.
+    /// Colour of the water in the curl, dark as water is, with the share of what is behind it
+    /// that shows through in alpha; and of its foam toward the tip as it breaks.
     pub color: Color,
     pub foam: Color,
 }
@@ -118,8 +117,8 @@ impl Default for WaterBreakerCurl {
             height_over_depth: 0.78,
             height_range: Vec2::new(0.2, 3.0),
             taper_points: 4,
-            color: Color::srgba(0.09, 0.32, 0.36, 0.85),
-            foam: Color::srgba(0.92, 0.95, 0.96, 0.95),
+            color: Color::srgba(0.02, 0.09, 0.1, 0.8),
+            foam: Color::srgba(0.85, 0.88, 0.9, 0.9),
         }
     }
 }
@@ -132,7 +131,7 @@ pub(super) struct BreakerCurlMesh {
 }
 
 /// Point `i` of the cross-section at animation time `t` from 0 to 1, in breaker heights, with the
-/// share of foam on it. The keyframes are blended with a smoothstep, and the points between
+/// share of foam on it. [`curl_fade`] gives how much of the curl shows at `t`. The keyframes are blended with a smoothstep, and the points between
 /// keyframe points with a Catmull-Rom spline.
 pub fn curl_profile(t: f32, samples: usize) -> Vec<(Vec2, f32)> {
     let t = t.clamp(0.0, 1.0);
@@ -150,8 +149,8 @@ pub fn curl_profile(t: f32, samples: usize) -> Vec<(Vec2, f32)> {
         .map(|(a, b)| Vec2::from(*a).lerp(Vec2::from(*b), w))
         .collect();
     let last = key.len() - 1;
-    // Foam grows over the lip as it breaks, and covers the spent bore.
-    let breaking = ((t - 0.3) / 0.4).clamp(0.0, 1.0);
+    // Foam spreads from the tip back over the lip as it breaks.
+    let breaking = ((t - 0.25) / 0.5).clamp(0.0, 1.0);
     (0..samples)
         .map(|i| {
             let s = i as f32 / (samples - 1) as f32 * last as f32;
@@ -164,10 +163,18 @@ pub fn curl_profile(t: f32, samples: usize) -> Vec<(Vec2, f32)> {
                     + (p2 - p0) * f
                     + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * f * f
                     + (3.0 * p1 - p0 - 3.0 * p2 + p3) * f * f * f);
-            let toward_lip = s / last as f32;
-            (point, breaking * toward_lip.powf(1.5))
+            let toward_tip = s / last as f32;
+            (point, (breaking * 1.5 - (1.0 - toward_tip)).clamp(0.0, 1.0))
         })
         .collect()
+}
+
+/// How much of the curl shows at animation time `t`: it grows in as the crest sharpens and fades
+/// out once it has fallen into the water, where the heightfield's bore takes over.
+pub fn curl_fade(t: f32) -> f32 {
+    let grow = (t / 0.15).clamp(0.0, 1.0);
+    let fall = ((1.0 - t) / 0.3).clamp(0.0, 1.0);
+    grow * grow * (3.0 - 2.0 * grow) * fall * fall * (3.0 - 2.0 * fall)
 }
 
 /// Passes of the smoothing along a line before the sweep.
@@ -212,7 +219,12 @@ fn sweep(
     if n < 2 {
         return;
     }
-    let profile = curl_profile(line.age / settings.duration.max(1e-3), PROFILE_SAMPLES);
+    let t = line.age / settings.duration.max(1e-3);
+    let shown = curl_fade(t);
+    if shown <= 0.0 {
+        return;
+    }
+    let profile = curl_profile(t, PROFILE_SAMPLES);
     let water = LinearRgba::from(settings.color);
     let foam = LinearRgba::from(settings.foam);
     let base = positions.len() as u32;
@@ -237,12 +249,15 @@ fn sweep(
         } else {
             (from_end / taper).min(1.0)
         };
-        let height = heights[i] * fade;
+        // The ends shrink toward the crest and fade, so a line doesn't end in a wall.
+        let height = heights[i] * (0.4 + 0.6 * fade);
         let forward = Vec3::new(directions[i].x, 0.0, directions[i].y).normalize_or(Vec3::X);
         for (point, foam_share) in &profile {
             let at = centers[i] + forward * point.x * height + Vec3::Y * point.y * height;
             positions.push(at.to_array());
-            colors.push(water.mix(&foam, *foam_share).to_f32_array());
+            let mut color = water.mix(&foam, *foam_share);
+            color.alpha *= shown * fade;
+            colors.push(color.to_f32_array());
         }
     }
     let rows = if line.closed { n } else { n - 1 };
@@ -314,9 +329,11 @@ pub(super) fn update_breaker_curls(
                 let Some(mesh) = mesh else {
                     continue;
                 };
+                // Water: the vertex colours carry its dark body and foam, and the surface is
+                // glossy with water's 2 % reflectance at normal incidence (0.16 r² for r = 0.35).
                 let material = materials.add(StandardMaterial {
                     base_color: Color::WHITE,
-                    perceptual_roughness: 0.15,
+                    perceptual_roughness: 0.06,
                     reflectance: 0.35,
                     alpha_mode: AlphaMode::Blend,
                     double_sided: true,
@@ -360,30 +377,30 @@ mod tests {
     use crate::water::FrontPoint;
 
     #[test]
-    fn the_profile_starts_and_ends_on_the_water() {
-        for t in [0.0, 0.2, 0.4, 0.55, 0.7, 0.9, 1.0] {
+    fn the_lip_grows_from_the_crest_and_falls_into_the_water_ahead() {
+        for t in [0.0, 0.2, 0.4, 0.55, 0.7] {
             let p = curl_profile(t, PROFILE_SAMPLES);
             assert_eq!(p.len(), PROFILE_SAMPLES);
-            assert!(
-                p[0].0.y.abs() < 1e-5 && p[PROFILE_SAMPLES - 1].0.y.abs() < 1e-5,
-                "{t}"
-            );
+            // The crest, half a height above the front point on the face.
+            assert!((p[0].0 - Vec2::new(-0.35, 0.45)).length() < 1e-4, "{t}");
         }
+        let fallen = curl_profile(0.7, PROFILE_SAMPLES);
+        assert!(
+            fallen.last().unwrap().0.y < -0.4,
+            "the tip is under the water ahead"
+        );
     }
 
     #[test]
-    fn the_lip_overhangs_while_breaking_and_ends_flat() {
-        // An overhang: further along the profile, a point lies behind one before it, above the
-        // water, so a vertical line meets the surface more than once.
-        let overhangs = |t: f32| {
-            let p = curl_profile(t, PROFILE_SAMPLES);
-            (1..p.len()).any(|i| p[i].0.x < p[i - 1].0.x - 1e-3 && p[i].0.y > 0.05)
-        };
-        assert!(!overhangs(0.0));
-        assert!(overhangs(0.5));
-        let spent = curl_profile(1.0, PROFILE_SAMPLES);
-        assert!(spent.iter().all(|(p, _)| p.y < 0.1));
-        assert!(spent.last().unwrap().1 > 0.9, "the spent bore is foam");
+    fn the_lip_overhangs_while_breaking_and_fades_when_spent() {
+        // Thrown forward: part of the lip lies ahead of the face, above the water there.
+        let p = curl_profile(0.5, PROFILE_SAMPLES);
+        assert!(p.iter().any(|(q, _)| q.x > 0.5 && q.y > 0.2));
+        assert!(p.last().unwrap().1 > 0.5, "foam at the tip as it breaks");
+        assert!(p[0].1 < 0.1, "clear water at the crest");
+        assert_eq!(curl_fade(1.0), 0.0);
+        assert_eq!(curl_fade(0.0), 0.0);
+        assert_eq!(curl_fade(0.4), 1.0);
     }
 
     #[test]
@@ -416,9 +433,14 @@ mod tests {
                 .map(|p| p[1])
                 .fold(0.0, f32::max)
         };
-        assert_eq!(top(0), 0.0, "the end of the line lies on the water");
-        // 0.78 of 2 m deep water, near the top of the profile.
-        assert!((1.2..1.9).contains(&top(5)), "{}", top(5));
+        // 0.78 of 2 m deep water, with the lip about 0.6 of that above the front point.
+        assert!((0.7..1.3).contains(&top(5)), "{}", top(5));
+        let Some(VertexAttributeValues::Float32x4(colors)) = mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("no colours");
+        };
+        assert_eq!(colors[0][3], 0.0, "the end of the line fades out");
+        assert!(colors[5 * PROFILE_SAMPLES][3] > 0.5);
         assert_eq!(mesh.indices().unwrap().len(), 9 * (PROFILE_SAMPLES - 1) * 6);
     }
 }
