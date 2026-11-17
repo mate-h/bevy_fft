@@ -49,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A free floating body that presses shallow water settles instead of bobbing without end: `FloatingBodySettings::pressure_relaxation` defaults to 0.05 instead of 0.25, so the head follows the hull over about 20 frames instead of counting its heave twice. The `pool` example's crate presses the water all the time again.
 - Baked terrain no longer rises to 0 m in a thin line around the map: `tools/pad_terrain_borders.py` replaces the edge tiles' outer texels, which the bevy_terrain processor fills with 0 m, with the data inside them, and both bake scripts run it. The `beach` example's water bed reads the whole map again.
 - A shallow water grid's ocean band and PML no longer drain land along an ocean border, so a river that runs in over a land edge keeps its water.
 - Shallow water grids keep the ocean's short waves and whitecaps. The split between the grid and the FFT detail counted a cascade as resolved by its longest wave, so a 2 m grid was fed the 48 m cascade's 1.5 to 8 m waves, damped them away, and drew no detail in their place. Grids now take a cascade only while its longest wave spans 16 cells. The `beach` example's water bed no longer reads the terrain's last texel rows, which the terrain processor fills toward 0 m, raising a ridge to sea level along the map edge.

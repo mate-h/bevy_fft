@@ -81,7 +81,11 @@ pub struct FloatingBodySettings {
     pub slam_power: f32,
     /// Share of the way the pressure head under bodies moves toward its new value each frame,
     /// from 0 to 1. The head is measured against the surface plus the previous head, so taking
-    /// it whole makes it swing from frame to frame.
+    /// it whole makes it swing from frame to frame. A free body also feeds its own heave back
+    /// through the head: when it sinks, the head rises before the water has flowed away, so its
+    /// buoyancy briefly counts the motion twice, and with the forces read back a few frames late
+    /// a light body bobs without end. At 0.05, about 20 frames, the head follows the hull slowly
+    /// enough that a dropped crate settles; at 0.25 it never did.
     pub pressure_relaxation: f32,
     /// Splashes thrown off the waterline into the water particles, when
     /// [`WaterParticlesPlugin`](crate::particles::WaterParticlesPlugin) is in the app.
@@ -134,7 +138,7 @@ impl Default for FloatingBodySettings {
             suction_falloff: 0.5,
             slam_rate_max: 0.0,
             slam_power: 2.0,
-            pressure_relaxation: 0.25,
+            pressure_relaxation: 0.05,
             splash: FloatingBodySplash::default(),
         }
     }

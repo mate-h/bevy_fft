@@ -34,6 +34,11 @@ fn step(app: &mut App) {
 
 /// A walled pool of still water `DEPTH` deep, its surface at world height 0, with a pressure head.
 fn pool_app() -> App {
+    pool_app_with(|_| {})
+}
+
+/// [`pool_app`] with `extra` adding plugins before the app finishes building.
+fn pool_app_with(extra: impl FnOnce(&mut App)) -> App {
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -77,6 +82,7 @@ fn pool_app() -> App {
         blend_cells: 0.0,
     });
     app.insert_resource(controller);
+    extra(&mut app);
     while app.plugins_state() == PluginsState::Adding {
         bevy::tasks::tick_global_task_pools_on_main_thread();
         thread::sleep(Duration::from_millis(1));
@@ -198,4 +204,84 @@ fn a_towed_body_makes_waves() {
         }
     }
     assert!(waves > 0.05, "largest wave {waves} m");
+}
+
+/// A 1.2 m crate of 450 kg/m³ dropped from 1 m onto the pool and moved by Rapier with the GPU
+/// forces, the way the examples apply them. Returns its submerged share every frame.
+fn dropped_crate(frames: u32) -> Vec<f32> {
+    use bevy_rapier3d::prelude::*;
+    let mut app = pool_app_with(|app| {
+        app.add_plugins(RapierPhysicsPlugin::<NoUserData>::default());
+        // Undamped water, as in a river or the sea, so waves the crate makes keep moving.
+        app.world_mut()
+            .resource_mut::<ShallowWaterController>()
+            .friction = 0.0;
+    });
+    app.add_systems(
+        Update,
+        |settings: Res<FloatingBodySettings>,
+         time: Res<Time>,
+         mut bodies: Query<(
+            &mut FloatingBody,
+            &mut ExternalForce,
+            &Velocity,
+            &GlobalTransform,
+        )>| {
+            for (mut body, mut external, velocity, transform) in &mut bodies {
+                body.linear_velocity = velocity.linear;
+                body.angular_velocity = velocity.angular;
+                let center = transform.transform_point(body.center_of_mass);
+                let (force, torque) = body.compensated(
+                    center,
+                    velocity.linear,
+                    velocity.angular,
+                    time.delta_secs(),
+                    &settings,
+                );
+                external.force = force;
+                external.torque = torque;
+            }
+        },
+    );
+    let hull = Arc::new(voxelize(&Mesh::from(Cuboid::new(1.2, 1.2, 1.2)), 0.2).unwrap());
+    let mass = 450.0 * hull.volume();
+    let mut body = FloatingBody::new(hull, mass);
+    body.estimate_velocity = false;
+    let entity = app
+        .world_mut()
+        .spawn((
+            body,
+            Transform::from_xyz(0.0, 1.6, 0.0).with_rotation(Quat::from_rotation_y(0.4)),
+            RigidBody::Dynamic,
+            Collider::cuboid(0.6, 0.6, 0.6),
+            ColliderMassProperties::Mass(mass),
+            Velocity::default(),
+            ExternalForce::default(),
+        ))
+        .id();
+    let mut shares = Vec::new();
+    for _ in 0..frames {
+        step(&mut app);
+        let body = app.world().get::<FloatingBody>(entity).unwrap();
+        shares.push(body.submerged_volume / body.hull.volume());
+    }
+    shares
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn a_dropped_body_that_presses_the_water_settles() {
+    // A dropped crate floats at its density ratio, 45 percent under, while it presses the water.
+    // This pool, with 1 m cells and the forces read back without frame pacing, does not show
+    // the instability the pool example had with 0.25 m cells and the head at 0.25 per frame,
+    // where the crate bobbed between 2 and 94 percent under; it checks the settled state.
+    let shares = dropped_crate(1200);
+    let last = &shares[900..];
+    let (low, high) = last
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), &s| (lo.min(s), hi.max(s)));
+    assert!(
+        low > 0.3 && high < 0.6,
+        "over the last 5 s the crate was {low} to {high} under"
+    );
 }

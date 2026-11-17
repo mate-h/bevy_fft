@@ -6,8 +6,7 @@
 //! is voxelized once. [`FloatingBodyPlugin`] presses each hull into the grid through a pressure
 //! head (Kellomäki 2014), so a body pushes water aside and makes waves, and evaluates buoyancy and
 //! drag on its voxels against the same surface. The crate is dynamic: it splashes in and floats
-//! downstream. It presses the water only while it moves up or down faster than 0.6 m/s, since a
-//! free body that keeps pressing it bobs without end. The towed log is kinematic and drags a wake
+//! downstream. The towed log is kinematic and drags a wake
 //! back and forth across the channel. The dam log is fixed on the bed, and the river pours over
 //! it.
 //!
@@ -50,8 +49,6 @@ const MANNING_N: f32 = 0.03;
 const DEPTH: f32 = 1.5;
 /// Edge of a hull voxel in meters.
 const VOXEL: f32 = 0.2;
-/// Vertical speed above which the crate presses the water.
-const CRATE_SPLASH_SPEED: f32 = 0.6;
 /// Where the crate drops from.
 const CRATE_DROP: Vec3 = Vec3::new(-18.0, 3.0, 6.0);
 /// The towed log runs across the channel at this x, between these z, at this speed.
@@ -359,10 +356,9 @@ fn apply_water_forces(
         &mut ExternalForce,
         &Velocity,
         &GlobalTransform,
-        Has<Crate>,
     )>,
 ) {
-    for (mut body, mut external, velocity, transform, is_crate) in &mut bodies {
+    for (mut body, mut external, velocity, transform) in &mut bodies {
         body.linear_velocity = velocity.linear;
         body.angular_velocity = velocity.angular;
         let center = transform.transform_point(body.center_of_mass);
@@ -374,12 +370,6 @@ fn apply_water_forces(
             &settings,
         );
         external.force = force;
-        // A free body that presses the water while it bobs feeds its own heave back through the
-        // water a few frames late and never settles. The crate presses only while it moves up or
-        // down fast, so it splashes when it lands and then floats on the surface it reads.
-        if is_crate {
-            body.displaces_water = velocity.linear.y.abs() > CRATE_SPLASH_SPEED;
-        }
         external.torque = torque;
     }
 }
