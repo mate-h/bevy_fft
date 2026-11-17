@@ -447,10 +447,23 @@ pub fn plug_shallow_water_render_app(render_app: &mut SubApp) {
     render_app
         .init_resource::<ShallowWaterTimestamp>()
         .init_resource::<ShallowWaterGpuResources>()
+        .init_resource::<super::waterfalls::ShallowWaterWaterfallPipeline>()
+        .init_resource::<super::waterfalls::ShallowWaterWaterfallGpu>()
         .add_systems(
             Render,
-            prepare_shallow_water_gpu.in_set(RenderSystems::PrepareBindGroups),
+            (
+                prepare_shallow_water_gpu,
+                super::waterfalls::prepare_shallow_water_waterfalls,
+            )
+                .in_set(RenderSystems::PrepareBindGroups),
         );
+    render_app.add_systems(
+        bevy::render::renderer::RenderGraph,
+        super::waterfalls::run_shallow_water_waterfalls
+            .after(run_shallow_water_sim)
+            .before(crate::water::WaterLodGraphSystems::Blend)
+            .in_set(bevy::render::renderer::RenderGraphSystems::Render),
+    );
     render_app.add_systems(
         bevy::render::renderer::RenderGraph,
         run_shallow_water_sim

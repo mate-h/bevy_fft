@@ -23,6 +23,7 @@ The simulated step is the frame's `Time` delta, the one the foam sim takes. `ena
 - **The CPU.** Push `WaterParticle`s to `WaterParticleSpawns` at any time. The render world takes everything in it at the frame's extraction, so each spawn reaches the GPU once. `WaterParticleEmitter` on an entity sprays from its position at a rate, a handy source for tests and examples.
 - **Breaking crests.** `WaterCrestSpray` turns breaking water into spray. The ocean, shallow water grids and dispersive patches all write their breaking intensity into the LOD data's foam lane, so one emitter covers them all. It scans the finest `slices` slices and leaves a texel that a finer slice also covers to that slice, so a breaking patch emits once however the slices nest. A texel emits `rate · area · dt · breaking` particles on average, rounded at random so the mean is exact, at full rate where the surface rises as fast as `speed` and half where it stands still. They start on the displaced surface with the water's velocity plus an upward launch. `rate` is zero by default, which turns the emitter off.
 - **Floating bodies.** `FloatingBodySettings::splash` turns hulls into splashes. In the force pass, a surface patch at a body's waterline that moves into the water faster than `min_speed` emits `rate · wetted area · (speed - min_speed) · dt` particles on average, launched up and out along the hull at about the entry speed. A dropped crate and a moving bow both splash this way. They reach the pool through the queue below, a frame later.
+- **Waterfalls.** `ShallowWaterController::waterfalls` throws spray where a river pours over a drop in its bed, in proportion to the water that crosses the lip. See [shallow water](shallow_water.md#waterfalls).
 - **Other GPU passes.** `WaterParticleQueue` is a render-world storage buffer: an `atomic<u32>` count, three `u32` of padding, then `WATER_PARTICLE_QUEUE_CAPACITY` particles laid out like `WaterParticle`. A pass appends with `atomicAdd` on the count and writes the slot it got while that is below the capacity. The particle pass spawns them on its next run and empties the queue.
 
 ## Landing and foam
@@ -59,4 +60,4 @@ On an M5 at 2560 × 1440, the beach with spray on spent 0.14 ms in `water_partic
 
 ## Not yet
 
-Bubbles under the water, surface-riding particles, sorting, ribbons along breaking fronts and a waterfall lip emitter are open beads. Particles don't fade with distance fog yet.
+Bubbles under the water, surface-riding particles, sorting and ribbons along breaking fronts are open beads. Particles don't fade with distance fog yet.

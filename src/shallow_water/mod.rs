@@ -23,6 +23,7 @@ mod river;
 mod settled;
 mod shift;
 mod solver;
+mod waterfalls;
 
 use bevy::{
     asset::{Asset, Assets, Handle, RenderAssetUsages, embedded_asset},
@@ -61,6 +62,7 @@ pub use solver::{
     ShallowWaterInputs, ShallowWaterKernels, ShallowWaterPipelines, ShallowWaterSettings,
     ShallowWaterSolver, ShallowWaterSolverDescriptor, ShallowWaterTextures, round_particle_count,
 };
+pub use waterfalls::ShallowWaterWaterfalls;
 
 /// What happens at one edge of the grid.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Reflect, Debug)]
@@ -224,6 +226,8 @@ pub struct ShallowWaterController {
     /// then fills from it.
     #[reflect(ignore)]
     pub settled: Option<std::sync::Arc<ShallowWaterSettled>>,
+    /// Spray thrown off waterfall lips into the water particles. Needs a placement.
+    pub waterfalls: Option<ShallowWaterWaterfalls>,
 }
 
 /// Most [`ShallowWaterMover`]s that stir the water in one frame.
@@ -440,6 +444,7 @@ impl ShallowWaterController {
             nested: None,
             movers: Vec::new(),
             settled: None,
+            waterfalls: None,
             pointer_sim: Vec2::ZERO,
             pointer_prev_sim: Vec2::ZERO,
             preset_index: 0,
@@ -748,6 +753,7 @@ pub mod shaders {
     pub const SHALLOW_WATER_SURFACE: &str = "embedded://bevy_fft/shallow_water/surface.wesl";
     pub const SHALLOW_WATER_NEST: &str = "embedded://bevy_fft/shallow_water/nest.wesl";
     pub const SHALLOW_WATER_SHIFT: &str = "embedded://bevy_fft/shallow_water/shift.wesl";
+    pub const SHALLOW_WATER_WATERFALLS: &str = "embedded://bevy_fft/shallow_water/waterfalls.wesl";
 }
 
 fn sync_shallow_water_mesh_material(
@@ -873,6 +879,7 @@ impl Plugin for ShallowWaterPlugin {
             app.add_plugins(ShallowWaterSolverPlugin);
         }
         embedded_asset!(app, "surface.wesl");
+        embedded_asset!(app, "waterfalls.wesl");
 
         app.register_type::<ShallowWaterController>()
             .register_type::<ShallowWaterBorder>()

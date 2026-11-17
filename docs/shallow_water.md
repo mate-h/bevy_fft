@@ -42,6 +42,10 @@ A river runs through the grid on per-face borders. `ShallowWaterController::bord
 
 [`tests/shallow_water_river_gpu.rs`](../tests/shallow_water_river_gpu.rs) feeds a dry, 96 m channel on a 0.002 slope with 0.25 m²/s and Manning n 0.03. It checks that the flow settles within 5% of the normal depth of 0.343 m along the channel and that its volume then holds still, so what flows in flows out.
 
+### Waterfalls
+
+`ShallowWaterController::waterfalls` throws spray off waterfall lips into the [water particles](particles.md). Each frame a pass finds the faces that pass the CMF10 waterfall test: water flows across the face from the higher cell, the bed drops by more than `slope_cap` cell widths across it, 1.5 by default, and the lower cell isn't filled up to the higher cell's bed. Each such face throws `rate` particles per cubic meter that crosses it, from the water column at the lip and along the flow, through `WaterParticleQueue`. The spray is for the eye: the grid still carries the water down the drop. It needs `WaterParticlesPlugin` and a placement, and it runs on the controller's grid, not the nested one. [`tests/shallow_water_waterfall_gpu.rs`](../tests/shallow_water_waterfall_gpu.rs) checks that a settled river over a 3 m drop sprays within a quarter of `rate` times its discharge, and the same river without the drop doesn't spray.
+
 ### Starting settled
 
 A river takes minutes of simulated time to fill its channel and settle. `ShallowWaterSettled` caches a settled grid: the bed and depth of every cell and the velocity of every face, with the grid's size, cell width and centre. `capture_shallow_water_settled` reads a running grid back and hands over the cache a few frames later, and `save` and `load` write it to a file and read it back. Set `ShallowWaterController::settled` and every reset loads it over the preset and the ocean seed, when it fits the grid, before the nested grid fills from it. The beach example bakes and loads one with `BEACH_SETTLED`. [`tests/shallow_water_river_gpu.rs`](../tests/shallow_water_river_gpu.rs) checks that a dry channel started from the cache of a settled one holds normal depth from its first frame on.
