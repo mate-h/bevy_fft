@@ -82,6 +82,17 @@ struct ParticleParams {
 @group(0) @binding(8) var lod_flow: texture_2d_array<f32>;
 /// Particles other GPU passes queued since the last frame, such as floating bodies' splashes.
 @group(0) @binding(9) var<storage, read_write> queue: ParticleQueue;
+/// The slots the draw reads, after this frame's simulation.
+@group(0) @binding(10) var<storage, read_write> draw: DrawList;
+
+/// A non-indexed indirect draw of six vertices per live particle, then the live slots.
+struct DrawList {
+    vertex_count: atomic<u32>,
+    instance_count: u32,
+    first_vertex: u32,
+    first_instance: u32,
+    slots: array<u32>,
+}
 
 struct ParticleQueue {
     /// Particles appended. Past `QUEUE_CAPACITY` they were dropped.
@@ -132,6 +143,10 @@ fn deposit_foam(p: Particle) {
 fn beginFrame() {
     atomicStore(&state.alive, 0u);
     atomicStore(&state.frame_spray, 0u);
+    atomicStore(&draw.vertex_count, 0u);
+    draw.instance_count = 1u;
+    draw.first_vertex = 0u;
+    draw.first_instance = 0u;
 }
 
 /// Writes `p` at the next slot, counting the particle it overwrites as dead.
@@ -296,6 +311,7 @@ fn simulateParticles(@builtin(global_invocation_id) id: vec3<u32>) {
         atomicAdd(&state.died, 1u);
     } else {
         atomicAdd(&state.alive, 1u);
+        draw.slots[atomicAdd(&draw.vertex_count, 6u) / 6u] = id.x;
     }
     particles[id.x] = p;
 }

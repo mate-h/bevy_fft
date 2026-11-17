@@ -1,5 +1,5 @@
-// Draws each water particle as a camera-facing quad, six vertices per pool slot, read from the
-// pool by vertex index. Free slots collapse to a point outside the view.
+// Draws each live water particle as a camera-facing quad, six vertices per slot in the draw list
+// the simulation fills, with an indirect draw of that many vertices.
 //
 // A fast drop is stretched along its velocity across the screen, as a camera exposure smears it,
 // keeping its total opacity. Its size on screen is clamped: a drop smaller than
@@ -42,6 +42,8 @@ struct ParticleLook {
 
 @group(constants::MATERIAL_BIND_GROUP) @binding(0) var<storage, read> particles: array<Particle>;
 @group(constants::MATERIAL_BIND_GROUP) @binding(1) var<uniform> look: ParticleLook;
+/// The indirect draw's arguments, then the live slots, six vertices each.
+@group(constants::MATERIAL_BIND_GROUP) @binding(2) var<storage, read> draw: array<u32>;
 
 struct Vertex {
     @builtin(vertex_index) index: u32,
@@ -67,7 +69,12 @@ fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
 @vertex
 fn vertex(in: Vertex) -> VertexOutput {
     var out: VertexOutput;
-    let p = particles[in.index / 6u];
+    // Past the list only when the mesh draw stands in for the indirect one.
+    if in.index >= draw[0] {
+        out.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        return out;
+    }
+    let p = particles[draw[4u + in.index / 6u]];
     if p.life <= 0.0 {
         out.clip = vec4<f32>(2.0, 2.0, 2.0, 1.0);
         return out;

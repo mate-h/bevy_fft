@@ -14,6 +14,7 @@ Each frame one compute pass, `water_particles_pass`, runs in `WaterLodGraphSyste
 4. Particles other GPU passes queued since the last frame land too.
 5. Every live particle moves under gravity and quadratic air drag against the wind, `a = g - drag |v - wind| (v - wind)`. The step is exact for a constant acceleration, so a particle without drag follows its ballistic arc.
 6. With `collide` on, a particle that falls through the water surface dies there and leaves foam, and one past the LOD data's reach dies too.
+7. Every particle still alive appends its slot to `WaterParticles::draw`, the list the draw reads.
 
 The simulated step is the frame's `Time` delta, the one the foam sim takes. `enabled: false` holds every particle in place.
 
@@ -30,7 +31,7 @@ The surface test reads the finest LOD slice that holds the particle, undoes the 
 
 ## Drawing
 
-The pool is drawn as one mesh of six vertices per slot, which the vertex shader turns into a camera-facing quad from the pool, in the transparent pass with premultiplied alpha. Free slots collapse to nothing. A drop:
+The live particles are drawn in the transparent pass with premultiplied alpha, by one indirect draw of six vertices per particle in the draw list. The vertex shader turns each six into a camera-facing quad from the pool. The draw replaces the material's mesh draw, which would run six vertices per slot. If Bevy shares the material's properties when the swap is made, the mesh draw stays, with a one-time warning, and the slots past the list collapse to nothing. A drop:
 
 - scatters each directional light with a Henyey-Greenstein phase function of asymmetry `anisotropy`, so spray glows between the camera and the sun, and takes the sky's light, `ambient`, through the camera's exposure;
 - smears along its velocity across the view over `stretch_time`, spreading the same opacity over the longer quad;
@@ -41,7 +42,7 @@ The pool is drawn as one mesh of six vertices per slot, which the vertex shader 
 
 The crest spray thins away from the viewer as `1 / (1 + (d / half_distance)²)`, measured from the centre of the finest slice, and its drops grow by the inverse square root, so distant spray covers the same share of the surface with fewer drops. `cap` bounds the spray per frame. `WaterParticleSettings::with_quality` sets the pool size, the spray's cap, slices and reach, and the smallest drop on screen for `WaterParticleQuality::Low`, `Medium` or `High`.
 
-On an M5 at 2560 × 1440, the beach with spray on spends 0.14 ms in `water_particles_pass` and 0.78 ms in the transparent pass's vertex stage on the default 65 536 slots. The draw runs over every slot, live or not, so a smaller pool is the cheapest saving.
+On an M5 at 2560 × 1440, the beach with spray on spent 0.14 ms in `water_particles_pass` and 0.78 ms in the transparent pass's vertex stage on the default 65 536 slots, back when the draw ran over every slot. It now runs over the live particles only.
 
 ## Debugging
 

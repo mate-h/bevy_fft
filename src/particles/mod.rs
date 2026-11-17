@@ -21,13 +21,27 @@
 use bevy::{
     asset::{RenderAssetUsages, embedded_asset},
     camera::visibility::NoFrustumCulling,
+    material::labels::DrawFunctionLabel,
+    core_pipeline::core_3d::Transparent3d,
+    ecs::system::{SystemParamItem, lifetimeless::SRes},
+    pbr::{
+        MainPassTransparentDrawFunction, PreparedMaterial, RenderMeshInstances,
+        SetMaterialBindGroup, SetMeshBindGroup, SetMeshViewBindGroup,
+        SetMeshViewBindingArrayBindGroup,
+    },
     ecs::world::{FromWorld, World},
-    mesh::{Indices, PrimitiveTopology},
+    mesh::PrimitiveTopology,
     prelude::*,
     render::{
         Render, RenderApp, RenderSystems,
         extract_resource::{ExtractResource, ExtractResourcePlugin},
+        erased_render_asset::ErasedRenderAssets,
+        mesh::allocator::MeshAllocator,
         render_asset::RenderAssets,
+        render_phase::{
+            AddRenderCommand, DrawFunctions, PhaseItem, RenderCommand,
+            RenderCommandResult, SetItemPipeline, TrackedRenderPass,
+        },
         render_resource::{
             AsBindGroup,
             binding_types::{
@@ -311,7 +325,11 @@ pub struct WaterParticleSpawns(pub Vec<WaterParticle>);
 pub struct WaterParticles {
     pub particles: Handle<ShaderBuffer>,
     pub state: Handle<ShaderBuffer>,
+    /// The live slots to draw: a non-indexed indirect draw's four `u32` arguments, six vertices
+    /// per live particle, then the index of each live slot, filled by the simulation each frame.
+    pub draw: Handle<ShaderBuffer>,
     pub capacity: u32,
+    material: AssetId<WaterParticleMaterial>,
 }
 
 /// The frame's simulated time step, the same the foam simulation takes.
@@ -361,6 +379,9 @@ pub struct WaterParticleMaterial {
     pub particles: Handle<ShaderBuffer>,
     #[uniform(1)]
     pub look: WaterParticleLook,
+    /// [`WaterParticles::draw`].
+    #[storage(2, read_only)]
+    pub draw: Handle<ShaderBuffer>,
 }
 
 /// The draw shader's view of [`WaterParticleSettings`].
@@ -440,6 +461,11 @@ impl Plugin for WaterParticlesPlugin {
             return;
         };
         render_app
+            .add_render_command::<Transparent3d, DrawWaterParticleMaterial>()
+            .add_systems(
+                Render,
+                draw_live_water_particles.in_set(RenderSystems::PrepareMeshes),
+            )
             .init_resource::<WaterParticlePipeline>()
             .init_resource::<WaterParticleGpu>()
             .init_resource::<WaterParticleSpawns>()
@@ -475,21 +501,30 @@ fn setup_water_particles(
         vec![0u32; 8],
         RenderAssetUsages::RENDER_WORLD,
     ));
-    // Six vertices per slot. Their positions are unused: the vertex shader reads the pool.
+    // Zeroed, so nothing draws before the first simulation.
+    let mut draw = ShaderBuffer::new(
+        vec![0u32; 4 + capacity as usize],
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    draw.buffer_usage |= BufferUsages::INDIRECT;
+    let draw = buffers.add(draw);
+    // Six vertices per slot, which the indirect draw reads up to. Their positions are unused:
+    // the vertex shader reads the pool.
     let vertices = capacity as usize * 6;
     let mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD,
     )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; vertices])
-    .with_inserted_indices(Indices::U32((0..vertices as u32).collect()));
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; vertices]);
+    let material = materials.add(WaterParticleMaterial {
+        particles: particles.clone(),
+        look: look(&settings),
+        draw: draw.clone(),
+    });
     commands.spawn((
         WaterParticlesDraw,
         Mesh3d(meshes.add(mesh)),
-        MeshMaterial3d(materials.add(WaterParticleMaterial {
-            particles: particles.clone(),
-            look: look(&settings),
-        })),
+        MeshMaterial3d(material.clone()),
         Transform::default(),
         NoFrustumCulling,
         bevy::light::NotShadowCaster,
@@ -497,7 +532,9 @@ fn setup_water_particles(
     commands.insert_resource(WaterParticles {
         particles,
         state,
+        draw,
         capacity,
+        material: material.id(),
     });
 }
 
@@ -654,6 +691,7 @@ impl FromWorld for WaterParticlePipeline {
                     storage_buffer::<u32>(false),
                     texture_2d_array(TextureSampleType::Float { filterable: false }),
                     storage_buffer_sized(false, None),
+                    storage_buffer_sized(false, None),
                 ),
             ),
         );
@@ -692,6 +730,8 @@ struct WaterParticleGpu {
     frame: u32,
     /// Workgroups of the crest emitter, when it runs this frame.
     spray: Option<UVec3>,
+    /// [`WaterParticles::draw`], which holds the indirect draw's arguments.
+    draw: Option<Buffer>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -713,11 +753,18 @@ fn prepare_water_particles(
     mut gpu: ResMut<WaterParticleGpu>,
 ) {
     gpu.group = None;
+    gpu.draw = pool
+        .as_ref()
+        .and_then(|pool| buffers.get(&pool.draw))
+        .map(|draw| draw.buffer.clone());
     let (Some(pool), Some(lod)) = (pool, lod) else {
         return;
     };
-    let (Some(particles), Some(state)) = (buffers.get(&pool.particles), buffers.get(&pool.state))
-    else {
+    let (Some(particles), Some(state), Some(draw)) = (
+        buffers.get(&pool.particles),
+        buffers.get(&pool.state),
+        buffers.get(&pool.draw),
+    ) else {
         return;
     };
     let (Some(displacement), Some(foam_lane), Some(flow), Some(slices), Some(deposit)) = (
@@ -802,6 +849,7 @@ fn prepare_water_particles(
             deposit.as_entire_buffer_binding(),
             &flow.texture_view,
             particle_queue.buffer.as_entire_buffer_binding(),
+            draw.buffer.as_entire_buffer_binding(),
         )),
     ));
 }
@@ -848,4 +896,87 @@ fn run_water_particles(
     pass.dispatch_workgroups(1, 1, 1);
     pass.set_pipeline(simulate);
     pass.dispatch_workgroups(gpu.capacity.div_ceil(64), 1, 1);
+}
+
+/// The material's draw with [`DrawWaterParticles`] in place of the mesh draw.
+type DrawWaterParticleMaterial = (
+    SetItemPipeline,
+    SetMeshViewBindGroup<0>,
+    SetMeshViewBindingArrayBindGroup<1>,
+    SetMeshBindGroup<2>,
+    SetMaterialBindGroup<3>,
+    DrawWaterParticles,
+);
+
+/// Draws six vertices per live particle, as many as the simulation wrote into
+/// [`WaterParticles::draw`], instead of six per slot.
+struct DrawWaterParticles;
+
+impl<P: PhaseItem> RenderCommand<P> for DrawWaterParticles {
+    type Param = (
+        SRes<RenderMeshInstances>,
+        SRes<MeshAllocator>,
+        SRes<WaterParticleGpu>,
+    );
+    type ViewQuery = ();
+    type ItemQuery = ();
+
+    fn render<'w>(
+        item: &P,
+        _view: (),
+        _entity: Option<()>,
+        (instances, allocator, gpu): SystemParamItem<'w, '_, Self::Param>,
+        pass: &mut TrackedRenderPass<'w>,
+    ) -> RenderCommandResult {
+        let Some(draw) = gpu.into_inner().draw.as_ref() else {
+            return RenderCommandResult::Skip;
+        };
+        let Some(mesh) = instances.into_inner().mesh_asset_id(item.main_entity()) else {
+            return RenderCommandResult::Skip;
+        };
+        let Some(vertices) = allocator.into_inner().mesh_vertex_slice(&mesh) else {
+            return RenderCommandResult::Skip;
+        };
+        // The vertex shader reads only its index, which runs from zero: the buffer is bound for
+        // the pipeline's layout and covers six vertices per slot.
+        pass.set_vertex_buffer(0, vertices.buffer.slice(..));
+        pass.draw_indirect(draw, 0);
+        RenderCommandResult::Success
+    }
+}
+
+/// Points the pool material's transparent draw at [`DrawWaterParticleMaterial`] each time the
+/// material is prepared.
+fn draw_live_water_particles(
+    pool: Option<Res<WaterParticles>>,
+    mut materials: ResMut<ErasedRenderAssets<PreparedMaterial>>,
+    draw_functions: Res<DrawFunctions<Transparent3d>>,
+) {
+    let Some(pool) = pool else {
+        return;
+    };
+    let Some(material) = materials.get_mut(pool.material) else {
+        return;
+    };
+    let id = draw_functions.read().id::<DrawWaterParticleMaterial>();
+    let label = MainPassTransparentDrawFunction.intern();
+    if material
+        .properties
+        .draw_functions
+        .iter()
+        .any(|&(l, f)| l == label && f == id)
+    {
+        return;
+    }
+    // Material properties can't be cloned, but nothing else holds them yet in the frame they are
+    // prepared. Otherwise the mesh draw stays, which runs every slot and draws the same.
+    let Some(properties) = std::sync::Arc::get_mut(&mut material.properties) else {
+        warn_once!("water particles fall back to drawing every pool slot");
+        return;
+    };
+    for (l, f) in &mut properties.draw_functions {
+        if *l == label {
+            *f = id;
+        }
+    }
 }
