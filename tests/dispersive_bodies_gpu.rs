@@ -330,3 +330,179 @@ fn a_towed_body_trails_a_wake_in_deep_mode() {
     assert!(wake > 0.05, "largest wake wave {wake} m");
     assert!(wake < 2.0, "wake wave {wake} m");
 }
+
+/// Half-float bits of `v`, for the swell written into the LOD data. Values here are small and
+/// normal, so the conversion skips subnormals and infinities.
+fn f16_bits(v: f32) -> u16 {
+    let bits = v.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+    if v == 0.0 || exponent <= 0 {
+        return sign;
+    }
+    let mantissa = ((bits >> 13) & 0x3ff) as u16;
+    sign | ((exponent as u16) << 10) | mantissa
+}
+
+/// Swell amplitude in meters and wavelength in meters of the ambient water in the LOD data.
+const SWELL: f32 = 0.3;
+const SWELL_LENGTH: f32 = 8.0;
+
+/// A still swell along z, one period under the barge's 8 m length, written into the LOD displacement every frame in place of an ocean.
+#[derive(Resource)]
+struct Swell(bevy::render::render_resource::Buffer);
+
+fn swell_bytes() -> Vec<u8> {
+    let res = 256u32;
+    let k = std::f32::consts::TAU / SWELL_LENGTH;
+    let mut bytes = Vec::with_capacity((res * res * 8) as usize);
+    for j in 0..res {
+        let z = j as f32 + 0.5 - 0.5 * res as f32;
+        for _ in 0..res {
+            let lanes = [0.0, SWELL * k * (k * z).cos(), SWELL * (k * z).sin(), 0.0];
+            for lane in lanes {
+                bytes.extend_from_slice(&f16_bits(lane).to_le_bytes());
+            }
+        }
+    }
+    bytes
+}
+
+fn write_swell(
+    mut ctx: bevy::render::renderer::RenderContext,
+    device: Res<bevy::render::renderer::RenderDevice>,
+    lod: Option<Res<WaterLodData>>,
+    images: Res<bevy::render::render_asset::RenderAssets<bevy::render::texture::GpuImage>>,
+    mut swell: Local<Option<Swell>>,
+) {
+    use bevy::render::render_resource::*;
+    let (Some(lod), Some(target)) = (
+        lod.as_ref(),
+        lod.as_ref().and_then(|l| images.get(&l.displacement)),
+    ) else {
+        return;
+    };
+    let _ = lod;
+    let swell = swell.get_or_insert_with(|| {
+        Swell(device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("test_swell"),
+            contents: &swell_bytes(),
+            usage: BufferUsages::COPY_SRC,
+        }))
+    });
+    ctx.command_encoder().copy_buffer_to_texture(
+        TexelCopyBufferInfo {
+            buffer: &swell.0,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(256 * 8),
+                rows_per_image: Some(256),
+            },
+        },
+        target.texture.as_image_copy(),
+        Extent3d {
+            width: 256,
+            height: 256,
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
+#[derive(Resource, Default)]
+struct Composite {
+    bytes: Vec<u8>,
+    serial: u64,
+}
+
+/// The composite LOD surface height over every cell a barge held still in the swell obstructs,
+/// after a few seconds, with the swell the LOD data had there before the patch.
+fn composite_under_hull() -> (Vec<f32>, Vec<f32>) {
+    let mut app = patch_app();
+    app.sub_app_mut(bevy::render::RenderApp).add_systems(
+        bevy::render::renderer::RenderGraph,
+        write_swell.in_set(WaterLodGraphSystems::Base),
+    );
+    app.init_resource::<Composite>();
+    app.world_mut().spawn((barge(), Transform::IDENTITY));
+    for _ in 0..240 {
+        step(&mut app);
+    }
+    let displacement = app.world().resource::<WaterLodData>().displacement.clone();
+    app.world_mut()
+        .spawn(Readback::texture(displacement))
+        .observe(|event: On<ReadbackComplete>, mut c: ResMut<Composite>| {
+            c.bytes = event.data.clone();
+            c.serial += 1;
+        });
+    settle(&mut app);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while app.world().resource::<Composite>().serial < 2 {
+        step(&mut app);
+        assert!(Instant::now() < deadline, "LOD readback timed out");
+    }
+    let o = obstruction(&app);
+    let bytes = &app.world().resource::<Composite>().bytes;
+    let row = bytes.len() / 256;
+    let k = std::f32::consts::TAU / SWELL_LENGTH;
+    let (mut composite, mut ambient) = (Vec::new(), Vec::new());
+    for y in 0..N {
+        for x in 0..N {
+            if o[(y * N + x) as usize] > 0.05 {
+                continue;
+            }
+            // The patch's 1 m cells line up with the LOD's 1 m texels, 64 texels in.
+            let (tx, ty) = (x as usize + 64, y as usize + 64);
+            let o = ty * row + tx * 8 + 4;
+            let h = half_to_f32(u16::from_le_bytes([bytes[o], bytes[o + 1]]));
+            composite.push(h);
+            ambient.push(SWELL * (k * (y as f32 + 0.5 - 0.5 * N as f32)).sin());
+        }
+    }
+    (composite, ambient)
+}
+
+fn half_to_f32(bits: u16) -> f32 {
+    let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exponent = ((bits >> 10) & 0x1f) as i32;
+    let mantissa = (bits & 0x3ff) as f32;
+    if exponent == 0 {
+        return sign * mantissa * 2f32.powi(-24);
+    }
+    sign * (1.0 + mantissa / 1024.0) * 2f32.powi(exponent - 15)
+}
+
+fn spread(values: &[f32]) -> f32 {
+    let mean = values.iter().sum::<f32>() / values.len() as f32;
+    (values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / values.len() as f32).sqrt()
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn ambient_swell_rests_against_a_hull_instead_of_running_through_it() {
+    let (composite, ambient) = composite_under_hull();
+    assert!(
+        composite.len() > 10,
+        "only {} cells under the hull",
+        composite.len()
+    );
+    // The swell runs under the hull with a spread of about 0.2 m. The composite surface there
+    // rests against the hull's flat bottom instead: the footprint measures the hull's head against
+    // the composite surface, swell included, so the patch takes the swell away under the hull
+    // without a separate ambient term (Gilligan §3.4, eq. 77).
+    let swell_spread = spread(&ambient);
+    let surface_spread = spread(&composite);
+    assert!(
+        swell_spread > 0.15,
+        "the swell under the hull spreads only {swell_spread} m"
+    );
+    assert!(
+        surface_spread < 0.25 * swell_spread,
+        "the surface under the hull spreads {surface_spread} m, the swell {swell_spread} m"
+    );
+    // The barge is held with its centre on the rest surface, so its bottom is 1 m down.
+    let mean = composite.iter().sum::<f32>() / composite.len() as f32;
+    assert!(
+        (mean + 1.0).abs() < 0.15,
+        "the surface under the hull sits at {mean} m, the hull's bottom at -1 m"
+    );
+}
