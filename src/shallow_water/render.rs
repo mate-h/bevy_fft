@@ -45,6 +45,16 @@ pub struct ShallowWaterGpuResources {
     pub ocean_seed_written: AtomicBool,
     /// The controller's nested grid, built after the solver.
     pub nested: Option<ShallowWaterNestedGpu>,
+    /// [`ShallowWaterController::settled`] on the GPU while it fits the grid.
+    settled: Option<SettledGpu>,
+}
+
+/// An uploaded settled state and the grid textures it loads into.
+struct SettledGpu {
+    /// The state it was uploaded from.
+    from: std::sync::Arc<super::ShallowWaterSettled>,
+    sources: [Texture; 3],
+    targets: [Texture; 3],
 }
 
 /// The render-world side of a [`ShallowWaterNestedGrid`](super::ShallowWaterNestedGrid).
@@ -63,6 +73,7 @@ impl Default for ShallowWaterGpuResources {
     fn default() -> Self {
         Self {
             nested: None,
+            settled: None,
             solver: None,
             last_applied_serial: AtomicU32::new(0),
             ocean_seed_written: AtomicBool::new(false),
@@ -128,6 +139,29 @@ pub fn prepare_shallow_water_gpu(
             },
         );
     }
+    if gpu.solver.is_none() {
+        return;
+    }
+    let targets = [
+        &controller.bed_water,
+        &controller.flow_x,
+        &controller.flow_y,
+    ]
+    .map(|handle| gpu_images.get(handle).map(|g| g.texture.clone()));
+    gpu.settled = match (&controller.settled, targets) {
+        (Some(settled), [Some(b), Some(u), Some(w)]) if settled.fits(&controller) => {
+            let sources = match gpu.settled.take() {
+                Some(old) if std::sync::Arc::ptr_eq(&old.from, settled) => old.sources,
+                _ => settled.upload(&render_device, &render_queue),
+            };
+            Some(SettledGpu {
+                from: settled.clone(),
+                sources,
+                targets: [b, u, w],
+            })
+        }
+        _ => None,
+    };
     let Some(solver) = gpu.solver.as_mut() else {
         return;
     };
@@ -359,6 +393,19 @@ pub fn run_shallow_water_sim(
         solver.encode_interact(&mut pass);
         if !controller.paused && !defer_init {
             solver.encode_ocean_band(&mut pass);
+        }
+    }
+    // A settled state replaces the preset and the seed, before the nested grid refills.
+    if apply_init
+        && !defer_init
+        && let Some(settled) = &gpu_res.settled
+    {
+        for (source, target) in settled.sources.iter().zip(&settled.targets) {
+            enc.copy_texture_to_texture(
+                source.as_image_copy(),
+                target.as_image_copy(),
+                source.size(),
+            );
         }
     }
     // The nested grid moves or refills after the parent's reset, so it reads the parent's

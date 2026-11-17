@@ -24,7 +24,10 @@
 //!
 //! The Lumahaʻi River runs in over the map's south edge, along its OpenStreetMap centreline, as a
 //! fixed discharge of 4 m³/s, and pours into the bay. `BEACH_RIVER` sets the discharge, and 0
-//! turns it off.
+//! turns it off. The river takes minutes to fill its channel from dry. With `BEACH_SETTLED=<file>`
+//! the panel's "Save settled state" writes the grid there once it has settled, and the next run
+//! starts from that file when it was taken with the same cell size. `BEACH_SETTLED_AFTER=<seconds>`
+//! saves it on its own after that much simulated time, to bake it without a window.
 //!
 //! The elevation and class rasters come from the matching 1 m shoreline square in
 //! `~/Downloads/hawaii_topobathy`. Prepare the CC0 texture arrays, class map, sand capillary mask,
@@ -66,7 +69,9 @@ use bevy_egui::{
 };
 use bevy_fft::{
     prelude::*,
-    shallow_water::{RiverSpline, ShallowWaterBorderProfile},
+    shallow_water::{
+        RiverSpline, ShallowWaterBorderProfile, ShallowWaterSettled, capture_shallow_water_settled,
+    },
 };
 use bevy_terrain::prelude::{
     SpawnTerrainCommandsExt, TerrainMaterialPlugin, TerrainPlugin, TerrainSettings,
@@ -164,6 +169,36 @@ fn river_discharge() -> f32 {
         .max(0.0)
 }
 
+/// The settled state file `BEACH_SETTLED` names, if any.
+fn settled_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("BEACH_SETTLED").map(Into::into)
+}
+
+/// Saves the settled state to [`settled_path`] once `BEACH_SETTLED_AFTER` seconds have run.
+fn save_settled_after(
+    mut commands: Commands,
+    time: Res<Time>,
+    controller: Res<ShallowWaterController>,
+    mut saved: Local<bool>,
+) {
+    let after = std::env::var("BEACH_SETTLED_AFTER")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok());
+    let (Some(path), Some(after)) = (settled_path(), after) else {
+        return;
+    };
+    if *saved || time.elapsed_secs() < after {
+        return;
+    }
+    *saved = true;
+    capture_shallow_water_settled(&mut commands, &controller, move |settled| {
+        match settled.save(&path) {
+            Ok(()) => info!("saved the settled grid to {}", path.display()),
+            Err(error) => warn!("can't write {}: {error}", path.display()),
+        }
+    });
+}
+
 /// Cells per edge of the finer grid nested around the camera, with a third of the cell width,
 /// 288 unless `BEACH_NEST` sets it. 0 turns it off. It rounds down to a multiple of 3.
 fn nest_cells() -> u32 {
@@ -243,6 +278,7 @@ fn main() {
                 trace_breaking_fronts,
                 draw_breaking_fronts,
                 nest_follows_camera,
+                save_settled_after,
             ),
         )
         .add_systems(EguiPrimaryContextPass, beach_panel)
@@ -456,6 +492,18 @@ fn setup(
             texel_size: 1.0,
         });
         controller.nested = Some(nested);
+    }
+    if let Some(path) = settled_path().filter(|path| path.exists()) {
+        match ShallowWaterSettled::load(&path) {
+            Ok(settled) if settled.fits(&controller) => {
+                controller.settled = Some(std::sync::Arc::new(settled));
+            }
+            Ok(_) => warn!(
+                "{} is for another grid; starting from still water",
+                path.display()
+            ),
+            Err(error) => warn!("can't read {}: {error}", path.display()),
+        }
     }
     commands.insert_resource(controller);
 
@@ -706,6 +754,7 @@ fn draw_breaking_fronts(
 }
 
 fn beach_panel(
+    mut commands: Commands,
     mut contexts: EguiContexts,
     mut controller: ResMut<ShallowWaterController>,
     mut caustics: ResMut<WaterCausticsSettings>,
@@ -790,6 +839,16 @@ fn beach_panel(
         );
         if ui.button("Reset").clicked() {
             controller.sim_apply_serial = controller.sim_apply_serial.wrapping_add(1);
+        }
+        if let Some(path) = settled_path()
+            && ui.button("Save settled state").clicked()
+        {
+            capture_shallow_water_settled(&mut commands, &controller, move |settled| match settled
+                .save(&path)
+            {
+                Ok(()) => info!("saved the settled grid to {}", path.display()),
+                Err(error) => warn!("can't write {}: {error}", path.display()),
+            });
         }
         if let Some(mut placement) = controller.placement {
             ui.add(egui::Slider::new(&mut placement.blend_cells, 0.0..=64.0).text("Edge fade"));

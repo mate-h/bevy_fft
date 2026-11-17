@@ -42,6 +42,10 @@ A river runs through the grid on per-face borders. `ShallowWaterController::bord
 
 [`tests/shallow_water_river_gpu.rs`](../tests/shallow_water_river_gpu.rs) feeds a dry, 96 m channel on a 0.002 slope with 0.25 m²/s and Manning n 0.03. It checks that the flow settles within 5% of the normal depth of 0.343 m along the channel and that its volume then holds still, so what flows in flows out.
 
+### Starting settled
+
+A river takes minutes of simulated time to fill its channel and settle. `ShallowWaterSettled` caches a settled grid: the bed and depth of every cell and the velocity of every face, with the grid's size, cell width and centre. `capture_shallow_water_settled` reads a running grid back and hands over the cache a few frames later, and `save` and `load` write it to a file and read it back. Set `ShallowWaterController::settled` and every reset loads it over the preset and the ocean seed, when it fits the grid, before the nested grid fills from it. The beach example bakes and loads one with `BEACH_SETTLED`. [`tests/shallow_water_river_gpu.rs`](../tests/shallow_water_river_gpu.rs) checks that a dry channel started from the cache of a settled one holds normal depth from its first frame on.
+
 ### Checking the banks
 
 Elevation models record the water surface over rivers, so a carved channel is only as good as the banks beside it. `check_river_banks` takes a river run to a steady state and read back as a `SettledGrid`, and reports two problems. A `BankLeak` is a region of wet cells outside the channel, which is half the river's width plus `RiverBankCheck::margin` from its centreline, that touches wet channel cells. A `LowBank` is a stretch where the highest bed across the bank, from half the width out to the margin, stays below the settled surface on the centreline plus `freeboard`. `along` limits both to a range of distances along the river, to leave out the mouth and the grid's edges.

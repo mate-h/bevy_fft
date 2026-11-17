@@ -10,6 +10,7 @@ use bevy::{
 };
 use bevy_fft::shallow_water::*;
 use std::{
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -39,6 +40,11 @@ fn step(app: &mut App) {
 /// A dry channel `NX` cells long falling along +x, walled along its sides, fed over its whole
 /// left edge and draining over its right edge at normal depth.
 fn channel_app() -> App {
+    channel_app_from(None)
+}
+
+/// [`channel_app`], starting from `settled` when given.
+fn channel_app_from(settled: Option<Arc<ShallowWaterSettled>>) -> App {
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -88,6 +94,7 @@ fn channel_app() -> App {
         );
     }
     controller.border_profile = Some(images.add(profile.image()));
+    controller.settled = settled;
     app.insert_resource(controller);
     while app.plugins_state() == PluginsState::Adding {
         bevy::tasks::tick_global_task_pools_on_main_thread();
@@ -378,4 +385,63 @@ fn a_river_runs_in_over_an_ocean_border_on_land() {
     }
     let mean = sum / count as f32;
     assert!(mean > 0.4, "the channel holds {mean} m of water");
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn a_river_starts_settled_from_its_cache() {
+    let normal_depth = (Q * MANNING_N / SLOPE.sqrt()).powf(0.6);
+    let deadline = Instant::now() + Duration::from_secs(240);
+    let mut app = channel_app();
+    let settled_depth = run_for(&mut app, 5000, deadline);
+
+    // Take the cache with the grid paused, and send it through a file's bytes.
+    app.world_mut()
+        .resource_mut::<ShallowWaterController>()
+        .paused = true;
+    let taken: Arc<Mutex<Option<ShallowWaterSettled>>> = Arc::default();
+    let controller = app.world().resource::<ShallowWaterController>().clone();
+    let sink = taken.clone();
+    capture_shallow_water_settled(&mut app.world_mut().commands(), &controller, move |s| {
+        *sink.lock().unwrap() = Some(s);
+    });
+    app.world_mut().flush();
+    while taken.lock().unwrap().is_none() {
+        step(&mut app);
+        assert!(Instant::now() < deadline, "cache readback timed out");
+    }
+    let cache = taken.lock().unwrap().take().unwrap();
+    let mut bytes = Vec::new();
+    cache.write(&mut bytes).unwrap();
+    let cache = ShallowWaterSettled::read(bytes.as_slice()).unwrap();
+    let cached_depth: Vec<f32> = cache.bed_water.chunks(4).map(|c| c[1]).collect();
+    assert_eq!(
+        cached_depth, settled_depth,
+        "the cache holds the settled depth"
+    );
+    drop(app);
+
+    // A fresh, dry grid starts from the cache and holds the river where it was. Its first
+    // readback with water in it comes from the frame it was reset in or the next, once the
+    // pipelines have compiled; from dry, water would reach only the first cells by then.
+    let middle = |depth: &[f32]| {
+        let cells: Vec<f32> = (0..NY)
+            .flat_map(|j| (16..80).map(move |i| (j * NX + i) as usize))
+            .map(|i| depth[i])
+            .collect();
+        cells.iter().sum::<f32>() / cells.len() as f32
+    };
+    let mut app = channel_app_from(Some(Arc::new(cache)));
+    let mut first = run_for(&mut app, 1, deadline);
+    while first.iter().all(|h| *h == 0.0) {
+        first = run_for(&mut app, 1, deadline);
+    }
+    let later = run_for(&mut app, 500, deadline);
+    for (name, depth) in [("first", &first), ("later", &later)] {
+        let mean = middle(depth);
+        assert!(
+            (mean - normal_depth).abs() < 0.05 * normal_depth,
+            "{name} frames of the cached river hold {mean} m, normal depth {normal_depth} m"
+        );
+    }
 }

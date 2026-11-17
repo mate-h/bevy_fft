@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ShallowWaterSettled` caches a settled grid, `capture_shallow_water_settled` takes one from a running grid, and `ShallowWaterController::settled` starts every reset from it, so a river starts settled instead of filling its channel. The beach bakes and loads one with `BEACH_SETTLED` and `BEACH_SETTLED_AFTER`.
 - `ShallowWaterMover` stirs shallow water with an entity's motion, only while it moves: faces within its radius on the grid and its nested grid are pulled toward its velocity where the water is slower in that direction. Floating bodies drift with the water it pushes.
 - The `beach` example feeds the Lumahaʻi River in over the map's south edge along its OpenStreetMap centreline, 4 m³/s by default (`BEACH_RIVER`).
 - [docs/particles.md](docs/particles.md) describes the water particles.

@@ -20,6 +20,7 @@ mod banks;
 mod nest;
 mod render;
 mod river;
+mod settled;
 mod shift;
 mod solver;
 
@@ -52,6 +53,7 @@ pub use render::{
     plug_shallow_water_render_app, prepare_shallow_water_gpu, run_shallow_water_sim,
 };
 pub use river::{GridEdge, RiverSpline, ShallowWaterBorderFace, ShallowWaterBorderProfile};
+pub use settled::{ShallowWaterSettled, capture_shallow_water_settled};
 pub use shift::{
     ShallowWaterShift, ShallowWaterShiftParams, ShallowWaterShiftPipelines, ShallowWaterWorldBed,
 };
@@ -217,6 +219,11 @@ pub struct ShallowWaterController {
     /// [`SHALLOW_WATER_MAX_MOVERS`] stir the water.
     #[reflect(ignore)]
     pub movers: Vec<ShallowWaterMoverSample>,
+    /// A settled state to start from. Each reset loads it over the preset when it
+    /// [`fits`](ShallowWaterSettled::fits) the grid, after the ocean seed, and the nested grid
+    /// then fills from it.
+    #[reflect(ignore)]
+    pub settled: Option<std::sync::Arc<ShallowWaterSettled>>,
 }
 
 /// Most [`ShallowWaterMover`]s that stir the water in one frame.
@@ -432,6 +439,7 @@ impl ShallowWaterController {
             border_profile: None,
             nested: None,
             movers: Vec::new(),
+            settled: None,
             pointer_sim: Vec2::ZERO,
             pointer_prev_sim: Vec2::ZERO,
             preset_index: 0,
