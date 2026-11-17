@@ -29,7 +29,8 @@ use bevy::{
         render_resource::{
             AsBindGroup,
             binding_types::{
-                storage_buffer, storage_buffer_read_only, texture_2d_array, uniform_buffer,
+                storage_buffer, storage_buffer_read_only, storage_buffer_sized, texture_2d_array,
+                uniform_buffer,
             },
             encase::internal::{WriteInto, Writer},
             *,
@@ -53,6 +54,32 @@ pub const WATER_PARTICLES_DRAW_SHADER: &str = "embedded://bevy_fft/particles/dra
 pub const WATER_PARTICLE_BYTES: u64 = 32;
 /// Most spawns one frame takes. Spawns past it wait for the next frame.
 pub const WATER_PARTICLE_MAX_SPAWNS: usize = 8192;
+/// Most particles GPU passes can queue in [`WaterParticleQueue`] per frame.
+pub const WATER_PARTICLE_QUEUE_CAPACITY: u64 = 4096;
+
+/// A render-world queue that other GPU passes append particles to, such as floating bodies'
+/// splashes. It is a storage buffer of an `atomic<u32>` count, three `u32` of padding, then
+/// [`WATER_PARTICLE_QUEUE_CAPACITY`] particles laid out like [`WaterParticle`]. A pass appends with
+/// `atomicAdd` on the count and writes the slot it got while it is below the capacity. The
+/// particle pass spawns them on its next run and resets the count.
+#[derive(Resource)]
+pub struct WaterParticleQueue {
+    pub buffer: Buffer,
+}
+
+impl FromWorld for WaterParticleQueue {
+    fn from_world(world: &mut World) -> Self {
+        let buffer = world
+            .resource::<RenderDevice>()
+            .create_buffer(&BufferDescriptor {
+                label: Some("water_particle_queue"),
+                size: 16 + WATER_PARTICLE_QUEUE_CAPACITY * WATER_PARTICLE_BYTES,
+                usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        Self { buffer }
+    }
+}
 
 /// One particle as the pool and the spawn queue store it.
 #[derive(Clone, Copy, Debug, Default, ShaderType, bytemuck::Pod, bytemuck::Zeroable)]
@@ -289,6 +316,7 @@ impl Plugin for WaterParticlesPlugin {
             .init_resource::<WaterParticlePipeline>()
             .init_resource::<WaterParticleGpu>()
             .init_resource::<WaterParticleSpawns>()
+            .init_resource::<WaterParticleQueue>()
             .add_systems(bevy::render::ExtractSchedule, extract_water_particle_spawns)
             .add_systems(
                 Render,
@@ -466,6 +494,8 @@ struct WaterParticlePipeline {
     spawn: CachedComputePipelineId,
     simulate: CachedComputePipelineId,
     spray: CachedComputePipelineId,
+    spawn_queued: CachedComputePipelineId,
+    clear_queue: CachedComputePipelineId,
 }
 
 impl FromWorld for WaterParticlePipeline {
@@ -488,6 +518,7 @@ impl FromWorld for WaterParticlePipeline {
                     texture_2d_array(TextureSampleType::Float { filterable: false }),
                     storage_buffer::<u32>(false),
                     texture_2d_array(TextureSampleType::Float { filterable: false }),
+                    storage_buffer_sized(false, None),
                 ),
             ),
         );
@@ -508,6 +539,8 @@ impl FromWorld for WaterParticlePipeline {
             spawn: queue("water_particles_spawn", "spawnParticles"),
             simulate: queue("water_particles_simulate", "simulateParticles"),
             spray: queue("water_particles_crest_spray", "emitCrestSpray"),
+            spawn_queued: queue("water_particles_spawn_queued", "spawnQueued"),
+            clear_queue: queue("water_particles_clear_queue", "clearQueue"),
             layout,
         }
     }
@@ -540,6 +573,7 @@ fn prepare_water_particles(
     lod: Option<Res<WaterLodData>>,
     lod_gpu: Res<WaterLodGpu>,
     foam: Res<WaterFoamSim>,
+    particle_queue: Res<WaterParticleQueue>,
     images: Res<RenderAssets<GpuImage>>,
     mut gpu: ResMut<WaterParticleGpu>,
 ) {
@@ -630,6 +664,7 @@ fn prepare_water_particles(
             &foam_lane.texture_view,
             deposit.as_entire_buffer_binding(),
             &flow.texture_view,
+            particle_queue.buffer.as_entire_buffer_binding(),
         )),
     ));
 }
@@ -643,11 +678,14 @@ fn run_water_particles(
     let Some(group) = &gpu.group else {
         return;
     };
-    let (Some(begin), Some(spawn), Some(simulate), Some(spray)) = (
-        cache.get_compute_pipeline(pipeline.begin),
-        cache.get_compute_pipeline(pipeline.spawn),
-        cache.get_compute_pipeline(pipeline.simulate),
-        cache.get_compute_pipeline(pipeline.spray),
+    let get = |id| cache.get_compute_pipeline(id);
+    let (Some(begin), Some(spawn), Some(simulate), Some(spray), Some(queued), Some(clear)) = (
+        get(pipeline.begin),
+        get(pipeline.spawn),
+        get(pipeline.simulate),
+        get(pipeline.spray),
+        get(pipeline.spawn_queued),
+        get(pipeline.clear_queue),
     ) else {
         return;
     };
@@ -667,6 +705,10 @@ fn run_water_particles(
         pass.set_pipeline(spawn);
         pass.dispatch_workgroups(gpu.spawn_count.div_ceil(64), 1, 1);
     }
+    pass.set_pipeline(queued);
+    pass.dispatch_workgroups((WATER_PARTICLE_QUEUE_CAPACITY as u32).div_ceil(64), 1, 1);
+    pass.set_pipeline(clear);
+    pass.dispatch_workgroups(1, 1, 1);
     pass.set_pipeline(simulate);
     pass.dispatch_workgroups(gpu.capacity.div_ceil(64), 1, 1);
 }

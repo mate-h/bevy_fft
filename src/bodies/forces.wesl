@@ -78,7 +78,14 @@ struct ForceParams {
     slam_power: f32,
     body_count: u32,
     frame: u32,
-    _pad: u32,
+    /// Splash particles per m² of entering waterline surface per m/s above `splash_min_speed`
+    /// per second. Zero is off.
+    splash_rate: f32,
+    splash_min_speed: f32,
+    splash_size: f32,
+    splash_lifetime: f32,
+    /// Random share of the entry speed added in any direction.
+    splash_spread: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: ForceParams;
@@ -93,6 +100,78 @@ struct ForceParams {
 @group(0) @binding(7) var lod_displacement: texture_2d_array<f32>;
 @group(0) @binding(8) var lod_foam: texture_2d_array<f32>;
 @group(0) @binding(9) var lod_flow: texture_2d_array<f32>;
+
+struct Particle {
+    position: vec3<f32>,
+    size: f32,
+    velocity: vec3<f32>,
+    life: f32,
+}
+
+/// `WaterParticleQueue`: splashes go to the water particles for their next frame.
+struct ParticleQueue {
+    count: atomic<u32>,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+    items: array<Particle>,
+}
+
+const QUEUE_CAPACITY: u32 = 4096u;
+
+@group(0) @binding(10) var<storage, read_write> particle_queue: ParticleQueue;
+
+fn hash(v: u32) -> u32 {
+    var x = v;
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    return x ^ (x >> 16u);
+}
+
+fn random(state: ptr<function, u32>) -> f32 {
+    *state = hash(*state + 0x9e3779b9u);
+    return f32(*state >> 8u) / 16777216.0;
+}
+
+/// Throws water off a surface patch at the waterline that moves into the water at
+/// `normal_speed` along its outward normal `n`: up and out along the hull, with the water's
+/// velocity, in proportion to the patch's wetted area and how much faster than the threshold it
+/// enters.
+fn splash(index: u32, at: vec3<f32>, n: vec3<f32>, area: f32, normal_speed: f32, water: vec3<f32>) {
+    let excess = normal_speed - params.splash_min_speed;
+    if params.splash_rate <= 0.0 || excess <= 0.0 {
+        return;
+    }
+    let mean = params.splash_rate * area * excess * params.dt;
+    var rng = hash(index ^ hash(params.frame));
+    var count = u32(floor(mean));
+    if random(&rng) < fract(mean) {
+        count += 1u;
+    }
+    if count == 0u {
+        return;
+    }
+    let first = atomicAdd(&particle_queue.count, count);
+    let out = normalize(vec3<f32>(n.x, 0.0, n.z) + vec3<f32>(1.0e-4, 0.0, 0.0));
+    for (var k = 0u; k < count; k++) {
+        let slot = first + k;
+        if slot >= QUEUE_CAPACITY {
+            return;
+        }
+        var cone = vec3<f32>(random(&rng), random(&rng), random(&rng)) * 2.0 - 1.0;
+        cone /= max(length(cone), 1.0);
+        let launch = normal_speed * (0.5 + random(&rng));
+        var p: Particle;
+        p.position = at;
+        p.velocity = water + out * 0.6 * launch + vec3<f32>(0.0, launch, 0.0)
+            + cone * params.splash_spread * normal_speed;
+        p.size = params.splash_size * (0.5 + random(&rng));
+        p.life = params.splash_lifetime * (0.5 + random(&rng));
+        particle_queue.items[slot] = p;
+    }
+}
 
 var<workgroup> shared_buoyancy: array<vec4<f32>, WORKGROUP>;
 var<workgroup> shared_buoyancy_torque: array<vec4<f32>, WORKGROUP>;
@@ -224,6 +303,11 @@ fn body_forces(
 
         // Slamming: the growth rate of wetted area times normal speed, against the body's share
         // of momentum that this surface would have to stop within a frame.
+        // Splashes from surface at the waterline that moves into the water.
+        if fraction < 1.0 {
+            splash(index, vec3<f32>(p.x, water.height, p.z), n, area, normal_speed, water.velocity);
+        }
+
         let flux = area * max(normal_speed, 0.0);
         let rate = max(flux - patch_state[index], 0.0) / (total_area * max(params.dt, 1.0e-4));
         patch_state[index] = flux;

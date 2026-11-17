@@ -83,6 +83,40 @@ pub struct FloatingBodySettings {
     /// from 0 to 1. The head is measured against the surface plus the previous head, so taking
     /// it whole makes it swing from frame to frame.
     pub pressure_relaxation: f32,
+    /// Splashes thrown off the waterline into the water particles, when
+    /// [`WaterParticlesPlugin`](crate::particles::WaterParticlesPlugin) is in the app.
+    pub splash: FloatingBodySplash,
+}
+
+/// Water that surface at a body's waterline throws up as it moves into the water, as particles
+/// for [`WaterParticlesPlugin`](crate::particles::WaterParticlesPlugin). A partly wetted patch
+/// that moves into the water faster than [`Self::min_speed`] emits [`Self::rate`] particles per
+/// m² of its wetted area, per m/s of the excess, per second. They start at the waterline and fly
+/// up and out along the hull at about the entry speed. A dropped crate splashes this way, and so
+/// does a moving bow.
+#[derive(Clone, Copy, Debug, Reflect)]
+pub struct FloatingBodySplash {
+    /// Zero turns splashes off.
+    pub rate: f32,
+    pub min_speed: f32,
+    /// Mean quad edge in meters and mean lifetime in seconds. Each particle takes 0.5 to 1.5
+    /// times them.
+    pub size: f32,
+    pub lifetime: f32,
+    /// Random speed added in any direction, as a share of the entry speed.
+    pub spread: f32,
+}
+
+impl Default for FloatingBodySplash {
+    fn default() -> Self {
+        Self {
+            rate: 2000.0,
+            min_speed: 0.5,
+            size: 0.05,
+            lifetime: 1.2,
+            spread: 0.3,
+        }
+    }
 }
 
 impl Default for FloatingBodySettings {
@@ -101,6 +135,7 @@ impl Default for FloatingBodySettings {
             slam_rate_max: 0.0,
             slam_power: 2.0,
             pressure_relaxation: 0.25,
+            splash: FloatingBodySplash::default(),
         }
     }
 }
@@ -465,7 +500,11 @@ struct ForceParams {
     slam_power: f32,
     body_count: u32,
     frame: u32,
-    _pad: u32,
+    splash_rate: f32,
+    splash_min_speed: f32,
+    splash_size: f32,
+    splash_lifetime: f32,
+    splash_spread: f32,
 }
 
 fn push_vec4(bytes: &mut Vec<u8>, v: [f32; 4]) {
@@ -625,7 +664,11 @@ fn submit_floating_bodies(
             slam_power: s.slam_power,
             body_count: list.len() as u32,
             frame,
-            _pad: 0,
+            splash_rate: s.splash.rate.max(0.0),
+            splash_min_speed: s.splash.min_speed,
+            splash_size: s.splash.size,
+            splash_lifetime: s.splash.lifetime,
+            splash_spread: s.splash.spread,
         },
         voxels: state.voxels.clone(),
         patches: state.patches.clone(),
@@ -672,6 +715,7 @@ impl FromWorld for FloatingBodyPipeline {
                 texture_2d_array(unfiltered),
                 texture_2d_array(unfiltered),
                 texture_2d_array(unfiltered),
+                storage_buffer_sized(false, None),
             ),
         );
         let layout = BindGroupLayoutDescriptor::new("floating_body_layout", &entries);
@@ -761,6 +805,8 @@ struct FloatingBodyBindGroup {
     grid_buffers: std::collections::HashMap<Entity, GridBuffers>,
     /// Bound as the obstruction map of grids without one.
     placeholder: Option<TextureView>,
+    /// Bound as the particle queue when the water particles are not in the app.
+    no_queue: Option<Buffer>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -775,6 +821,7 @@ fn prepare_floating_bodies(
     lod_gpu: Res<WaterLodGpu>,
     heightfields: Query<(Entity, &WaterHeightfield)>,
     footprint_targets: Query<(Entity, &BodyFootprintTarget)>,
+    particle_queue: Option<Res<crate::particles::WaterParticleQueue>>,
     mut bind_group: ResMut<FloatingBodyBindGroup>,
 ) {
     let state = &mut *bind_group;
@@ -920,7 +967,24 @@ fn prepare_floating_bodies(
     ) else {
         return;
     };
-    state.params.set(frame.params);
+    // Without the water particles, splashes have nowhere to go: a small placeholder takes the
+    // binding and the rate is zero.
+    let mut params = frame.params;
+    if particle_queue.is_none() {
+        params.splash_rate = 0.0;
+    }
+    let placeholder_queue = state.no_queue.get_or_insert_with(|| {
+        device.create_buffer(&BufferDescriptor {
+            label: Some("floating_body_no_particle_queue"),
+            size: 48,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        })
+    });
+    let queue_buffer = particle_queue
+        .as_ref()
+        .map_or(placeholder_queue.clone(), |q| q.buffer.clone());
+    state.params.set(params);
     state.params.write_buffer(&device, &queue);
     let Some(params) = state.params.binding() else {
         return;
@@ -940,6 +1004,7 @@ fn prepare_floating_bodies(
             &displacement.texture_view,
             &foam.texture_view,
             &flow.texture_view,
+            queue_buffer.as_entire_binding(),
         )),
     ));
 }

@@ -6,6 +6,8 @@
 //! the frames the readback takes, and feeds Rapier's velocities back for drag. Rapier adds gravity
 //! and the collisions between bodies.
 //!
+//! Bodies throw up splashes into the water particles where their waterline moves into the water.
+//!
 //! The panel shows each body's submerged share and drops them all again from above the water.
 
 use std::sync::Arc;
@@ -28,7 +30,7 @@ use bevy::{
     prelude::*,
 };
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui, input::EguiWantsInput};
-use bevy_fft::prelude::*;
+use bevy_fft::{particles::WaterParticlesPlugin, prelude::*};
 use bevy_rapier3d::prelude::*;
 
 #[path = "../common/screenshot.rs"]
@@ -54,6 +56,7 @@ fn main() {
             FftPlugin,
             OceanPlugin,
             FloatingBodyPlugin,
+            WaterParticlesPlugin,
             RapierPhysicsPlugin::<NoUserData>::default(),
             EguiPlugin::default(),
             screenshot::ScreenshotOnEnvPlugin,

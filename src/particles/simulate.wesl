@@ -75,6 +75,19 @@ struct ParticleParams {
 @group(0) @binding(7) var<storage, read_write> deposit: array<atomic<u32>>;
 /// Water velocity: horizontal in `.xy` and the rate the surface rises in `.z`.
 @group(0) @binding(8) var lod_flow: texture_2d_array<f32>;
+/// Particles other GPU passes queued since the last frame, such as floating bodies' splashes.
+@group(0) @binding(9) var<storage, read_write> queue: ParticleQueue;
+
+struct ParticleQueue {
+    /// Particles appended. Past `QUEUE_CAPACITY` they were dropped.
+    count: atomic<u32>,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+    items: array<Particle>,
+}
+
+const QUEUE_CAPACITY: u32 = 4096u;
 
 const FOAM_DEPOSIT_UNIT: f32 = 65536.0;
 
@@ -139,6 +152,21 @@ fn hash(v: u32) -> u32 {
 fn random(state: ptr<function, u32>) -> f32 {
     *state = hash(*state + 0x9e3779b9u);
     return f32(*state >> 8u) / 16777216.0;
+}
+
+/// Spawns the particles other passes queued.
+@compute @workgroup_size(64)
+fn spawnQueued(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= min(atomicLoad(&queue.count), QUEUE_CAPACITY) {
+        return;
+    }
+    emit(queue.items[id.x]);
+}
+
+/// Empties the queue once it has been spawned.
+@compute @workgroup_size(1)
+fn clearQueue() {
+    atomicStore(&queue.count, 0u);
 }
 
 /// Spray from breaking crests. One thread per texel of the finest `spray_slices` slices; a
