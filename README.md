@@ -143,6 +143,7 @@ The FFT puts the zero frequency at index `(0, 0)`, with positive frequencies fir
 - [Nested shallow water grids](docs/shallow_water_nesting.md): a finer grid inside a coarser one that follows the camera.
 - [Water particles](docs/particles.md): spray, splashes, landing foam and the particle budget.
 - [Dispersive waves](docs/dispersive.md): the hybrid split and the NumPy reference.
+- [Wakes that outlive the patch](docs/long_lived_wakes.md): a research spike on Water Surface Wavelets and wave packets.
 - [Roadmap](ROADMAP.md): planned and research directions.
 - [Changelog](CHANGELOG.md)
 
