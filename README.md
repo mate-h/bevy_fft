@@ -18,6 +18,7 @@ bevy_fft runs 2D Fast Fourier Transforms in compute shaders on Bevy's render gra
 - **Breaking fronts.** Breaking wave fronts in shallow water traced as tracked lines along the crest (Thuerey et al. 2007), for spray, foam and breakers to follow.
 - **Queries.** Read the water height and velocity back on the CPU, for buoys and floating objects.
 - **Floating bodies.** Voxelized hulls whose buoyancy and drag come from the live water on the GPU, so currents and wakes push them, returned as one force and torque per body.
+- **Water particles.** Spray from breaking crests and splashes from floating bodies, spawned, simulated and landed on the GPU, where they leave foam. Drops are lit by the sun, smeared by their motion and fade into the water.
 
 ## Gallery
 
@@ -54,11 +55,11 @@ The examples are the best starting point for each feature. `bevy_fft::prelude` e
 | Example | What it shows | Run |
 |---|---|---|
 | `fft` | Forward FFT, a band-pass on the spectrum, and inverse FFT on an image | `cargo run --example fft` |
-| `ocean` | FFT ocean cascades, with a quadtree or clipmap surface | `cargo run --example ocean --features free_camera` |
+| `ocean` | FFT ocean cascades, with a quadtree or clipmap surface and spray from breaking crests | `cargo run --example ocean --features free_camera` |
 | `shallow_water` | The shallow water solver with a brush on a PBR plane | `cargo run --example shallow_water --features free_camera` |
 | `dispersive` | Dispersive waves on their own, with mouse-drawn wakes | `cargo run --example dispersive --features free_camera` |
-| `floating` | Crates, a log and a ball floating on the ocean, with water forces from the GPU applied by Rapier | `cargo run --example floating --features free_camera` |
-| `pool` | A crate dropped into a shallow water river, a towed log's wake and a log dam, with bodies pressing the water | `cargo run --example pool --features free_camera` |
+| `floating` | Crates, a log and a ball floating on the ocean, with water forces from the GPU applied by Rapier, splashing as they land | `cargo run --example floating --features free_camera` |
+| `pool` | A crate dropped into a shallow water river, a towed log's wake, a log dam and a fountain of water particles | `cargo run --example pool --features free_camera` |
 | `river_banks` | Runs a baked terrain's rivers to a steady state and reports leaks and low banks | `cargo run --release --example river_banks -- --demo` |
 | `wake` | A dispersive patch on the FFT ocean that follows a scripted boat | `cargo run --example wake --features free_camera` |
 | `ewave` | A periodic eWave height field | `cargo run --example ewave --features free_camera` |
@@ -84,6 +85,8 @@ These environment variables change the beach:
 | `BEACH_TRACE_STEPS` | Steps in the water's screen-space traces, 6 by default. The panel has a slider too. |
 | `BEACH_CAMERA` | Start camera as `x,y,z,tx,ty,tz`: position, then target. |
 | `BEACH_FRONTS` | Draw the traced breaking fronts from the start. The panel toggles them too. |
+| `BEACH_NEST` | Cells per edge of the finer grid nested around the camera, 288 by default. `0` turns it off. |
+| `BEVY_FFT_SPRAY` | `0` starts with the crest spray off. The Spray panel toggles it too, here and in `ocean`. |
 
 To bake another bay or river, [`tools/bake_topobathy.py`](tools/bake_topobathy.py) fetches heights from Esri TopoBathy, carves river channels along splines, and writes terrain tiles and a sea-floor depth texture. It needs an ArcGIS API key in `ARCGIS_API_KEY`.
 
@@ -98,6 +101,7 @@ To bake another bay or river, [`tools/bake_topobathy.py`](tools/bake_topobathy.p
 | [`dispersive`](src/dispersive/mod.rs) | Hybrid shallow water and Airy waves |
 | [`ewave`](src/ewave/mod.rs) | eWave in Fourier space |
 | [`bodies`](src/bodies/mod.rs) | Floating bodies: voxelized hulls and GPU water forces (buoyancy, friction, pressure drag, slamming) per body |
+| [`particles`](src/particles/mod.rs) | `WaterParticlesPlugin`: the GPU particle pool, crest spray, body splashes, landing foam and spray drawing |
 | [`complex`](src/complex/mod.rs) | Complex number helpers for WESL shaders |
 
 Don't add `EwavePlugin` and `DispersivePlugin` to the same app: both insert their passes right after the FFT resolve.
@@ -135,6 +139,8 @@ The FFT puts the zero frequency at index `(0, 0)`, with positive frequencies fir
 
 - [Water rendering](docs/water_rendering.md): transmission over coastal terrain and how to set it up.
 - [Shallow water](docs/shallow_water.md): the solver, its borders and its coupling to the ocean.
+- [Nested shallow water grids](docs/shallow_water_nesting.md): a finer grid inside a coarser one that follows the camera.
+- [Water particles](docs/particles.md): spray, splashes, landing foam and the particle budget.
 - [Dispersive waves](docs/dispersive.md): the hybrid split and the NumPy reference.
 - [Roadmap](ROADMAP.md): planned and research directions.
 - [Changelog](CHANGELOG.md)
