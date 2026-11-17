@@ -22,6 +22,10 @@
 //! follows the camera inside it, nested both ways, and takes its bed from the 1 m data as it
 //! moves. `BEACH_NEST` sets its cells per edge, 288 by default, and 0 turns it off.
 //!
+//! The Lumahaʻi River runs in over the map's south edge, along its OpenStreetMap centreline, as a
+//! fixed discharge of 4 m³/s, and pours into the bay. `BEACH_RIVER` sets the discharge, and 0
+//! turns it off.
+//!
 //! The elevation and class rasters come from the matching 1 m shoreline square in
 //! `~/Downloads/hawaii_topobathy`. Prepare the CC0 texture arrays, class map, sand capillary mask,
 //! and planar height tiles with the neighboring bevy_terrain processor:
@@ -60,7 +64,10 @@ use bevy_egui::{
     EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui,
     input::{EguiWantsInput, write_egui_wants_input_system},
 };
-use bevy_fft::prelude::*;
+use bevy_fft::{
+    prelude::*,
+    shallow_water::{RiverSpline, ShallowWaterBorderProfile},
+};
 use bevy_terrain::prelude::{
     SpawnTerrainCommandsExt, TerrainMaterialPlugin, TerrainPlugin, TerrainSettings,
     TerrainShadowSettings, TerrainViewConfig,
@@ -103,6 +110,58 @@ fn cell_size() -> f32 {
 /// Shallow water cells per edge. The grid covers the terrain square, centred on the origin.
 fn grid() -> u32 {
     (TERRAIN_SIDE / cell_size()).round() as u32
+}
+
+/// Centreline of the Lumahaʻi River in map meters, from just outside the map's south edge to its
+/// mouth, from OpenStreetMap (© OpenStreetMap contributors, ODbL), projected from WGS 84 into the
+/// LiDAR tile's UTM zone 4N frame. The river swings out past the west edge for about 150 m; that
+/// stretch is clamped 8 m inside it, so the river stays on the grid from its inflow to the sea.
+const RIVER: [Vec2; 34] = [
+    Vec2::new(-940.4, -1033.1),
+    Vec2::new(-910.4, -987.4),
+    Vec2::new(-905.4, -971.6),
+    Vec2::new(-898.6, -932.0),
+    Vec2::new(-883.2, -886.3),
+    Vec2::new(-873.4, -873.0),
+    Vec2::new(-857.5, -853.5),
+    Vec2::new(-826.2, -792.0),
+    Vec2::new(-808.3, -725.0),
+    Vec2::new(-805.2, -682.4),
+    Vec2::new(-809.9, -637.2),
+    Vec2::new(-815.9, -601.9),
+    Vec2::new(-815.8, -565.9),
+    Vec2::new(-824.8, -543.3),
+    Vec2::new(-831.5, -515.3),
+    Vec2::new(-842.3, -487.8),
+    Vec2::new(-848.9, -443.3),
+    Vec2::new(-890.3, -384.7),
+    Vec2::new(-909.2, -365.6),
+    Vec2::new(-967.7, -306.5),
+    Vec2::new(-1016.0, -202.7),
+    Vec2::new(-1016.0, -146.0),
+    Vec2::new(-1016.0, -92.0),
+    Vec2::new(-1016.0, -62.1),
+    Vec2::new(-1016.0, -46.5),
+    Vec2::new(-973.2, -31.7),
+    Vec2::new(-946.6, -8.0),
+    Vec2::new(-917.6, 23.7),
+    Vec2::new(-917.8, 61.2),
+    Vec2::new(-960.7, 151.7),
+    Vec2::new(-958.4, 210.9),
+    Vec2::new(-924.9, 239.5),
+    Vec2::new(-872.5, 284.9),
+    Vec2::new(-806.7, 372.1),
+];
+/// Channel width in meters where the river enters.
+const RIVER_WIDTH: f32 = 20.0;
+
+/// The river's discharge in m³/s, 4 unless `BEACH_RIVER` sets it. 0 turns the inflow off.
+fn river_discharge() -> f32 {
+    std::env::var("BEACH_RIVER")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(4.0)
+        .max(0.0)
 }
 
 /// Cells per edge of the finer grid nested around the camera, with a third of the cell width,
@@ -354,6 +413,20 @@ fn setup(
         .collect();
     controller.bed_source = images.add(bed_source_image(grid, grid, &heights));
     controller.placement = Some(placement);
+    // The river runs in over the south edge as a fixed discharge and pours into the bay.
+    if river_discharge() > 0.0 {
+        let mut profile = ShallowWaterBorderProfile::new(UVec2::splat(grid));
+        profile.add_river(
+            &RiverSpline {
+                points: RIVER.to_vec(),
+                width: RIVER_WIDTH,
+                discharge: river_discharge(),
+                outflow_slope: 0.0,
+            },
+            &placement,
+        );
+        controller.border_profile = Some(images.add(profile.image()));
+    }
     controller.preset_index = SHALLOW_WATER_PRESET_BED_SOURCE;
     controller.fill_level = SEA_LEVEL;
     controller.pml_eta_rest = SEA_LEVEL;

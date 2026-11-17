@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The `beach` example feeds the Lumahaʻi River in over the map's south edge along its OpenStreetMap centreline, 4 m³/s by default (`BEACH_RIVER`).
 - [docs/particles.md](docs/particles.md) describes the water particles.
 - Water particle budget: crest spray thins with distance from the viewer while its drops grow to keep the same coverage, `WaterParticleSettings::with_quality` sets the pool and spray budgets for `WaterParticleQuality`, `WaterCrestSpray::debug_potential` marks where spray spawns, and `WaterParticleStats` reads the pool's counters back when `read_counters` is on.
 - Water particles look like spray: drops scatter the sun forward with a Henyey-Greenstein phase function and take the sky's light, smear along their motion, keep at least 1.5 pixels on screen with their opacity cut by the area they lack, and fade into the depth prepass behind them. `WaterParticleSettings` sets each.
@@ -48,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A shallow water grid's ocean band and PML no longer drain land along an ocean border, so a river that runs in over a land edge keeps its water.
 - Shallow water grids keep the ocean's short waves and whitecaps. The split between the grid and the FFT detail counted a cascade as resolved by its longest wave, so a 2 m grid was fed the 48 m cascade's 1.5 to 8 m waves, damped them away, and drew no detail in their place. Grids now take a cascade only while its longest wave spans 16 cells. The `beach` example's water bed no longer reads the terrain's last texel rows, which the terrain processor fills toward 0 m, raising a ridge to sea level along the map edge.
 - Water coming in over a shallow water grid's edge, from a river inflow or a source border, is no longer scaled down by the outflow limit of the cell it enters.
 - Deep-mode dispersive patches now carry waves shorter than 2π h / 44, 14 m at 100 m deep. Metal evaluates `tanh(k h)` through an exponential that overflowed, and the NaN zeroed those waves, so a boat's wake lost its divergent waves and cusps and narrowed to about 9 degrees. A towed pressure now trails a Kelvin wake at 19 degrees. The ocean's directional spread clamps its `tanh` argument the same way.

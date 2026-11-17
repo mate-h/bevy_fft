@@ -379,7 +379,11 @@ fn oceanBand(@builtin(global_invocation_id) id: vec3u) {
     let b = ocean_band_weight(i32(id.x), i32(id.y));
     if (b <= 0.0) { return; }
     var bw = textureLoad(bedWaterTexture, id.xy);
-    let h_target = max(0.0, target_eta(id.xy) - bw.x);
+    // On land the sea has nothing to say, so a river that runs in over a land edge keeps its
+    // water.
+    let sea = target_eta(id.xy);
+    if (bw.x >= sea) { return; }
+    let h_target = max(0.0, sea - bw.x);
     bw.y = max(0.0, (1.0 - b) * bw.y + b * h_target);
     textureStore(bedWaterTexture, id.xy, bw);
 }
@@ -1156,6 +1160,12 @@ fn pmlStep(@builtin(global_invocation_id) id: vec3u) {
     var bw = textureLoad(bedWaterTexture, id.xy);
     let H = bw.x;
     let h = bw.y;
+    // The strip absorbs the sea. Land above it holds no sea to absorb, and a river running in
+    // over the edge there keeps its water.
+    if (H >= eta_rest) {
+        textureStore(pmlStateTexture, id.xy, vec4f(0.0));
+        return;
+    }
     let h_rest = max(0.0, eta_rest - H);
     let h_ex = h - h_rest;
     let p_old = textureLoad(pmlStateTexture, id.xy);
@@ -1199,6 +1209,9 @@ fn pmlDampFaceU(@builtin(global_invocation_id) id: vec3u) {
     if (sig0 <= 0.0) { return; }
     let ic0 = clamp(fi - 1, 0, nx() - 1);
     let ic1 = clamp(fi, 0, nx() - 1);
+    let c0 = vec2u(u32(ic0), u32(jc));
+    let c1 = vec2u(u32(ic1), u32(jc));
+    if (H_at(ic0, jc) >= target_eta(c0) && H_at(ic1, jc) >= target_eta(c1)) { return; }
     let uv = 0.5 * (cell_center_uv(ic0, jc) + cell_center_uv(ic1, jc));
     let cx = pml_directional_scales(uv).x;
     let sig = sig0 * cx;
@@ -1220,6 +1233,9 @@ fn pmlDampFaceW(@builtin(global_invocation_id) id: vec3u) {
     if (sig0 <= 0.0) { return; }
     let jc0 = clamp(fj - 1, 0, ny() - 1);
     let jc1 = clamp(fj, 0, ny() - 1);
+    let c0 = vec2u(u32(ic), u32(jc0));
+    let c1 = vec2u(u32(ic), u32(jc1));
+    if (H_at(ic, jc0) >= target_eta(c0) && H_at(ic, jc1) >= target_eta(c1)) { return; }
     let uv = 0.5 * (cell_center_uv(ic, jc0) + cell_center_uv(ic, jc1));
     let cz = pml_directional_scales(uv).y;
     let sig = sig0 * cz;

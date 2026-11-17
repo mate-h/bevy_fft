@@ -208,6 +208,12 @@ fn valley_river() -> RiverSpline {
 
 /// Runs the valley until it settles and returns its bed and depth per cell.
 fn settled_valley(notch: bool) -> (Vec<f32>, Vec<f32>) {
+    settled_valley_with(notch, false)
+}
+
+/// The same, with ocean borders and a PML on every edge, around a sea far below the valley, the
+/// way the beach's river runs in over a land edge.
+fn settled_valley_with(notch: bool, ocean_edges: bool) -> (Vec<f32>, Vec<f32>) {
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -253,6 +259,15 @@ fn settled_valley(notch: bool) -> (Vec<f32>, Vec<f32>) {
     controller.dt = DT;
     controller.manning_n = MANNING_N;
     controller.placement = Some(placement);
+    if ocean_edges {
+        controller.left_border = ShallowWaterBorder::Ocean;
+        controller.right_border = ShallowWaterBorder::Ocean;
+        controller.bottom_border = ShallowWaterBorder::Ocean;
+        controller.top_border = ShallowWaterBorder::Ocean;
+        controller.pml_width = 8;
+        controller.pml_eta_rest = 0.0;
+        controller.ocean_band_cells = 5.0;
+    }
     let mut profile = ShallowWaterBorderProfile::new(UVec2::new(VX, VY));
     profile.add_river(&valley_river(), &placement);
     controller.border_profile = Some(images.add(profile.image()));
@@ -342,4 +357,25 @@ fn the_bank_checker_finds_a_notch_in_a_settled_river() {
         "low bank at {:?}",
         low.along
     );
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn a_river_runs_in_over_an_ocean_border_on_land() {
+    // The ocean band and the PML pull the sea toward its level. On land, where the sea is far
+    // below, they leave the water alone, so a river running in over that edge keeps it.
+    let (_, depth) = settled_valley_with(false, true);
+    let mut sum = 0.0;
+    let mut count = 0;
+    for j in 0..VY {
+        let z = j as f32 + 0.5 - 0.5 * VY as f32;
+        if z.abs() < 3.0 {
+            for i in 30..66 {
+                sum += depth[(j * VX + i) as usize];
+                count += 1;
+            }
+        }
+    }
+    let mean = sum / count as f32;
+    assert!(mean > 0.4, "the channel holds {mean} m of water");
 }

@@ -86,6 +86,7 @@ These environment variables change the beach:
 | `BEACH_CAMERA` | Start camera as `x,y,z,tx,ty,tz`: position, then target. |
 | `BEACH_FRONTS` | Draw the traced breaking fronts from the start. The panel toggles them too. |
 | `BEACH_NEST` | Cells per edge of the finer grid nested around the camera, 288 by default. `0` turns it off. |
+| `BEACH_RIVER` | Discharge of the Lumahaʻi River in m³/s, 4 by default, fed in over the south edge along its OpenStreetMap centreline. `0` turns it off. |
 | `BEVY_FFT_SPRAY` | `0` starts with the crest spray off. The Spray panel toggles it too, here and in `ocean`. |
 
 To bake another bay or river, [`tools/bake_topobathy.py`](tools/bake_topobathy.py) fetches heights from Esri TopoBathy, carves river channels along splines, and writes terrain tiles and a sea-floor depth texture. It needs an ArcGIS API key in `ARCGIS_API_KEY`.
