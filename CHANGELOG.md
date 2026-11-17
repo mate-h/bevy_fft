@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The foam lane's alpha holds the mean square slope of the ocean waves each LOD slice is too coarse for, from each cascade's slope variance (`OceanSlopeVariance`, `slope_variance`), and the water surface adds it to its roughness, so distant glitter widens as it should.
 - Flow detail normals: short ripples in the foam texture's green and blue channels, read through the foam's advected texture coordinates, roughen flowing water by drift speed and strain. `WaterSurfaceUniform::flow_detail` sets their slope, and the surface material gains a `lod_drift` binding.
 - `ShallowWaterWaterfalls` throws water particles off waterfall lips in a shallow water grid, where the CMF10 test finds water pouring over a bed drop of more than 1.5 cell widths, in proportion to the water crossing the lip.
 - `ShallowWaterSettled` caches a settled grid, `capture_shallow_water_settled` takes one from a running grid, and `ShallowWaterController::settled` starts every reset from it, so a river starts settled instead of filling its channel. The beach bakes and loads one with `BEACH_SETTLED` and `BEACH_SETTLED_AFTER`.

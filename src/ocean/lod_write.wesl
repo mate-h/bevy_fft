@@ -8,7 +8,9 @@
 // which also keeps last frame's Z. Flow is the change in displacement since the previous frame.
 // Linear waves move each surface particle with the time derivative of its displacement, so this is
 // the orbital velocity. It uses the physical displacement, without the artistic choppiness factor.
-// Drift is the cascades' summed Stokes drift, which the CPU integrates from the spectrum.
+// Drift is the cascades' summed Stokes drift, which the CPU integrates from the spectrum. The foam
+// lane's alpha takes the mean square slope of the waves the slice drops, from each cascade's slope
+// variance, which the CPU integrates too.
 //
 // Breaking follows Dupuy and Bruneton (2012, §3). A texel breaks where the determinant of the
 // horizontal displacement Jacobian drops below `foam_cutoff`, the same measure the far range takes
@@ -30,6 +32,8 @@ struct OceanLodWriteParams {
     cascade_tile_sizes: vec4<f32>,
     /// One for cascades whose waves count toward breaking, zero for the rest.
     cascade_breaking: vec4<f32>,
+    /// Mean square slope of each cascade's waves.
+    cascade_slope_variance: vec4<f32>,
     cascade_count: u32,
     amplitude: f32,
     choppiness: f32,
@@ -179,8 +183,12 @@ fn ocean_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     let far_weight = smoothstep(params.far_foam_texel, 2.0 * params.far_foam_texel, texel);
     let use_near = far_weight < 1.0;
     let use_far = far_weight > 0.0;
+    // Mean square slope of the waves this slice is too coarse to hold, which the surface adds to
+    // its roughness (Bruneton et al. 2010).
+    var unresolved = 0.0;
     for (var i = 0u; i < count; i++) {
         let w = cascade_weight(i, texel);
+        unresolved += (1.0 - w) * params.cascade_slope_variance[i];
         let breaking = params.cascade_breaking[i];
         let near_breaking = use_near && breaking > 0.0;
         if w <= 0.0 && !near_breaking && !(use_far && breaking > 0.0) {
@@ -221,7 +229,7 @@ fn ocean_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     let foam = mix(near, far, far_weight);
     let scaled = vec4<f32>(disp.rgb * amp, disp.a * chop);
     textureStore(displacement_out, gid.xy, slice, scaled);
-    textureStore(foam_out, gid.xy, slice, vec4<f32>(foam, params.depth, dz * chop, 1.0));
+    textureStore(foam_out, gid.xy, slice, vec4<f32>(foam, params.depth, dz * chop, unresolved));
     let rate = amp * params.inv_dt;
     let velocity = vec3<f32>(change.a, dz_change, change.b) * rate;
     textureStore(flow_out, gid.xy, slice, vec4<f32>(velocity, 0.0));

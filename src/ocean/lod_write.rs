@@ -24,7 +24,7 @@ use crate::{
     fft::FftTextures,
     ocean::{
         OCEAN_MAX_CASCADES, OceanCascade, OceanFoamMask, OceanFoamPhase, OceanSimSettings,
-        OceanStokesDrift, OceanSurfaceSettings,
+        OceanSlopeVariance, OceanStokesDrift, OceanSurfaceSettings,
     },
     water::{
         WATER_LOD_DRIFT_FORMAT, WATER_LOD_SURFACE_FORMAT, WaterLodData, WaterLodGpu, WaterLodSlices,
@@ -38,6 +38,9 @@ pub struct OceanLodWriteParams {
     /// One for cascades whose waves count toward breaking, zero for the rest. See
     /// [`OceanSurfaceSettings::breaking_wavelength`].
     pub cascade_breaking: Vec4,
+    /// Mean square slope of each cascade's waves, after amplitude shaping. A slice keeps what it
+    /// drops of it in the foam lane's alpha.
+    pub cascade_slope_variance: Vec4,
     pub cascade_count: u32,
     pub amplitude: f32,
     pub choppiness: f32,
@@ -79,6 +82,7 @@ pub(super) fn gather_ocean_lod_write(
         &OceanFoamPhase,
         Option<&OceanCascade>,
         Option<&OceanStokesDrift>,
+        Option<&OceanSlopeVariance>,
     )>,
     settings: Res<OceanSurfaceSettings>,
     time: Res<Time>,
@@ -90,7 +94,7 @@ pub(super) fn gather_ocean_lod_write(
 
     let mut slots: Vec<_> = cascades
         .iter()
-        .filter_map(|(sim, tex, mask, phase, cascade, drift)| {
+        .filter_map(|(sim, tex, mask, phase, cascade, drift, variance)| {
             let slot = cascade.map_or(0, |c| c.index as usize);
             // Same half that `sync_ocean_foam_display` treats as most recent.
             let latest = if phase.0 % 2 == 0 {
@@ -109,6 +113,7 @@ pub(super) fn gather_ocean_lod_write(
                     drift.map_or(Vec2::ZERO, |d| d.0),
                     sim.band_k_min,
                     mask.jacobian.clone(),
+                    variance.map_or(0.0, |v| v.0),
                 )
             })
         })
@@ -121,10 +126,13 @@ pub(super) fn gather_ocean_lod_write(
     let mut tiles = Vec4::ONE;
     let mut breaking = Vec4::ZERO;
     let mut drift = Vec2::ZERO;
+    let mut slope_variance = Vec4::ZERO;
     let breaking_k = std::f32::consts::TAU / settings.breaking_wavelength.max(1e-6);
-    for (i, (_, tile, disp, foam, _, _, cascade_drift, k_min, jacobian)) in slots.iter().enumerate()
+    for (i, (_, tile, disp, foam, _, _, cascade_drift, k_min, jacobian, variance)) in
+        slots.iter().enumerate()
     {
         tiles[i] = *tile;
+        slope_variance[i] = *variance;
         breaking[i] = if *k_min < breaking_k { 1.0 } else { 0.0 };
         drift += *cascade_drift;
         frame.displacement.push(disp.clone());
@@ -141,6 +149,8 @@ pub(super) fn gather_ocean_lod_write(
     frame.params = OceanLodWriteParams {
         cascade_tile_sizes: tiles,
         cascade_breaking: breaking,
+        // Slopes go with wave height, so the variance takes the height gain twice.
+        cascade_slope_variance: slope_variance * settings.amplitude * settings.amplitude,
         cascade_count: slots.len() as u32,
         amplitude: settings.amplitude,
         choppiness: settings.choppiness,

@@ -6,6 +6,10 @@
 //! scaled by cosh(2kh) / (2 sinh²(kh)) in finite depth. Summed over the spectrum this gives
 //! u_s = ∫ 2 ω k F(kh) Φ(k) k̂ d²k, since a mode of amplitude `a` carries variance a² / 2. Foam and
 //! other floating matter in the undisplaced coordinates of the LOD data move with it.
+//!
+//! The mean square slope of the waves is ∫ k² Φ(k) d²k, the sum of the slope variances along X
+//! and Z. A slice of the water LOD data too coarse for a cascade's waves keeps the slope variance it
+//! drops, so the surface can widen its reflection lobe by it (Bruneton et al. 2010).
 
 use std::f32::consts::PI;
 
@@ -155,7 +159,44 @@ pub fn stokes_drift(settings: &OceanSimSettings) -> Vec2 {
     drift * settings.amplitude_scale * settings.amplitude_scale
 }
 
-/// Recomputes [`OceanStokesDrift`] for cascades whose spectrum settings changed.
+/// Mean square slope of one cascade's waves, along X and Z together, before any amplitude
+/// shaping applied after the FFT. Kept up to date by `update_ocean_stokes_drift`.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Reflect)]
+pub struct OceanSlopeVariance(pub f32);
+
+/// Mean square slope ∫ k² Φ(k) d²k of the waves one cascade simulates, over the same wavenumbers
+/// as [`stokes_drift`]. The directional spread integrates to one, so only the radial part counts.
+pub fn slope_variance(settings: &OceanSimSettings) -> f32 {
+    let g = settings.gravity;
+    let depth = settings.depth;
+    let delta_k = 2.0 * PI / settings.tile_size.max(1e-3);
+    let k_lo = settings.band_k_min.max(delta_k);
+    let k_hi = settings
+        .band_k_max
+        .min(0.5 * delta_k * settings.texture_size as f32);
+    if k_hi.partial_cmp(&k_lo) != Some(std::cmp::Ordering::Greater) {
+        return 0.0;
+    }
+    let omega_p = (OCEAN_PM_PEAK_COEFF * g / settings.wind_speed.max(1e-6)).clamp(1e-4, 1e4);
+    let cutoff = settings.small_wave_cutoff.max(1e-4);
+    let log_lo = k_lo.ln();
+    let d_log = (k_hi.ln() - log_lo) / RADIAL_SAMPLES as f32;
+    let mut variance = 0.0;
+    for i in 0..RADIAL_SAMPLES {
+        let k = (log_lo + (i as f32 + 0.5) * d_log).exp();
+        let omega = omega_finite_depth(k, depth, g);
+        let s = pierson_moskowitz_s(omega, omega_p, g)
+            * jonswap_factor(omega, omega_p, settings.peak_enhancement)
+            * tma_factor(omega, depth, g);
+        let radial =
+            s * domega_dk_finite_depth(k, depth, g).abs() * (-k * k * cutoff * cutoff).exp();
+        variance += k * k * radial * k * d_log;
+    }
+    variance * settings.amplitude_scale * settings.amplitude_scale
+}
+
+/// Recomputes [`OceanStokesDrift`] and [`OceanSlopeVariance`] for cascades whose spectrum
+/// settings changed.
 #[allow(clippy::type_complexity)]
 pub(super) fn update_ocean_stokes_drift(
     mut commands: Commands,
@@ -166,6 +207,9 @@ pub(super) fn update_ocean_stokes_drift(
 ) {
     for (entity, settings, current) in &cascades {
         let drift = OceanStokesDrift(stokes_drift(settings));
+        commands
+            .entity(entity)
+            .insert(OceanSlopeVariance(slope_variance(settings)));
         if current != Some(&drift) {
             commands.entity(entity).insert(drift);
         }
@@ -211,6 +255,30 @@ mod tests {
         s.amplitude_scale = 2.0;
         let doubled = stokes_drift(&s).length();
         assert!((doubled / base - 4.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn slope_variance_adds_over_bands_and_grows_with_wind() {
+        let s = wide_cascade();
+        let whole = slope_variance(&s);
+        let split = 0.5;
+        let low = slope_variance(&OceanSimSettings {
+            band_k_max: split,
+            ..s.clone()
+        });
+        let high = slope_variance(&OceanSimSettings {
+            band_k_min: split,
+            ..s.clone()
+        });
+        assert!(
+            whole > 0.0 && (low + high - whole).abs() < 0.02 * whole,
+            "{low} {high} {whole}"
+        );
+        let windier = slope_variance(&OceanSimSettings {
+            wind_speed: 2.0 * s.wind_speed,
+            ..s.clone()
+        });
+        assert!(windier > whole, "{windier} {whole}");
     }
 
     #[test]

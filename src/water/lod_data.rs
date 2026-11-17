@@ -75,8 +75,9 @@ pub struct WaterLodSlices {
 /// are the same lanes as the FFT spatial output, already scaled, so contributions from several
 /// solvers add up linearly. `foam` stores how strongly each texel is breaking this frame, from 0 to
 /// 1, in its red channel, which the foam sim in [`super::WaterFoamSettings`] turns into lasting
-/// foam. Its green channel holds the depth of the water column in meters and its blue channel the
-/// horizontal displacement along Z in meters. `flow` stores the water velocity at the surface in meters per second: X in red, Z
+/// foam. Its green channel holds the depth of the water column in meters, its blue channel the
+/// horizontal displacement along Z in meters, and its alpha the mean square slope of the waves too
+/// short for the slice, which the ocean writes and the surface adds to its roughness. `flow` stores the water velocity at the surface in meters per second: X in red, Z
 /// in green, and vertical in blue. Its alpha holds the pressure head in meters by which floating
 /// bodies press the surface down, so the height plus alpha is the surface the water would have
 /// without them. `drift` stores the mean horizontal velocity that carries floating

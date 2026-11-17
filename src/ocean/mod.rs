@@ -38,7 +38,7 @@ mod shallow_water_forcing;
 mod spectrum;
 
 pub use clipmap::OceanClipmap;
-pub use spectrum::{OceanStokesDrift, stokes_drift};
+pub use spectrum::{OceanSlopeVariance, OceanStokesDrift, slope_variance, stokes_drift};
 
 pub use query::{
     OCEAN_QUERY_MAX_POINTS, OceanQueries, OceanQueryReadback, OceanQueryResults, OceanSample,
@@ -217,6 +217,7 @@ impl Plugin for OceanPlugin {
             .init_resource::<OceanSurfaceSettings>()
             .register_type::<OceanCascade>()
             .register_type::<OceanStokesDrift>()
+            .register_type::<OceanSlopeVariance>()
             .register_type::<OceanClipmap>()
             .add_systems(Update, clipmap::build_ocean_clipmaps)
             .add_systems(

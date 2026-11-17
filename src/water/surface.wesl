@@ -242,13 +242,23 @@ fn water_pixel_normal(pick: LodPick) -> vec3<f32> {
 /// Depth reported past the coarsest slice, deep enough that no bed shows through.
 const OPEN_WATER_DEPTH: f32 = 1000.0;
 
-/// Active foam in `.x`, residual foam in `.y` and water depth in meters in `.z` at undisplaced
-/// position `xz`, read at its pick. Foam fades out past the coarsest slice.
-fn water_foam_and_depth(pick: LodPick) -> vec3<f32> {
+/// Active foam in `.x`, residual foam in `.y`, water depth in meters in `.z` and the mean square
+/// slope of the waves too short for the slice in `.w`, at undisplaced position `xz`, read at its
+/// pick. Foam fades out past the coarsest slice.
+fn water_foam_and_depth(pick: LodPick) -> vec4<f32> {
     let f = sample_pick_filtered(lod_foam, lod_sampler, pick);
     let state = sample_pick(lod_foam_state, pick, 1u, 0u);
     let c = pick.coverage;
-    return vec3<f32>(state.rg * c, mix(OPEN_WATER_DEPTH, f.g, c));
+    return vec4<f32>(state.rg * c, mix(OPEN_WATER_DEPTH, f.g, c), max(f.a, 0.0) * c);
+}
+
+/// Perceptual roughness of a surface of `perceptual_roughness` whose facets also carry waves of
+/// mean square slope `variance` too short to resolve. As Bruneton et al. (2010) widen the sea's
+/// reflection lobe by the variance of its unresolved slopes, the variances add: a GGX lobe's
+/// width α is about its root mean square slope, so α² grows by the variance.
+fn water_unresolved_roughness(perceptual_roughness: f32, variance: f32) -> f32 {
+    let alpha = perceptual_roughness * perceptual_roughness;
+    return sqrt(sqrt(alpha * alpha + variance));
 }
 
 /// Foam pattern at world `xz`, evenly spread over [0, 1]. Two samples at unrelated scales and
@@ -590,6 +600,8 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = water_mix_foam_into_material(foam.opacity, pbr_input.material.base_color);
+    pbr_input.material.perceptual_roughness =
+        water_unresolved_roughness(pbr_input.material.perceptual_roughness, foam_depth.w);
     var out: FragmentOutput;
     // Back faces are seen from under the water. They draw only when the material leaves them unculled.
     if !is_front {
