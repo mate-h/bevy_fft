@@ -15,6 +15,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Two dispersive patches stepping at once in one process disturb each other's results, so the
+/// tests here take turns.
+static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const N: u32 = 128;
 /// `init_basin` fills the patch to this depth over a flat bed.
 const REST_DEPTH: f32 = 4.0;
@@ -171,6 +175,7 @@ fn splash(app: &mut App, x: f32) {
 #[test]
 #[ignore = "requires a graphics adapter"]
 fn a_hull_at_the_waterline_obstructs_its_cells() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let mut app = patch_app();
     app.world_mut().spawn((barge(), Transform::IDENTITY));
     for _ in 0..60 {
@@ -195,6 +200,7 @@ fn a_hull_at_the_waterline_obstructs_its_cells() {
 #[test]
 #[ignore = "requires a graphics adapter"]
 fn a_still_hull_holds_its_dent_without_radiating() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     // Band-limiting the bare surface each step smeared the dent onto the open water next to the
     // hull, the obstruction put it back under the hull, and the waves around it grew past 1 m in
     // 20 s.
@@ -276,6 +282,7 @@ fn shadow_and_front(with_barge: bool) -> (f32, f32) {
 #[test]
 #[ignore = "requires a graphics adapter"]
 fn a_hull_reflects_waves_and_shadows_the_water_behind_it() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     // A 4 m wide barge, 1 m deep, against waves 10 to 20 m long leaves about half the energy
     // behind it and sends about a quarter more back past the splash. The Airy step is global and
     // long waves bend around the barge's ends, so some energy still reaches the water behind it,
@@ -295,6 +302,7 @@ fn a_hull_reflects_waves_and_shadows_the_water_behind_it() {
 #[test]
 #[ignore = "requires a graphics adapter"]
 fn a_towed_body_trails_a_wake_in_deep_mode() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let mut app = patch_app();
     let mut body = barge();
     body.estimate_velocity = true;
@@ -479,6 +487,7 @@ fn spread(values: &[f32]) -> f32 {
 #[test]
 #[ignore = "requires a graphics adapter"]
 fn ambient_swell_rests_against_a_hull_instead_of_running_through_it() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let (composite, ambient) = composite_under_hull();
     assert!(
         composite.len() > 10,

@@ -15,6 +15,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Two dispersive patches stepping at once in one process disturb each other's results, so the
+/// tests here take turns.
+static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 const N: u32 = 128;
 /// `init_basin` fills the patch to this depth over a flat bed.
 const REST_DEPTH: f32 = 4.0;
@@ -156,6 +160,7 @@ fn omega(k: f32, depth: f32) -> f32 {
 #[test]
 #[ignore = "requires a graphics adapter"]
 fn deep_mode_waves_follow_deep_water_dispersion() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let steps = 45;
     let t = steps as f32 * DT;
     let k = TAU / WAVELENGTH;
@@ -177,6 +182,7 @@ fn deep_mode_waves_follow_deep_water_dispersion() {
 #[test]
 #[ignore = "requires a graphics adapter"]
 fn deep_mode_stays_stable_over_many_periods() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     // 20 s is about four and a half periods. A flux carried half a cell off the merge's faces
     // grows such a wave fivefold over this run in deep mode.
     let steps = 1200;
@@ -203,6 +209,7 @@ fn deep_mode_stays_stable_over_many_periods() {
 #[test]
 #[ignore = "requires a graphics adapter"]
 fn a_circling_boat_in_deep_mode_keeps_a_bounded_wake() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     const SIDE: u32 = 256;
     let mut app = App::new();
     app.add_plugins(

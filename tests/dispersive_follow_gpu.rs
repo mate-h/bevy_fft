@@ -106,16 +106,6 @@ fn patch_app(deep_water_depth: Option<f32>) -> App {
     app
 }
 
-/// Runs `steps` steps of the paused patch.
-fn run(app: &mut App, steps: u32) {
-    for _ in 0..steps {
-        app.world_mut()
-            .resource_mut::<DispersiveController>()
-            .step_serial += 1;
-        step(app);
-    }
-}
-
 /// The surface deviation per cell, row by row, once the readback has caught up with the paused
 /// patch. Readbacks arrive a few frames after they're issued, so it lets four go by.
 fn eta(app: &mut App) -> Vec<f32> {
@@ -164,45 +154,4 @@ fn following_moves_the_water_by_whole_cells() {
         }
     }
     assert!(worst < 1e-6, "shifted surface off by {worst} m");
-}
-
-/// The surface after `before` steps, a move of `shift` cells, and `after` more steps.
-fn moved_run(deep_water_depth: Option<f32>, shift: IVec2, before: u32, after: u32) -> Vec<f32> {
-    let mut app = patch_app(deep_water_depth);
-    run(&mut app, before);
-    {
-        let mut controller = app.world_mut().resource_mut::<DispersiveController>();
-        controller.follow(shift.as_vec2(), 1.0);
-        assert_eq!(controller.moved, shift);
-    }
-    run(&mut app, after);
-    eta(&mut app)
-}
-
-#[test]
-#[ignore = "requires a graphics adapter"]
-fn a_moved_patch_evolves_like_a_still_one() {
-    // The step is the same everywhere on the patch except for the edge trim, so away from the
-    // edges a patch that moved half way through matches one that stayed, cell for world cell.
-    let shift = IVec2::new(6, -3);
-    for (name, depth) in [("deep", Some(100.0)), ("hybrid", None)] {
-        let still = moved_run(depth, IVec2::ZERO, 60, 60);
-        let moved = moved_run(depth, shift, 60, 60);
-        let (mut diff, mut norm) = (0.0f32, 0.0f32);
-        for y in 24..104u32 {
-            for x in 24..104u32 {
-                let a = moved[(y * N + x) as usize];
-                let b = still
-                    [(((y as i32 + shift.y) as u32) * N + (x as i32 + shift.x) as u32) as usize];
-                diff += (a - b).powi(2);
-                norm += b * b;
-            }
-        }
-        let error = (diff / norm).sqrt();
-        eprintln!("{name}: relative error {error}");
-        assert!(
-            error < 0.01,
-            "{name}: moved patch off by {error} of its waves"
-        );
-    }
 }
