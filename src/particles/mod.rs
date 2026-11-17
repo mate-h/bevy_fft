@@ -21,26 +21,26 @@
 use bevy::{
     asset::{RenderAssetUsages, embedded_asset},
     camera::visibility::NoFrustumCulling,
-    material::labels::DrawFunctionLabel,
     core_pipeline::core_3d::Transparent3d,
     ecs::system::{SystemParamItem, lifetimeless::SRes},
+    ecs::world::{FromWorld, World},
+    material::labels::DrawFunctionLabel,
+    mesh::PrimitiveTopology,
     pbr::{
         MainPassTransparentDrawFunction, PreparedMaterial, RenderMeshInstances,
         SetMaterialBindGroup, SetMeshBindGroup, SetMeshViewBindGroup,
         SetMeshViewBindingArrayBindGroup,
     },
-    ecs::world::{FromWorld, World},
-    mesh::PrimitiveTopology,
     prelude::*,
     render::{
         Render, RenderApp, RenderSystems,
-        extract_resource::{ExtractResource, ExtractResourcePlugin},
         erased_render_asset::ErasedRenderAssets,
+        extract_resource::{ExtractResource, ExtractResourcePlugin},
         mesh::allocator::MeshAllocator,
         render_asset::RenderAssets,
         render_phase::{
-            AddRenderCommand, DrawFunctions, PhaseItem, RenderCommand,
-            RenderCommandResult, SetItemPipeline, TrackedRenderPass,
+            AddRenderCommand, DrawFunctions, PhaseItem, RenderCommand, RenderCommandResult,
+            SetItemPipeline, TrackedRenderPass,
         },
         render_resource::{
             AsBindGroup,
