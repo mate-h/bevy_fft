@@ -4,7 +4,9 @@
 //! `BEVY_FFT_SCREENSHOT_FRAMES` sets the warm-up length in frames (default 600), and
 //! `BEVY_FFT_SCREENSHOT_SIZE` sets the image size as `WIDTHxHEIGHT` (default 2560x1440).
 //! `BEVY_FFT_SCREENSHOT_COUNT` saves that many frames in a row, named `stem_0.ext`, `stem_1.ext`,
-//! and so on. Without the first variable the plugin does nothing.
+//! and so on. `BEVY_FFT_SCREENSHOT_DT=<seconds>` steps time by that much every frame instead of
+//! by the wall clock. Frames still differ between runs where GPU readbacks feed back into the
+//! scene, such as buoys. Without the first variable the plugin does nothing.
 //!
 //! Screenshot runs open no window, so they work in the background without anything popping up.
 //! Use [`default_plugins`] in place of `DefaultPlugins` for that. Cameras that would draw to the
@@ -86,6 +88,14 @@ impl Plugin for ScreenshotOnEnvPlugin {
             .and_then(|v| v.parse().ok())
             .unwrap_or(1u32)
             .max(1);
+        if let Some(dt) = std::env::var("BEVY_FFT_SCREENSHOT_DT")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+        {
+            app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                std::time::Duration::from_secs_f32(dt),
+            ));
+        }
         let size = screenshot_size();
         let target =
             app.world_mut()

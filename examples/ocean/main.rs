@@ -240,7 +240,7 @@ fn setup(
     commands.spawn(Atmosphere::earth(earth_medium));
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(0.0, 8.0, 24.0).looking_at(Vec3::ZERO, Vec3::Y),
+        start_camera(),
         FreeCamera::default(),
         WaterUnderwater,
         AtmosphereSettings::default(),
@@ -643,4 +643,17 @@ fn ocean_egui_panel(
         return;
     };
     *tf = Transform::from_xyz(0.0, sun_settings.elevation, -1.0).looking_at(Vec3::ZERO, Vec3::Y);
+}
+
+/// The camera's start, or `OCEAN_CAMERA=x,y,z,tx,ty,tz` for screenshots from elsewhere, such as
+/// below the water.
+fn start_camera() -> Transform {
+    let values: Vec<f32> = std::env::var("OCEAN_CAMERA")
+        .ok()
+        .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+        .unwrap_or_default();
+    if let [x, y, z, tx, ty, tz] = values[..] {
+        return Transform::from_xyz(x, y, z).looking_at(Vec3::new(tx, ty, tz), Vec3::Y);
+    }
+    Transform::from_xyz(0.0, 8.0, 24.0).looking_at(Vec3::ZERO, Vec3::Y)
 }
