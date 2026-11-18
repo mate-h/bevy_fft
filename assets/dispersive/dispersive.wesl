@@ -80,8 +80,16 @@ fn clampi(i: i32, n: i32) -> i32 { return clamp(i, 0, n - 1i); }
 /// Periodic wrap. Airy uses a periodic FFT, so spatial neighbor stencils in the hybrid
 /// merge/transport path must wrap too. Edge clamp fights the spectrum and seeds lattices.
 fn wrapi(i: i32, n: i32) -> i32 {
-    let m = i % n;
-    return select(m + n, m, m >= 0);
+    // Callers pass indices within one period of [0, n), which one add or subtract wraps. A signed
+    // `%` is an integer division, dozens of instructions on the GPU, and the bicubic samplers
+    // wrap every tap: it was most of `merge_to_state`. Anything further out still gets it.
+    var m = select(i, i + n, i < 0);
+    m = select(m, m - n, m >= n);
+    if (m < 0 || m >= n) {
+        m = i % n;
+        m = select(m + n, m, m >= 0);
+    }
+    return m;
 }
 
 fn is_finite_f(x: f32) -> bool {
