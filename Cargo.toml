@@ -54,6 +54,11 @@ path = "examples/wake/main.rs"
 required-features = ["free_camera"]
 
 [[example]]
+name = "boat"
+path = "examples/boat/main.rs"
+required-features = ["free_camera"]
+
+[[example]]
 name = "ewave"
 path = "examples/ewave/main.rs"
 required-features = ["free_camera"]

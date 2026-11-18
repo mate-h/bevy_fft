@@ -120,6 +120,15 @@ pub struct BoatHull {
 /// Height of the centre of mass above the design waterline, in meters. Engine and ballast sit low.
 pub const CENTER_OF_MASS_Y: f32 = -0.05;
 
+/// Principal moments of inertia per kilogram about the centre of mass, in m², from the usual
+/// radii of gyration of small craft: about 0.38 of the beam in roll and a quarter of the length
+/// in pitch and yaw.
+pub fn inertia_per_kg(shape: &HullShape) -> Vec3 {
+    let roll = 0.38 * shape.beam;
+    let pitch = 0.25 * shape.length;
+    Vec3::new(pitch * pitch, pitch * pitch + roll * roll, roll * roll)
+}
+
 /// Builds the hull mesh, voxelizes it at `voxel_size`, and sizes its mass for water of `density`.
 pub fn build_hull(shape: HullShape, voxel_size: f32, density: f32) -> BoatHull {
     let (mesh, points) = hull_mesh(&shape);
@@ -131,15 +140,7 @@ pub fn build_hull(shape: HullShape, voxel_size: f32, density: f32) -> BoatHull {
         below.iter().map(|v| v.center * v.volume).sum::<Vec3>() / displacement.max(1e-6);
     let mass = density * displacement;
     let center_of_mass = Vec3::new(0.0, CENTER_OF_MASS_Y, buoyancy_center.z);
-    // A box of the hull's size, scaled down because the mass sits mostly in the hull shell
-    // and machinery near the middle.
-    let h = shape.draft + shape.freeboard;
-    let k = 0.7 / 12.0;
-    let inertia = Vec3::new(
-        mass * k * (h * h + shape.length * shape.length),
-        mass * k * (shape.beam * shape.beam + shape.length * shape.length),
-        mass * k * (shape.beam * shape.beam + h * h),
-    );
+    let inertia = mass * inertia_per_kg(&shape);
     BoatHull {
         shape,
         mesh,
