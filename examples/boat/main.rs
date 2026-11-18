@@ -11,6 +11,8 @@
 //! - `BOAT_WIND=<m/s>` sets the wind speed of the sea (default 7).
 //! - `BOAT_CHASE=<m>` sets the chase distance.
 //! - `BOAT_TOW=<m/s>` holds the boat at that speed straight ahead, for measuring drag.
+//! - `BOAT_TOP=<m>` looks down on the boat and its wake from that height.
+//! - `BOAT_WAKE_CELL=<m>` sets the wake patch's cell width (default 0.5).
 //! - `BOAT_LOG=1` prints the boat's height, roll, pitch and forces once a second
 //!   (`BOAT_LOG_EVERY=<s>` to change that), and the readback latency of the forces.
 //!
@@ -56,6 +58,16 @@ const CASCADE_HANDOFF_WAVES: f32 = 6.0;
 const VOXEL: f32 = 0.2;
 /// Sea water density in kg/m³.
 const SEA_WATER: f32 = 1025.0;
+/// Cells per edge of the wake patch, and their width in meters. Half-meter cells resolve the
+/// boat's 2.5 m beam in five cells and the 6 m transverse waves at 3 m/s in twelve.
+const WAKE_CELLS: u32 = 256;
+const WAKE_CELL: f32 = 0.5;
+/// The wake patch moves to recentre on the boat once it is this many cells off centre.
+const WAKE_FOLLOW_MARGIN: f32 = 4.0;
+/// Depth of the open sea under the patch in meters, and the speed whose Kelvin wavelength picks
+/// the patch's mode.
+const OPEN_SEA_DEPTH: f32 = 100.0;
+const WAKE_DESIGN_SPEED: f32 = 3.5;
 /// Readbacks of the water forces to wait for before the boat is let go.
 const SETTLE_READBACKS: u32 = 30;
 /// Chase camera distance behind the boat and its bounds, in meters. Beyond about 20 m the hull
@@ -69,6 +81,7 @@ fn main() {
         .insert_resource(DefaultOpaqueRendererMethod::deferred())
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(GlobalAmbientLight::NONE)
+        .init_resource::<WakeCapture>()
         .insert_resource(Chase {
             distance: env_f32("BOAT_CHASE").unwrap_or(CHASE_DISTANCE),
             free: false,
@@ -79,6 +92,7 @@ fn main() {
             FftPlugin,
             OceanPlugin,
             FloatingBodyPlugin,
+            DispersivePlugin,
             RapierPhysicsPlugin::<NoUserData>::default(),
             EguiPlugin::default(),
             screenshot::ScreenshotOnEnvPlugin,
@@ -90,6 +104,7 @@ fn main() {
                 spawn_surface_when_ready.after(FftSystemSet::PrepareTextures),
                 apply_water_forces,
                 (toggle_camera, reset_boat, log_boat, tow_boat),
+                follow_boat_with_wake.after(apply_water_forces),
             ),
         )
         .add_systems(
@@ -110,6 +125,10 @@ fn env_f32(name: &str) -> Option<f32> {
 /// The boat the camera follows and the helm steers.
 #[derive(Component)]
 struct Boat;
+
+/// The wake patch's state, read back for `BOAT_LOG`.
+#[derive(Resource, Default)]
+struct WakeCapture(Vec<u8>);
 
 /// Chase camera state.
 #[derive(Resource)]
@@ -159,6 +178,7 @@ fn cascade_band(index: usize) -> (f32, f32) {
 
 fn setup(
     mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
@@ -188,6 +208,26 @@ fn setup(
     }
 
     spawn_boat(&mut commands, &mut meshes, &mut materials);
+
+    // The wake patch: deep-water waves the hull presses into the surface, following the boat.
+    let mut wake = DispersiveController::spawn(&mut commands, &mut images, WAKE_CELLS);
+    wake.tile_world = WAKE_CELLS as f32 * env_f32("BOAT_WAKE_CELL").unwrap_or(WAKE_CELL);
+    wake.placement = Some(DispersivePlacement::default());
+    wake.enable_bodies(&mut images);
+    wake.choose_mode(OPEN_SEA_DEPTH, kelvin_wavelength(WAKE_DESIGN_SPEED, wake.g));
+    if std::env::var_os("BOAT_LOG").is_some() {
+        commands
+            .spawn(bevy::render::gpu_readback::Readback::texture(
+                wake.state.clone(),
+            ))
+            .observe(
+                |event: On<bevy::render::gpu_readback::ReadbackComplete>,
+                 mut capture: ResMut<WakeCapture>| {
+                    capture.0 = event.data.clone();
+                },
+            );
+    }
+    commands.insert_resource(wake);
 
     let earth_medium = scattering_mediums.add(ScatteringMedium::earth(256, 256));
     commands.spawn(Atmosphere::earth(earth_medium));
@@ -532,6 +572,18 @@ fn chase_camera(
     let (Ok(boat), Ok(mut camera)) = (boat.single(), camera.single_mut()) else {
         return;
     };
+    if let Some(height) = env_f32("BOAT_TOP") {
+        // A look down on the boat and its wake from above and a little behind.
+        let forward = (boat.rotation * Vec3::NEG_Z)
+            .with_y(0.0)
+            .normalize_or(Vec3::NEG_Z);
+        camera.translation = boat.translation.with_y(height) - forward * 0.6 * height;
+        camera.look_at(
+            boat.translation.with_y(0.0) - forward * 0.25 * height,
+            Vec3::Y,
+        );
+        return;
+    }
     let forward = (boat.rotation * Vec3::NEG_Z)
         .with_y(0.0)
         .normalize_or(Vec3::NEG_Z);
@@ -545,8 +597,11 @@ fn chase_camera(
 }
 
 /// With `BOAT_LOG=1`, prints the boat's mean height, heave range, roll and pitch once a second.
+#[allow(clippy::too_many_arguments)]
 fn log_boat(
     time: Res<Time>,
+    wake: Res<WakeCapture>,
+    controller: Res<DispersiveController>,
     boat: Query<(&Transform, &FloatingBody), With<Boat>>,
     mut window: Local<Vec<Vec3>>,
     mut drag: Local<(f32, f32)>,
@@ -599,6 +654,30 @@ fn log_boat(
         body.drag,
         body.torque
     );
+    if !wake.0.is_empty() {
+        // Surface deviation of the patch's cells, against the patch's median as the rest level:
+        // the dent under the hull and the largest wave more than 10 m from it.
+        let n = controller.n as usize;
+        let texel = wake.0.len() / (n * n);
+        let h: Vec<f32> = (0..n * n)
+            .map(|i| f32::from_le_bytes(wake.0[i * texel..i * texel + 4].try_into().unwrap()))
+            .collect();
+        let mut sorted = h.clone();
+        sorted.sort_by(f32::total_cmp);
+        let rest = sorted[sorted.len() / 2];
+        let at = controller.world_to_cells(transform.translation.xz());
+        let cell = controller.cell_size();
+        let (mut dent, mut wave) = (0.0f32, 0.0f32);
+        for (i, &v) in h.iter().enumerate() {
+            let d = Vec2::new((i % n) as f32 + 0.5, (i / n) as f32 + 0.5).distance(at) * cell;
+            if d < 2.0 {
+                dent = dent.min(v - rest);
+            } else if d > 10.0 {
+                wave = wave.max((v - rest).abs());
+            }
+        }
+        println!("  wake: dent {dent:+.3} m, largest wave beyond 10 m {wave:.3} m");
+    }
     println!("  mean drag ahead {:.0} N", drag.0 / drag.1.max(1.0));
     *drag = (0.0, 0.0);
     window.clear();
@@ -634,4 +713,22 @@ fn tow_boat(mut boat: Query<(&Transform, &mut Velocity, &RigidBody), With<Boat>>
         .normalize_or(Vec3::NEG_Z);
     velocity.linear = (forward * speed).with_y(velocity.linear.y);
     velocity.angular.y = 0.0;
+}
+
+/// Keeps the wake patch on the boat, a few whole cells at a time, and steps it by the frame's
+/// time. The patch otherwise steps a fixed 1/60 s per frame, and at any other frame rate its waves
+/// would run faster or slower than the boat that makes them.
+fn follow_boat_with_wake(
+    time: Res<Time>,
+    boat: Query<&Transform, With<Boat>>,
+    mut wake: ResMut<DispersiveController>,
+) {
+    let Ok(boat) = boat.single() else {
+        return;
+    };
+    wake.follow(boat.translation.xz(), WAKE_FOLLOW_MARGIN);
+    let dt = time.delta_secs();
+    if dt > 0.0 {
+        wake.dt = dt.clamp(1.0 / 240.0, 1.0 / 30.0);
+    }
 }

@@ -168,9 +168,10 @@ pub struct FloatingBody {
     pub angular_velocity: Vec3,
     /// Estimate the velocities from how the [`GlobalTransform`] moves between frames.
     pub estimate_velocity: bool,
-    /// Press the water of shallow water grids down under the body, so it pushes water aside,
-    /// splashes when it drops in and leaves a wake. It takes a [`WaterHeightfield`] with a
-    /// [`WaterHeightfield::pressure_head`].
+    /// Press the water down under the body, so it pushes water aside, splashes when it drops in
+    /// and leaves a wake. It acts on each [`WaterHeightfield`] with a
+    /// [`WaterHeightfield::pressure_head`] and on each [`BodyFootprintTarget`], such as a
+    /// dispersive wake patch with body maps.
     pub displaces_water: bool,
     /// Latest water force in newtons: [`Self::buoyancy`] plus [`Self::drag`].
     pub force: Vec3,
