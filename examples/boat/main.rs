@@ -10,6 +10,7 @@
 //!
 //! - `BOAT_WIND=<m/s>` sets the wind speed of the sea (default 7).
 //! - `BOAT_CHASE=<m>` sets the chase distance.
+//! - `BOAT_TOW=<m/s>` holds the boat at that speed straight ahead, for measuring drag.
 //! - `BOAT_LOG=1` prints the boat's height, roll, pitch and forces once a second
 //!   (`BOAT_LOG_EVERY=<s>` to change that), and the readback latency of the forces.
 //!
@@ -88,7 +89,7 @@ fn main() {
             (
                 spawn_surface_when_ready.after(FftSystemSet::PrepareTextures),
                 apply_water_forces,
-                (toggle_camera, reset_boat, log_boat),
+                (toggle_camera, reset_boat, log_boat, tow_boat),
             ),
         )
         .add_systems(
@@ -548,6 +549,7 @@ fn log_boat(
     time: Res<Time>,
     boat: Query<(&Transform, &FloatingBody), With<Boat>>,
     mut window: Local<Vec<Vec3>>,
+    mut drag: Local<(f32, f32)>,
     mut next: Local<f32>,
 ) {
     if std::env::var_os("BOAT_LOG").is_none() {
@@ -559,6 +561,11 @@ fn log_boat(
     let (yaw, pitch, roll) = transform.rotation.to_euler(EulerRot::YXZ);
     let _ = yaw;
     window.push(Vec3::new(transform.translation.y, roll, pitch));
+    let forward = (transform.rotation * Vec3::NEG_Z)
+        .with_y(0.0)
+        .normalize_or(Vec3::NEG_Z);
+    drag.0 += body.drag.dot(forward);
+    drag.1 += 1.0;
     if time.elapsed_secs() < *next {
         return;
     }
@@ -592,6 +599,8 @@ fn log_boat(
         body.drag,
         body.torque
     );
+    println!("  mean drag ahead {:.0} N", drag.0 / drag.1.max(1.0));
+    *drag = (0.0, 0.0);
     window.clear();
 }
 
@@ -606,4 +615,23 @@ fn boat_panel(mut contexts: EguiContexts, chase: Res<Chase>) {
             "F: free camera. Wheel: distance. R: set upright"
         });
     });
+}
+
+/// With `BOAT_TOW=<m/s>`, holds the boat's horizontal velocity at that speed straight ahead, so
+/// the log shows the drag at that speed. Heave, pitch and roll stay free.
+fn tow_boat(mut boat: Query<(&Transform, &mut Velocity, &RigidBody), With<Boat>>) {
+    let Some(speed) = env_f32("BOAT_TOW") else {
+        return;
+    };
+    let Ok((transform, mut velocity, rigid)) = boat.single_mut() else {
+        return;
+    };
+    if *rigid != RigidBody::Dynamic {
+        return;
+    }
+    let forward = (transform.rotation * Vec3::NEG_Z)
+        .with_y(0.0)
+        .normalize_or(Vec3::NEG_Z);
+    velocity.linear = (forward * speed).with_y(velocity.linear.y);
+    velocity.angular.y = 0.0;
 }
