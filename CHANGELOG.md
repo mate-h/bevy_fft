@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The `boat` example: a motor boat to drive across the FFT ocean with the keyboard.
+  - The hull is lofted and voxelized in code, its water forces come from the GPU, and Rapier moves it.
+  - A propeller, a rudder and a skeg drive it, as lifting surfaces in the local flow and the propeller wash.
+  - A deep-mode dispersive patch with body maps follows it, so it leaves a Kelvin wake and a trail of foam.
+  - The hull needed added mass in heave, pitch and roll, and a stand-in for wave radiation damping, to ride a sea. Headless runs wait for the GPU each frame, so the forces stay two frames behind instead of 24.
 - Floating bodies press on a nested shallow water grid too: `ShallowWaterNestedGrid::pressure_head` gets their footprints while the parent has a pressure head. Body footprints now spread each voxel over the cells it overlaps, so grids finer than the voxels get an even dent instead of stripes.
 - `WaterBreakerCurl` draws the overhanging lip of plunging breakers: one animated cross-section, after Malan (2022), swept along each traced breaking front and played by the front's age. It is only the lip, grown from the heightfield's crest and faded out once it falls, and drawn as dark, glossy, see-through water with foam at the tip. The beach draws it.
 - The foam lane's alpha holds the mean square slope of the ocean waves each LOD slice is too coarse for, from each cascade's slope variance (`OceanSlopeVariance`, `slope_variance`), and the water surface adds it to its roughness, so distant glitter widens as it should.

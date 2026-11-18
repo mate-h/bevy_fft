@@ -62,10 +62,17 @@ The examples are the best starting point for each feature. `bevy_fft::prelude` e
 | `pool` | A crate dropped into a shallow water river, a towed log's wake, a log dam and a fountain of water particles | `cargo run --example pool --features free_camera` |
 | `river_banks` | Runs a baked terrain's rivers to a steady state and reports leaks and low banks | `cargo run --release --example river_banks -- --demo` |
 | `wake` | A dispersive patch on the FFT ocean that follows a scripted boat | `cargo run --example wake --features free_camera` |
+| `boat` | A motor boat to drive across the ocean, with its wake, foam and a chase camera | `cargo run --release --example boat --features free_camera` |
 | `ewave` | A periodic eWave height field | `cargo run --example ewave --features free_camera` |
 | `beach` | Surf over real terrain: the ocean, a shallow water grid and terrain-aware optics | `cargo run --release --example beach --features free_camera` |
 
 Add the `file_watcher` feature to hot-reload shaders while you edit them.
+
+### The boat example
+
+<img src="./assets/readme/boat.jpg" alt="A motor boat from above, turning, with a trail of foam behind its stern" width="800"/>
+
+A 7 m motor boat floats on the GPU water forces, and Rapier moves it. A propeller drives it, and a rudder and a skeg steer it and keep it running straight. A wake patch of dispersive waves follows it, so its hull leaves a Kelvin wake and its stern a trail of foam. W and S set the throttle, A and D the rudder, and Space stops the engine. R sets the boat upright, and F switches between the chase camera and the free camera. The panel shows the speed and the helm. It also tunes the drive and the sea.
 
 ### The beach example
 

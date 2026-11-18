@@ -48,7 +48,7 @@ use bevy::{
     transform::TransformSystems,
 };
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui, input::EguiWantsInput};
-use bevy_fft::prelude::*;
+use bevy_fft::{particles::WaterParticlesPlugin, prelude::*};
 use bevy_rapier3d::prelude::*;
 
 #[path = "../common/boat_drive.rs"]
@@ -76,6 +76,8 @@ const WAKE_FOLLOW_MARGIN: f32 = 4.0;
 /// the patch's mode.
 const OPEN_SEA_DEPTH: f32 = 100.0;
 const WAKE_DESIGN_SPEED: f32 = 3.5;
+/// Half width in meters of the foam the stern leaves, about the boat's half beam.
+const WAKE_FOAM_HALF_WIDTH: f32 = 1.4;
 /// Readbacks of the water forces to wait for before the boat is let go.
 const SETTLE_READBACKS: u32 = 30;
 /// Chase camera distance behind the boat and its bounds, in meters. Beyond about 20 m the hull
@@ -101,6 +103,7 @@ fn main() {
             OceanPlugin,
             FloatingBodyPlugin,
             DispersivePlugin,
+            WaterParticlesPlugin,
             RapierPhysicsPlugin::<NoUserData>::default(),
             EguiPlugin::default(),
             screenshot::ScreenshotOnEnvPlugin,
@@ -232,6 +235,10 @@ fn setup(
     wake.tile_world = WAKE_CELLS as f32 * env_f32("BOAT_WAKE_CELL").unwrap_or(WAKE_CELL);
     wake.placement = Some(DispersivePlacement::default());
     wake.enable_bodies(&mut images);
+    // The brush only marks where the water the stern leaves behind turns white; with no strength
+    // it doesn't press the surface, the hull's own footprint does that.
+    wake.brush_strength = 0.0;
+    wake.brush_radius = WAKE_FOAM_HALF_WIDTH / env_f32("BOAT_WAKE_CELL").unwrap_or(WAKE_CELL);
     wake.choose_mode(OPEN_SEA_DEPTH, kelvin_wavelength(WAKE_DESIGN_SPEED, wake.g));
     if std::env::var_os("BOAT_LOG").is_some() {
         commands
@@ -832,6 +839,12 @@ fn follow_boat_with_wake(
         return;
     };
     wake.follow(boat.translation.xz(), WAKE_FOLLOW_MARGIN);
+    // Foam behind the transom, from the patch's hull foam, which follows the brush pointer.
+    let stern = boat.transform_point(Vec3::Z * 3.6).xz();
+    let at = wake.world_to_cells(stern);
+    wake.pointer_prev = if wake.brush_active { wake.pointer } else { at };
+    wake.pointer = at;
+    wake.brush_active = true;
     let dt = time.delta_secs();
     if dt > 0.0 {
         wake.dt = dt.clamp(1.0 / 240.0, 1.0 / 30.0);
