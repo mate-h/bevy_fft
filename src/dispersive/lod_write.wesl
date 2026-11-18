@@ -90,8 +90,9 @@ fn hull_foam(g: vec2<f32>) -> f32 {
     return ring * smoothstep(HULL_FOAM_SPEED_START, HULL_FOAM_SPEED_END, params.hull_speed);
 }
 
-/// Bilinear bed and depth at grid coordinate `g`, where cell `i` spans `i..i + 1`.
-fn bed_depth_at(g: vec2<f32>) -> vec2<f32> {
+/// Bilinear bed, depth and flux at grid coordinate `g`, sharing one footprint: `.x` bed, `.y`
+/// depth, `.zw` flux along X and Z.
+fn cell_at(g: vec2<f32>) -> vec4<f32> {
     let hi = vec2<i32>(i32(params.cells) - 1);
     let x = g - 0.5;
     let i0 = vec2<i32>(floor(x));
@@ -100,29 +101,11 @@ fn bed_depth_at(g: vec2<f32>) -> vec2<f32> {
     let c10 = clamp(i0 + vec2(1, 0), vec2(0), hi);
     let c01 = clamp(i0 + vec2(0, 1), vec2(0), hi);
     let c11 = clamp(i0 + vec2(1, 1), vec2(0), hi);
-    let a = vec2<f32>(textureLoad(bed, c00, 0).r, textureLoad(state, c00, 0).r);
-    let b = vec2<f32>(textureLoad(bed, c10, 0).r, textureLoad(state, c10, 0).r);
-    let c = vec2<f32>(textureLoad(bed, c01, 0).r, textureLoad(state, c01, 0).r);
-    let d = vec2<f32>(textureLoad(bed, c11, 0).r, textureLoad(state, c11, 0).r);
+    let a = vec4<f32>(textureLoad(bed, c00, 0).r, textureLoad(state, c00, 0).rgb);
+    let b = vec4<f32>(textureLoad(bed, c10, 0).r, textureLoad(state, c10, 0).rgb);
+    let c = vec4<f32>(textureLoad(bed, c01, 0).r, textureLoad(state, c01, 0).rgb);
+    let d = vec4<f32>(textureLoad(bed, c11, 0).r, textureLoad(state, c11, 0).rgb);
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-
-/// Bilinear depth and flux at grid coordinate `g`.
-fn state_at(g: vec2<f32>) -> vec3<f32> {
-    let hi = vec2<i32>(i32(params.cells) - 1);
-    let x = g - 0.5;
-    let i0 = vec2<i32>(floor(x));
-    let f = x - floor(x);
-    let a = textureLoad(state, clamp(i0, vec2(0), hi), 0).rgb;
-    let b = textureLoad(state, clamp(i0 + vec2(1, 0), vec2(0), hi), 0).rgb;
-    let c = textureLoad(state, clamp(i0 + vec2(0, 1), vec2(0), hi), 0).rgb;
-    let d = textureLoad(state, clamp(i0 + vec2(1, 1), vec2(0), hi), 0).rgb;
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-
-fn eta_at(g: vec2<f32>) -> f32 {
-    let bd = bed_depth_at(g);
-    return bd.x + bd.y;
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -147,11 +130,19 @@ fn dispersive_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dx = vec2<f32>(span, 0.0);
     let dz = vec2<f32>(0.0, span);
     let inv = 1.0 / (2.0 * span * params.cell_size);
-    let slope = vec2<f32>(eta_at(g + dx) - eta_at(g - dx), eta_at(g + dz) - eta_at(g - dz)) * inv;
-    let bd = bed_depth_at(g);
+    // The five points of the stencil, each read once for its bed, depth and flux.
+    let c = cell_at(g);
+    let east = cell_at(g + dx);
+    let west = cell_at(g - dx);
+    let north = cell_at(g + dz);
+    let south = cell_at(g - dz);
+    let ex = vec2<f32>(east.x + east.y, west.x + west.y);
+    let ez = vec2<f32>(north.x + north.y, south.x + south.y);
+    let slope = vec2<f32>(ex.x - ex.y, ez.x - ez.y) * inv;
+    let bd = c.xy;
     let eta = bd.x + bd.y;
-    let st = state_at(g);
-    let rise = -((state_at(g + dx).y - state_at(g - dx).y) + (state_at(g + dz).z - state_at(g - dz).z)) * inv;
+    let st = c.yzw;
+    let rise = -((east.z - west.z) + (north.w - south.w)) * inv;
     // The flow lane `.w` carries the pressure head, so body forces read the surface the water
     // would have without the bodies.
     let flow = vec4<f32>(st.yz / max(st.x, MIN_FLOW_DEPTH), rise, pressure_at(g));
@@ -160,8 +151,6 @@ fn dispersive_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     let base = textureLoad(base_displacement, gid.xy, slice, 0);
     let base_f = textureLoad(base_foam, gid.xy, slice, 0);
     let h = span * params.cell_size;
-    let ex = vec2<f32>(eta_at(g + dx), eta_at(g - dx));
-    let ez = vec2<f32>(eta_at(g + dz), eta_at(g - dz));
     let steepest = length(vec2<f32>(max_abs(ex.x - eta, eta - ex.y), max_abs(ez.x - eta, eta - ez.y))) / h;
     let curvature = (ex.x + ex.y + ez.x + ez.y - 4.0 * eta) / (h * h);
     let breaking = max(breaking_front(steepest, rise, curvature), hull_foam(g)) * w;
