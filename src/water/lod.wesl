@@ -158,16 +158,46 @@ fn sample_lod_filtered(
 
 /// Samples the finest slice that contains `xz`, for physics queries that want full detail.
 fn sample_lod_finest(tex: texture_2d_array<f32>, lod: WaterLodSlices, xz: vec2<f32>) -> vec4<f32> {
+    return fetch_finest(tex, finest_texel(lod, xz));
+}
+
+/// The bilinear footprint of one point in the finest slice holding it, found once and shared by
+/// every texture read there.
+struct FinestTexel {
+    layer: u32,
+    /// Lower texel of the footprint and the weights toward the upper one.
+    i0: vec2<i32>,
+    f: vec2<f32>,
+    /// Highest texel index.
+    hi: vec2<i32>,
+}
+
+/// The footprint `sample_lod_finest` reads at `xz`: the finest slice that holds it with a texel
+/// of margin, so the footprint stays inside the slice, or else the coarsest.
+fn finest_texel(lod: WaterLodSlices, xz: vec2<f32>) -> FinestTexel {
     let count = max(lod.count, 1u);
+    let margin = 1.0 / f32(max(lod.resolution, 2u));
+    var layer = count - 1u;
+    var uv = vec2<f32>(0.0);
     for (var i = 0u; i < count; i++) {
-        let uv = lod_uv(lod, xz, i);
-        // Keep one texel of margin so the bilinear footprint stays inside the slice.
-        let margin = 1.0 / f32(max(lod.resolution, 2u));
+        uv = lod_uv(lod, xz, i);
         if all(uv > vec2(margin)) && all(uv < vec2(1.0 - margin)) {
-            return bilinear_clamp_layer(tex, uv, i);
+            layer = i;
+            break;
         }
     }
-    return bilinear_clamp_layer(tex, lod_uv(lod, xz, count - 1u), count - 1u);
+    let dims = vec2<i32>(i32(lod.resolution));
+    let x = uv * vec2<f32>(dims) - 0.5;
+    return FinestTexel(layer, vec2<i32>(floor(x)), x - floor(x), dims - 1);
+}
+
+/// Bilinear read of `tex` at a footprint from `finest_texel`.
+fn fetch_finest(tex: texture_2d_array<f32>, t: FinestTexel) -> vec4<f32> {
+    let a = textureLoad(tex, clamp(t.i0, vec2(0), t.hi), t.layer, 0);
+    let b = textureLoad(tex, clamp(t.i0 + vec2(1, 0), vec2(0), t.hi), t.layer, 0);
+    let c = textureLoad(tex, clamp(t.i0 + vec2(0, 1), vec2(0), t.hi), t.layer, 0);
+    let d = textureLoad(tex, clamp(t.i0 + vec2(1, 1), vec2(0), t.hi), t.layer, 0);
+    return mix(mix(a, b, t.f.x), mix(c, d, t.f.x), t.f.y);
 }
 
 /// Fixed-point steps that undo horizontal displacement in `displaced_height`.

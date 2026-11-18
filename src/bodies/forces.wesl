@@ -13,7 +13,7 @@
 // - slamming stops surface that enters the water fast, scaled by how fast its wetted area times
 //   normal speed grows.
 
-import bevy_fft::water::lod::{WaterLodSlices, sample_lod_finest};
+import bevy_fft::water::lod::{WaterLodSlices, fetch_finest, finest_texel};
 
 /// Fixed-point steps that undo horizontal displacement, as in the ocean queries.
 const INVERT_STEPS: u32 = 4u;
@@ -193,16 +193,19 @@ struct Water {
 /// The water surface above world `target_xz` and the water velocity there.
 fn water_at(target_xz: vec2<f32>) -> Water {
     var xz = target_xz;
+    // Reads at one point share their slice and bilinear footprint.
     for (var step = 0u; step < INVERT_STEPS; step++) {
-        let dx = sample_lod_finest(lod_displacement, lod, xz).a;
-        let dz = sample_lod_finest(lod_foam, lod, xz).b;
+        let t = finest_texel(lod, xz);
+        let dx = fetch_finest(lod_displacement, t).a;
+        let dz = fetch_finest(lod_foam, t).b;
         xz = target_xz - vec2<f32>(dx, dz);
     }
     // Flow lanes are velocity along X, along Z, vertical, then the pressure head that bodies
     // press the surface down by. Adding it back gives the surface the water would have without
     // the bodies, so a body doesn't sink into its own dent.
-    let flow = sample_lod_finest(lod_flow, lod, xz);
-    let height = params.surface_y + sample_lod_finest(lod_displacement, lod, xz).b + flow.w;
+    let t = finest_texel(lod, xz);
+    let flow = fetch_finest(lod_flow, t);
+    let height = params.surface_y + fetch_finest(lod_displacement, t).b + flow.w;
     return Water(height, vec3<f32>(flow.x, flow.z, flow.y));
 }
 
