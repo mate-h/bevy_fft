@@ -4,6 +4,11 @@
 //! [`FloatingBodyPlugin`] evaluates the water's forces on its voxels on the GPU, and Rapier
 //! integrates the boat with them, as in the `floating` example.
 //!
+//! A propeller drives it, and a rudder and a skeg steer it and keep it running straight
+//! (`examples/common/boat_drive.rs`). W and S, or the up and down arrows, move the throttle lever;
+//! A and D, or the left and right arrows, hold the rudder over; Space stops the engine; R sets the
+//! boat upright.
+//!
 //! A chase camera follows the boat, and `F` switches to the free camera. The water LOD data is
 //! centred on the camera, and the finest slice the hull's voxels sample is only a few meters
 //! wide, so the chase camera keeps close enough for the boat to feel the finest waves.
@@ -13,6 +18,7 @@
 //! - `BOAT_TOW=<m/s>` holds the boat at that speed straight ahead, for measuring drag.
 //! - `BOAT_TOP=<m>` looks down on the boat and its wake from that height.
 //! - `BOAT_WAKE_CELL=<m>` sets the wake patch's cell width (default 0.5).
+//! - `BOAT_HELM=<throttle>,<rudder degrees>` holds the helm, for runs without a keyboard.
 //! - `BOAT_LOG=1` prints the boat's height, roll, pitch and forces once a second
 //!   (`BOAT_LOG_EVERY=<s>` to change that), and the readback latency of the forces.
 //!
@@ -45,6 +51,8 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui, input::E
 use bevy_fft::prelude::*;
 use bevy_rapier3d::prelude::*;
 
+#[path = "../common/boat_drive.rs"]
+mod boat_drive;
 #[path = "../common/boat_hull.rs"]
 mod boat_hull;
 #[path = "../common/screenshot.rs"]
@@ -105,6 +113,7 @@ fn main() {
                 apply_water_forces,
                 (toggle_camera, reset_boat, log_boat, tow_boat),
                 follow_boat_with_wake.after(apply_water_forces),
+                (read_helm, apply_drive).chain().after(apply_water_forces),
             ),
         )
         .add_systems(
@@ -129,6 +138,15 @@ struct Boat;
 /// The wake patch's state, read back for `BOAT_LOG`.
 #[derive(Resource, Default)]
 struct WakeCapture(Vec<u8>);
+
+/// The boat's helm and drive.
+#[derive(Component)]
+struct BoatDrive {
+    helm: boat_drive::Helm,
+    params: boat_drive::DriveParams,
+    /// Throttle lever position the helm moves toward.
+    lever: f32,
+}
 
 /// Chase camera state.
 #[derive(Resource)]
@@ -299,9 +317,18 @@ fn spawn_boat(
     });
 
     let deck_y = shape.freeboard;
+    let drive = BoatDrive {
+        helm: boat_drive::Helm {
+            throttle: 0.0,
+            rudder: 0.0,
+        },
+        params: boat_drive::DriveParams::for_hull(0.5 * shape.length, -shape.draft),
+        lever: 0.0,
+    };
     commands
         .spawn((
             Boat,
+            drive,
             Name::new("Boat"),
             Mesh3d(meshes.add(hull.mesh)),
             MeshMaterial3d(paint.clone()),
@@ -602,6 +629,7 @@ fn log_boat(
     time: Res<Time>,
     wake: Res<WakeCapture>,
     controller: Res<DispersiveController>,
+    helm: Query<&BoatDrive>,
     boat: Query<(&Transform, &FloatingBody), With<Boat>>,
     mut window: Local<Vec<Vec3>>,
     mut drag: Local<(f32, f32)>,
@@ -678,6 +706,21 @@ fn log_boat(
         }
         println!("  wake: dent {dent:+.3} m, largest wave beyond 10 m {wave:.3} m");
     }
+    if let Ok(drive) = helm.single() {
+        let forward = (transform.rotation * Vec3::NEG_Z)
+            .with_y(0.0)
+            .normalize_or(Vec3::NEG_Z);
+        let heading = forward.x.atan2(-forward.z).to_degrees().rem_euclid(360.0);
+        println!(
+            "  speed {:.2} m/s, heading {:5.1}°, at ({:.0}, {:.0}), throttle {:.2}, rudder {:+.0}°",
+            body.sampled_velocity.dot(forward),
+            heading,
+            transform.translation.x,
+            transform.translation.z,
+            drive.helm.throttle,
+            drive.helm.rudder.to_degrees()
+        );
+    }
     println!("  mean drag ahead {:.0} N", drag.0 / drag.1.max(1.0));
     *drag = (0.0, 0.0);
     window.clear();
@@ -730,5 +773,79 @@ fn follow_boat_with_wake(
     let dt = time.delta_secs();
     if dt > 0.0 {
         wake.dt = dt.clamp(1.0 / 240.0, 1.0 / 30.0);
+    }
+}
+
+/// W and S (or the arrows) move the throttle lever, A and D hold the rudder over, and Space
+/// centres both. `BOAT_HELM=<throttle>,<rudder degrees>` holds the helm there instead.
+fn read_helm(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    egui_wants: Res<EguiWantsInput>,
+    chase: Res<Chase>,
+    mut boat: Query<&mut BoatDrive>,
+) {
+    let Ok(mut drive) = boat.single_mut() else {
+        return;
+    };
+    let dt = time.delta_secs();
+    let scripted = std::env::var("BOAT_HELM").ok().and_then(|v| {
+        let (t, r) = v.split_once(',')?;
+        Some((t.parse::<f32>().ok()?, r.parse::<f32>().ok()?.to_radians()))
+    });
+    let (lever, rudder) = if let Some(helm) = scripted {
+        helm
+    } else if chase.free || egui_wants.wants_any_keyboard_input() {
+        (drive.lever, 0.0)
+    } else {
+        let pressed = |a: KeyCode, b: KeyCode| keys.pressed(a) || keys.pressed(b);
+        let mut lever = drive.lever;
+        if pressed(KeyCode::KeyW, KeyCode::ArrowUp) {
+            lever += drive.params.throttle_rate * dt;
+        }
+        if pressed(KeyCode::KeyS, KeyCode::ArrowDown) {
+            lever -= drive.params.throttle_rate * dt;
+        }
+        if keys.just_pressed(KeyCode::Space) {
+            lever = 0.0;
+        }
+        let mut rudder = 0.0;
+        if pressed(KeyCode::KeyD, KeyCode::ArrowRight) {
+            rudder += drive.params.max_rudder;
+        }
+        if pressed(KeyCode::KeyA, KeyCode::ArrowLeft) {
+            rudder -= drive.params.max_rudder;
+        }
+        (lever.clamp(-drive.params.reverse, 1.0), rudder)
+    };
+    drive.lever = lever;
+    let params = drive.params;
+    boat_drive::steer(&mut drive.helm, &params, lever, rudder, dt);
+}
+
+/// Adds the propeller, rudder and skeg forces to the water's. They're computed on the CPU from
+/// the boat's current motion, so unlike the water forces they arrive without delay.
+fn apply_drive(
+    mut boat: Query<(
+        &BoatDrive,
+        &FloatingBody,
+        &GlobalTransform,
+        &Velocity,
+        &mut ExternalForce,
+    )>,
+) {
+    for (drive, body, transform, velocity, mut external) in &mut boat {
+        let rotation = transform.rotation();
+        let to_local = rotation.inverse();
+        let linear = to_local * (velocity.linear - body.water_velocity);
+        let angular = to_local * velocity.angular;
+        // The stern gear works fully until half the hull is out of the water.
+        let wet = body.submerged_volume * SEA_WATER / body.mass.max(1.0);
+        let immersion = (wet / 0.5).clamp(0.0, 1.0);
+        let forces =
+            boat_drive::drive_forces(&drive.params, &drive.helm, linear, angular, immersion);
+        let (force, torque) = boat_drive::total(&forces, body.center_of_mass);
+        external.force += rotation * force;
+        external.torque += rotation * torque;
     }
 }
