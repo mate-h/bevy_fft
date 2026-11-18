@@ -54,7 +54,7 @@ impl DriveParams {
     /// Settings for the example's 7.2 m hull, its stern at `stern_z` and keel at `keel_y`.
     pub fn for_hull(stern_z: f32, keel_y: f32) -> Self {
         Self {
-            max_thrust: 4500.0,
+            max_thrust: 8000.0,
             reverse: 0.4,
             disc_area: 0.12,
             wash_share: 0.5,

@@ -28,7 +28,7 @@ pub const WAKE_FOLLOW_MARGIN: f32 = 4.0;
 /// Depth of the open sea under the patch in meters, and the speed whose Kelvin wavelength picks
 /// the patch's mode.
 pub const OPEN_SEA_DEPTH: f32 = 100.0;
-pub const WAKE_DESIGN_SPEED: f32 = 3.5;
+pub const WAKE_DESIGN_SPEED: f32 = 7.0;
 /// Half width in meters of the foam the stern leaves, about the boat's half beam.
 pub const WAKE_FOAM_HALF_WIDTH: f32 = 1.4;
 
@@ -269,9 +269,9 @@ pub fn apply_drive(
         let to_local = rotation.inverse();
         let linear = to_local * (velocity.linear - body.water_velocity);
         let angular = to_local * velocity.angular;
-        // The stern gear works fully until half the hull is out of the water.
-        let immersion =
-            (body.submerged_volume * SEA_WATER / body.mass.max(1.0) / 0.5).clamp(0.0, 1.0);
+        // The stern gear sits under the keel and stays in the water on the plane, when only a
+        // third of the hull is, so it fades only as the hull leaves the water entirely.
+        let immersion = (wet_share(body) / 0.15).clamp(0.0, 1.0);
         let forces = boat_drive::drive_forces(&params, &drive.helm, linear, angular, immersion);
         let (force, torque) = boat_drive::total(&forces, body.center_of_mass);
         external.force += rotation * force;

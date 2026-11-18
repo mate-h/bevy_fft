@@ -63,9 +63,12 @@ mod screenshot;
 const CASCADE_TILES: [f32; 3] = [256.0, 48.0, 9.0];
 /// A cascade hands waves to the next smaller one at this many wavelengths per smaller tile.
 const CASCADE_HANDOFF_WAVES: f32 = 6.0;
-/// Chase camera distance behind the boat and its bounds, in meters. Beyond about 20 m the hull
-/// samples coarser water LOD slices than the finest.
-const CHASE_DISTANCE: f32 = 14.0;
+/// Chase camera distance from the point it looks at, and its bounds, in meters.
+const CHASE_DISTANCE: f32 = 20.0;
+/// How far the chase camera looks down, in degrees.
+const CHASE_ELEVATION_DEG: f32 = 28.0;
+/// The chase camera looks at a point this share of its distance behind the boat.
+const CHASE_AIM_BEHIND: f32 = 0.15;
 const CHASE_MIN: f32 = 6.0;
 const CHASE_MAX: f32 = 30.0;
 
@@ -408,9 +411,12 @@ fn chase_camera(
     let forward = (boat.rotation * Vec3::NEG_Z)
         .with_y(0.0)
         .normalize_or(Vec3::NEG_Z);
-    let target = boat.translation.with_y(0.0) + forward * 4.0 + Vec3::Y * 1.0;
-    let eye = boat.translation.with_y(0.0) - forward * chase.distance
-        + Vec3::Y * (1.5 + 0.3 * chase.distance);
+    // Aimed a little behind the boat and looking down on it, so the boat sits above the middle
+    // of the picture and its wake runs down the lower half toward the camera.
+    let elevation = CHASE_ELEVATION_DEG.to_radians();
+    let target = boat.translation.with_y(0.0) - forward * CHASE_AIM_BEHIND * chase.distance;
+    let eye = target - forward * chase.distance * elevation.cos()
+        + Vec3::Y * chase.distance * elevation.sin();
     // A critically damped follow with a time constant of about half a second.
     let blend = 1.0 - (-time.delta_secs() * 4.0).exp();
     camera.translation = camera.translation.lerp(eye, blend);

@@ -24,7 +24,7 @@ fn a_centred_rudder_going_straight_gives_no_yaw() {
     assert!(torque.y.abs() < 1e-3, "yaw torque {torque}");
     assert!(force.x.abs() < 1e-3, "side force {force}");
     // Full thrust ahead, less the foils' drag.
-    assert!(force.z < -4000.0 && force.z > -4500.0, "{force}");
+    assert!(force.z < -7500.0 && force.z > -8000.0, "{force}");
 }
 
 #[test]

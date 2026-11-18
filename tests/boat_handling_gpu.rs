@@ -203,8 +203,8 @@ fn full_throttle_holds_a_steady_speed_and_course() {
     run(&mut app, boat, 30.0, 1.0, 0.0, &mut track);
     let last = |v: &Vec<f32>| v[v.len() - (10.0 / DT) as usize..].to_vec();
     let speed = mean(&last(&track.speed));
-    // Full thrust balances the drag at about 3.8 m/s in calm water; waves cost a little.
-    assert!((3.0..4.3).contains(&speed), "speed {speed} m/s");
+    // She rises onto the plane, where full thrust balances the drag at about 7.5 m/s.
+    assert!((6.5..8.5).contains(&speed), "speed {speed} m/s");
     assert!(
         largest(&track.roll) < 20.0,
         "roll {}°",
