@@ -36,8 +36,9 @@ use bevy::{
     },
     input::mouse::AccumulatedMouseScroll,
     light::{
-        Atmosphere, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, GlobalAmbientLight,
-        atmosphere::ScatteringMedium, light_consts::lux,
+        Atmosphere, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder,
+        GeneratedEnvironmentMapLight, GlobalAmbientLight, atmosphere::ScatteringMedium,
+        light_consts::lux,
     },
     material::OpaqueRendererMethod,
     pbr::{AtmosphereSettings, DefaultOpaqueRendererMethod},
@@ -101,6 +102,7 @@ fn main() {
             (
                 spawn_surface_when_ready.after(FftSystemSet::PrepareTextures),
                 (toggle_camera, reset_boat, log_boat, log_latency, tow_boat),
+                freeze_sky_lighting,
                 read_helm.before(boat::apply_drive),
             ),
         )
@@ -374,6 +376,40 @@ fn reset_boat(
     transform.translation.y = 0.0;
     transform.rotation = Quat::from_rotation_y(yaw);
     *velocity = Velocity::default();
+}
+
+/// Frames the sky lighting keeps refiltering after the boat is let go, by then long converged.
+const SKY_LIGHTING_FRAMES: u32 = 120;
+
+/// Stops refiltering the sky's environment lighting once it has settled. The sun and the
+/// atmosphere never change here, but [`AtmosphereEnvironmentMapLight`] filters its cubemap again
+/// every frame, about 2 ms of GPU time at 1440p. Removing the generator stops that and keeps the
+/// [`EnvironmentMapLight`] it filtered into. It waits for the boat to be let go, which takes the
+/// water's pipelines a few seconds, so the filter has run many times by then.
+fn freeze_sky_lighting(
+    mut commands: Commands,
+    boat: Query<&RigidBody, With<Boat>>,
+    sky: Query<
+        Entity,
+        (
+            With<GeneratedEnvironmentMapLight>,
+            With<EnvironmentMapLight>,
+        ),
+    >,
+    mut frames: Local<u32>,
+) {
+    if !boat.iter().any(|rigid| *rigid == RigidBody::Dynamic) {
+        return;
+    }
+    *frames += 1;
+    if *frames < SKY_LIGHTING_FRAMES {
+        return;
+    }
+    for entity in &sky {
+        commands
+            .entity(entity)
+            .remove::<GeneratedEnvironmentMapLight>();
+    }
 }
 
 /// Keeps the camera behind and above the boat, on a spring, levelled against the boat's roll and
