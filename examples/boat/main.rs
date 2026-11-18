@@ -26,8 +26,6 @@
 //! and roll in a 7 m/s sea, so the LOD slices around the camera reach the hull at those distances.
 //! The free camera can fly much further, and then the boat feels coarser water.
 
-use std::sync::Arc;
-
 use bevy::{
     anti_alias::fxaa::Fxaa,
     camera::Exposure,
@@ -50,7 +48,10 @@ use bevy::{
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui, input::EguiWantsInput};
 use bevy_fft::{particles::WaterParticlesPlugin, prelude::*};
 use bevy_rapier3d::prelude::*;
+use boat::{Boat, BoatDrive, SEA_WATER};
 
+#[path = "../common/boat.rs"]
+mod boat;
 #[path = "../common/boat_drive.rs"]
 mod boat_drive;
 #[path = "../common/boat_hull.rs"]
@@ -62,24 +63,6 @@ mod screenshot;
 const CASCADE_TILES: [f32; 3] = [256.0, 48.0, 9.0];
 /// A cascade hands waves to the next smaller one at this many wavelengths per smaller tile.
 const CASCADE_HANDOFF_WAVES: f32 = 6.0;
-/// Edge of a hull voxel in meters.
-const VOXEL: f32 = 0.2;
-/// Sea water density in kg/m³.
-const SEA_WATER: f32 = 1025.0;
-/// Cells per edge of the wake patch, and their width in meters. Half-meter cells resolve the
-/// boat's 2.5 m beam in five cells and the 6 m transverse waves at 3 m/s in twelve.
-const WAKE_CELLS: u32 = 256;
-const WAKE_CELL: f32 = 0.5;
-/// The wake patch moves to recentre on the boat once it is this many cells off centre.
-const WAKE_FOLLOW_MARGIN: f32 = 4.0;
-/// Depth of the open sea under the patch in meters, and the speed whose Kelvin wavelength picks
-/// the patch's mode.
-const OPEN_SEA_DEPTH: f32 = 100.0;
-const WAKE_DESIGN_SPEED: f32 = 3.5;
-/// Half width in meters of the foam the stern leaves, about the boat's half beam.
-const WAKE_FOAM_HALF_WIDTH: f32 = 1.4;
-/// Readbacks of the water forces to wait for before the boat is let go.
-const SETTLE_READBACKS: u32 = 30;
 /// Chase camera distance behind the boat and its bounds, in meters. Beyond about 20 m the hull
 /// samples coarser water LOD slices than the finest.
 const CHASE_DISTANCE: f32 = 14.0;
@@ -105,6 +88,7 @@ fn main() {
             DispersivePlugin,
             WaterParticlesPlugin,
             RapierPhysicsPlugin::<NoUserData>::default(),
+            boat::BoatPhysicsPlugin,
             EguiPlugin::default(),
             screenshot::ScreenshotOnEnvPlugin,
         ))
@@ -113,10 +97,8 @@ fn main() {
             Update,
             (
                 spawn_surface_when_ready.after(FftSystemSet::PrepareTextures),
-                apply_water_forces,
-                (toggle_camera, reset_boat, log_boat, tow_boat),
-                follow_boat_with_wake.after(apply_water_forces),
-                (read_helm, apply_drive).chain().after(apply_water_forces),
+                (toggle_camera, reset_boat, log_boat, log_latency, tow_boat),
+                read_helm.before(boat::apply_drive),
             ),
         )
         .add_systems(
@@ -134,22 +116,9 @@ fn env_f32(name: &str) -> Option<f32> {
     std::env::var(name).ok()?.parse().ok()
 }
 
-/// The boat the camera follows and the helm steers.
-#[derive(Component)]
-struct Boat;
-
 /// The wake patch's state, read back for `BOAT_LOG`.
 #[derive(Resource, Default)]
 struct WakeCapture(Vec<u8>);
-
-/// The boat's helm and drive.
-#[derive(Component)]
-struct BoatDrive {
-    helm: boat_drive::Helm,
-    params: boat_drive::DriveParams,
-    /// Throttle lever position the helm moves toward.
-    lever: f32,
-}
 
 /// Chase camera state.
 #[derive(Resource)]
@@ -231,15 +200,11 @@ fn setup(
     spawn_boat(&mut commands, &mut meshes, &mut materials);
 
     // The wake patch: deep-water waves the hull presses into the surface, following the boat.
-    let mut wake = DispersiveController::spawn(&mut commands, &mut images, WAKE_CELLS);
-    wake.tile_world = WAKE_CELLS as f32 * env_f32("BOAT_WAKE_CELL").unwrap_or(WAKE_CELL);
-    wake.placement = Some(DispersivePlacement::default());
-    wake.enable_bodies(&mut images);
-    // The brush only marks where the water the stern leaves behind turns white; with no strength
-    // it doesn't press the surface, the hull's own footprint does that.
-    wake.brush_strength = 0.0;
-    wake.brush_radius = WAKE_FOAM_HALF_WIDTH / env_f32("BOAT_WAKE_CELL").unwrap_or(WAKE_CELL);
-    wake.choose_mode(OPEN_SEA_DEPTH, kelvin_wavelength(WAKE_DESIGN_SPEED, wake.g));
+    let wake = boat::wake_patch(
+        &mut commands,
+        &mut images,
+        env_f32("BOAT_WAKE_CELL").unwrap_or(boat::WAKE_CELL),
+    );
     if std::env::var_os("BOAT_LOG").is_some() {
         commands
             .spawn(bevy::render::gpu_readback::Readback::texture(
@@ -292,7 +257,7 @@ fn spawn_boat(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) {
-    let hull = boat_hull::build_hull(boat_hull::HullShape::default(), VOXEL, SEA_WATER);
+    let hull = boat_hull::build_hull(boat_hull::HullShape::default(), boat::VOXEL, SEA_WATER);
     let shape = hull.shape;
     info!(
         "boat hull: {:.2} m³ displaced, {:.0} kg, block coefficient {:.2}",
@@ -300,12 +265,6 @@ fn spawn_boat(
         hull.mass,
         hull.displacement / (shape.length * shape.beam * shape.draft)
     );
-    let collider = Collider::convex_hull(&hull.points).expect("the hull has volume");
-    let mut body = FloatingBody::new(Arc::new(hull.voxels), hull.mass);
-    body.center_of_mass = hull.center_of_mass;
-    // Rapier's velocities drive the drag.
-    body.estimate_velocity = false;
-
     let paint = materials.add(StandardMaterial {
         base_color: Color::srgb(0.92, 0.93, 0.95),
         perceptual_roughness: 0.35,
@@ -324,34 +283,13 @@ fn spawn_boat(
     });
 
     let deck_y = shape.freeboard;
-    let drive = BoatDrive {
-        helm: boat_drive::Helm {
-            throttle: 0.0,
-            rudder: 0.0,
-        },
-        params: boat_drive::DriveParams::for_hull(0.5 * shape.length, -shape.draft),
-        lever: 0.0,
-    };
     commands
         .spawn((
-            Boat,
-            drive,
+            boat::boat_physics(&hull),
             Name::new("Boat"),
             Mesh3d(meshes.add(hull.mesh)),
             MeshMaterial3d(paint.clone()),
             Transform::default(),
-            body,
-            RigidBody::Dynamic,
-            collider,
-            ColliderMassProperties::MassProperties(MassProperties {
-                local_center_of_mass: hull.center_of_mass,
-                mass: hull.mass,
-                principal_inertia_local_frame: Quat::IDENTITY,
-                principal_inertia: hull.inertia,
-            }),
-            Velocity::default(),
-            ExternalForce::default(),
-            Sleeping::disabled(),
         ))
         .with_children(|boat| {
             // Teak deck just above the hull's own deck, so the two don't fight.
@@ -399,157 +337,6 @@ fn spawn_surface_when_ready(
         })),
         WaterSurfaceTag,
     ));
-}
-
-/// Hands the latest water forces to Rapier and Rapier's velocities to the force pass.
-fn apply_water_forces(
-    settings: Res<FloatingBodySettings>,
-    time: Res<Time>,
-    mut bodies: Query<(
-        &mut FloatingBody,
-        &mut ExternalForce,
-        &Velocity,
-        &GlobalTransform,
-        &mut RigidBody,
-        &mut Transform,
-    )>,
-    mut last_frame: Local<u32>,
-    mut history: Local<std::collections::VecDeque<(u64, Vec3)>>,
-    mut counter: Local<u64>,
-    mut latency: Local<(u32, u64, u32)>,
-) {
-    *counter += 1;
-    for (mut body, mut external, velocity, transform, mut rigid, mut held) in &mut bodies {
-        // Hold the boat until the force pass has caught up, so it doesn't sink while the
-        // pipelines compile, and meanwhile move it up or down to where it displaces its own
-        // weight, so it isn't let go in a trough or under a crest.
-        let ready = body.frame > SETTLE_READBACKS;
-        if !ready && body.frame > 0 && body.waterplane_area > 0.0 {
-            let excess = body.submerged_volume - body.mass / SEA_WATER;
-            let step = (excess / body.waterplane_area).clamp(-0.05, 0.05);
-            if body.frame != *last_frame {
-                *last_frame = body.frame;
-                held.translation.y += step;
-            }
-        }
-        let kind = if ready {
-            RigidBody::Dynamic
-        } else {
-            RigidBody::Fixed
-        };
-        if *rigid != kind {
-            *rigid = kind;
-        }
-        body.linear_velocity = velocity.linear;
-        body.angular_velocity = velocity.angular;
-        let center = transform.transform_point(body.center_of_mass);
-        if std::env::var_os("BOAT_LOG").is_some() {
-            history.push_back((*counter, center));
-            if history.len() > 120 {
-                history.pop_front();
-            }
-            if body.frame != latency.0 {
-                latency.0 = body.frame;
-                if let Some(&(f, _)) = history.iter().min_by(|a, b| {
-                    a.1.distance_squared(body.sampled_center)
-                        .total_cmp(&b.1.distance_squared(body.sampled_center))
-                }) {
-                    latency.1 += *counter - f;
-                    latency.2 += 1;
-                }
-            }
-            if latency.2 >= 60 {
-                println!(
-                    "readback latency {:.1} frames",
-                    latency.1 as f32 / latency.2 as f32
-                );
-                latency.1 = 0;
-                latency.2 = 0;
-            }
-        }
-        let (force, torque) = body.compensated(
-            center,
-            velocity.linear,
-            velocity.angular,
-            time.delta_secs(),
-            &settings,
-        );
-        let (damp_force, damp_torque) = radiation_damping(
-            &body,
-            transform.rotation(),
-            velocity.linear,
-            velocity.angular,
-        );
-        let (force, torque) = with_added_mass(
-            &body,
-            &settings,
-            transform.rotation(),
-            force + damp_force,
-            torque + damp_torque,
-        );
-        external.force = force;
-        external.torque = torque;
-    }
-}
-
-/// Added mass in heave and added inertia in pitch and roll, as shares of the boat's own.
-///
-/// A hull that heaves or pitches has to move water with it. Strip theory gives about twice the
-/// boat's mass in heave for this hull, and the same order in pitch; roll moves much less water.
-const ADDED_MASS: Vec3 = Vec3::new(1.0, 1.5, 0.25);
-
-/// Scales the water's net vertical force and its pitch and roll torques to act on the boat plus
-/// the water it carries. Rapier knows only the boat's own mass, and gravity acts on that alone,
-/// so the net vertical force, buoyancy and drag minus weight, is divided by the total mass
-/// share. Surge, sway and yaw move little water and keep their forces.
-///
-/// Without it the boat heaves and pitches several times too fast, it bounces off waves, and the
-/// forces, which arrive a few frames late, get out of step with its motion.
-fn with_added_mass(
-    body: &FloatingBody,
-    settings: &FloatingBodySettings,
-    rotation: Quat,
-    force: Vec3,
-    torque: Vec3,
-) -> (Vec3, Vec3) {
-    let wet = (body.submerged_volume * SEA_WATER / body.mass.max(1.0)).clamp(0.0, 1.0);
-    let share = Vec3::ONE / (Vec3::ONE + ADDED_MASS * wet);
-    let weight = body.mass * settings.gravity;
-    let force = force.with_y(weight + (force.y - weight) * share.y);
-    let local = rotation.inverse() * torque;
-    let local = Vec3::new(local.x * share.x, local.y, local.z * share.z);
-    (force, rotation * local)
-}
-
-/// Damping rates of heave, roll and pitch in 1/s, from about 15–25% of critical damping for this
-/// hull.
-const HEAVE_DAMPING: f32 = 1.5;
-const ROLL_DAMPING: f32 = 1.5;
-const PITCH_DAMPING: f32 = 2.0;
-
-/// Damping of heave, roll and pitch that stands in for wave radiation.
-///
-/// A real hull that heaves, rolls or pitches makes waves, and the energy they carry off damps
-/// the motion. The voxel forces have no such term, and their restoring torque arrives a few frames
-/// late, which pumps energy into the motion instead. Without this a boat at rest in calm water
-/// starts pitching within seconds and soon flips.
-fn radiation_damping(
-    body: &FloatingBody,
-    rotation: Quat,
-    linear: Vec3,
-    angular: Vec3,
-) -> (Vec3, Vec3) {
-    let submerged = (body.submerged_volume * SEA_WATER / body.mass.max(1.0)).clamp(0.0, 1.0);
-    let force = -Vec3::Y * body.mass * HEAVE_DAMPING * linear.y * submerged;
-    // Roll and pitch rates in the boat's frame, from the hull's moments of inertia.
-    let local = rotation.inverse() * angular;
-    let inertia = body.mass * boat_hull::inertia_per_kg(&boat_hull::HullShape::default());
-    let torque_local = -Vec3::new(
-        inertia.x * PITCH_DAMPING * local.x,
-        0.0,
-        inertia.z * ROLL_DAMPING * local.z,
-    ) * submerged;
-    (force, rotation * torque_local)
 }
 
 /// `F` hands the camera between the chase and the free camera.
@@ -827,30 +614,6 @@ fn tow_boat(mut boat: Query<(&Transform, &mut Velocity, &RigidBody), With<Boat>>
     velocity.angular.y = 0.0;
 }
 
-/// Keeps the wake patch on the boat, a few whole cells at a time, and steps it by the frame's
-/// time. The patch otherwise steps a fixed 1/60 s per frame, and at any other frame rate its waves
-/// would run faster or slower than the boat that makes them.
-fn follow_boat_with_wake(
-    time: Res<Time>,
-    boat: Query<&Transform, With<Boat>>,
-    mut wake: ResMut<DispersiveController>,
-) {
-    let Ok(boat) = boat.single() else {
-        return;
-    };
-    wake.follow(boat.translation.xz(), WAKE_FOLLOW_MARGIN);
-    // Foam behind the transom, from the patch's hull foam, which follows the brush pointer.
-    let stern = boat.transform_point(Vec3::Z * 3.6).xz();
-    let at = wake.world_to_cells(stern);
-    wake.pointer_prev = if wake.brush_active { wake.pointer } else { at };
-    wake.pointer = at;
-    wake.brush_active = true;
-    let dt = time.delta_secs();
-    if dt > 0.0 {
-        wake.dt = dt.clamp(1.0 / 240.0, 1.0 / 30.0);
-    }
-}
-
 /// W and S (or the arrows) move the throttle lever, A and D hold the rudder over, and Space
 /// centres both. `BOAT_HELM=<throttle>,<rudder degrees>` holds the helm there instead.
 fn read_helm(
@@ -894,33 +657,43 @@ fn read_helm(
         (lever.clamp(-drive.params.reverse, 1.0), rudder)
     };
     drive.lever = lever;
-    let params = drive.params;
-    boat_drive::steer(&mut drive.helm, &params, lever, rudder, dt);
+    drive.rudder = rudder;
 }
 
-/// Adds the propeller, rudder and skeg forces to the water's. They're computed on the CPU from
-/// the boat's current motion, so unlike the water forces they arrive without delay.
-fn apply_drive(
-    mut boat: Query<(
-        &BoatDrive,
-        &FloatingBody,
-        &GlobalTransform,
-        &Velocity,
-        &mut ExternalForce,
-    )>,
+/// With `BOAT_LOG`, prints how many frames the water forces take to come back, once a second.
+/// It finds the frame whose centre of mass the forces were computed for.
+fn log_latency(
+    boat: Query<(&FloatingBody, &GlobalTransform), With<Boat>>,
+    mut history: Local<std::collections::VecDeque<(u64, Vec3)>>,
+    mut counter: Local<u64>,
+    mut latency: Local<(u32, u64, u32)>,
 ) {
-    for (drive, body, transform, velocity, mut external) in &mut boat {
-        let rotation = transform.rotation();
-        let to_local = rotation.inverse();
-        let linear = to_local * (velocity.linear - body.water_velocity);
-        let angular = to_local * velocity.angular;
-        // The stern gear works fully until half the hull is out of the water.
-        let wet = body.submerged_volume * SEA_WATER / body.mass.max(1.0);
-        let immersion = (wet / 0.5).clamp(0.0, 1.0);
-        let forces =
-            boat_drive::drive_forces(&drive.params, &drive.helm, linear, angular, immersion);
-        let (force, torque) = boat_drive::total(&forces, body.center_of_mass);
-        external.force += rotation * force;
-        external.torque += rotation * torque;
+    if std::env::var_os("BOAT_LOG").is_none() {
+        return;
+    }
+    let Ok((body, transform)) = boat.single() else {
+        return;
+    };
+    *counter += 1;
+    history.push_back((*counter, transform.transform_point(body.center_of_mass)));
+    if history.len() > 120 {
+        history.pop_front();
+    }
+    if body.frame != latency.0 {
+        latency.0 = body.frame;
+        if let Some(&(f, _)) = history.iter().min_by(|a, b| {
+            a.1.distance_squared(body.sampled_center)
+                .total_cmp(&b.1.distance_squared(body.sampled_center))
+        }) {
+            latency.1 += *counter - f;
+            latency.2 += 1;
+        }
+    }
+    if latency.2 >= 60 {
+        println!(
+            "readback latency {:.1} frames",
+            latency.1 as f32 / latency.2 as f32
+        );
+        *latency = (latency.0, 0, 0);
     }
 }
