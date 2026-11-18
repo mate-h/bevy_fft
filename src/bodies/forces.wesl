@@ -38,7 +38,8 @@ struct Body {
     angular_velocity: vec4<f32>,
     /// First voxel, voxel count, first surface patch and patch count.
     ranges: vec4<u32>,
-    /// 1 in `.x` when the body presses the water of shallow water grids down.
+    /// 1 in `.x` when the body presses the water of shallow water grids down, and the bits of
+    /// the factor on the volume it presses with in `.y`.
     flags: vec4<u32>,
 }
 
@@ -421,7 +422,7 @@ fn body_footprints(
         }
         let water = water_at(at);
         let fraction = clamp((water.height - (p.y - 0.5 * s)) / s, 0.0, 1.0);
-        let volume = voxel.w * fraction;
+        let volume = voxel.w * fraction * bitcast<f32>(body.flags.y);
         if volume <= 0.0 {
             continue;
         }

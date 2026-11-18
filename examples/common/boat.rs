@@ -171,6 +171,13 @@ pub fn apply_water_forces(
         }
         body.linear_velocity = velocity.linear;
         body.angular_velocity = velocity.angular;
+        if ready {
+            // On the plane she presses the water with her whole weight, not just her submerged
+            // volume's, eased over a few tenths of a second as she bobs.
+            let target = (body.mass / (SEA_WATER * body.submerged_volume.max(0.1))).clamp(1.0, 4.0);
+            let ease = 1.0 - (-time.delta_secs() * 4.0).exp();
+            body.footprint_scale += (target - body.footprint_scale) * ease;
+        }
         let center = transform.transform_point(body.center_of_mass);
         let (force, torque) = body.compensated(
             center,

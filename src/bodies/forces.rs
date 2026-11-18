@@ -173,6 +173,12 @@ pub struct FloatingBody {
     /// [`WaterHeightfield::pressure_head`] and on each [`BodyFootprintTarget`], such as a
     /// dispersive wake patch with body maps.
     pub displaces_water: bool,
+    /// Multiplies the volume the body presses the water down with, from 1. The press counts the
+    /// hull's submerged volume, which on a body at rest carries its whole weight. A planing hull
+    /// is carried mostly by the water's dynamic lift, with only part of it submerged, yet it
+    /// presses the water with its whole weight; set this to its weight over its buoyancy, so its
+    /// wake has the strength of a hull that size.
+    pub footprint_scale: f32,
     /// Latest water force in newtons: [`Self::buoyancy`] plus [`Self::drag`].
     pub force: Vec3,
     /// Latest torque about the centre of mass in newton meters.
@@ -224,6 +230,7 @@ impl FloatingBody {
             angular_velocity: Vec3::ZERO,
             estimate_velocity: true,
             displaces_water: true,
+            footprint_scale: 1.0,
             force: Vec3::ZERO,
             torque: Vec3::ZERO,
             buoyancy: Vec3::ZERO,
@@ -628,7 +635,12 @@ fn submit_floating_bodies(
             first[i].1,
             body.hull.surface.len() as u32,
         ];
-        let flags = [u32::from(body.displaces_water), 0, 0, 0];
+        let flags = [
+            u32::from(body.displaces_water),
+            body.footprint_scale.max(0.0).to_bits(),
+            0,
+            0,
+        ];
         for v in ranges.into_iter().chain(flags) {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
