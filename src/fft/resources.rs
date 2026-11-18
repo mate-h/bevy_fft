@@ -72,11 +72,17 @@ impl FromWorld for FftBindGroupLayouts {
     }
 }
 
+/// Longest FFT line that [`FftPipelines::dit_line`] transforms in workgroup memory. Matches
+/// `LINE_MAX` in `fft.wesl`.
+pub const FFT_LINE_MAX: u32 = 512;
+
 #[derive(Resource)]
 pub struct FftPipelines {
     pub forward_br_horizontal: CachedComputePipelineId,
     pub forward_br_vertical: CachedComputePipelineId,
     pub radix2_dit: CachedComputePipelineId,
+    /// Every DIT stage of a line in one dispatch, for lines up to [`FFT_LINE_MAX`] long.
+    pub dit_line: CachedComputePipelineId,
     pub fft_copy: CachedComputePipelineId,
     pub inverse_br_horizontal: CachedComputePipelineId,
     pub inverse_br_vertical: CachedComputePipelineId,
@@ -126,6 +132,17 @@ impl FromWorld for FftPipelines {
             shader: fft.clone(),
             shader_defs: base_shader_defs.clone(),
             entry_point: Some("fft_radix2_dit".into()),
+            zero_initialize_workgroup_memory: false,
+            constants: vec![],
+        });
+
+        let dit_line = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("fft_dit_line".into()),
+            layout: vec![layouts.common.clone()],
+            immediate_size: 20,
+            shader: fft.clone(),
+            shader_defs: base_shader_defs.clone(),
+            entry_point: Some("fft_dit_line".into()),
             zero_initialize_workgroup_memory: false,
             constants: vec![],
         });
@@ -191,6 +208,7 @@ impl FromWorld for FftPipelines {
             forward_br_horizontal,
             forward_br_vertical,
             radix2_dit,
+            dit_line,
             fft_copy,
             inverse_br_horizontal,
             inverse_br_vertical,

@@ -169,6 +169,68 @@ fn fft_radix2_dit(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 }
 
+/// Longest line `fft_dit_line` transforms: its real and imaginary lanes fill 16 KiB of workgroup
+/// memory. Longer lines take one `fft_radix2_dit` dispatch per stage.
+const LINE_MAX: u32 = 512u;
+var<workgroup> line_re: array<vec4<f32>, LINE_MAX>;
+var<workgroup> line_im: array<vec4<f32>, LINE_MAX>;
+
+fn line_pos(i: u32, line: u32) -> vec2<u32> {
+    return select(vec2<u32>(line, i), vec2<u32>(i, line), pc.axis == 0u);
+}
+
+/// Every radix-2 DIT stage of one bit-reversed line, in workgroup memory, in place in
+/// `pc.src_buffer`: one dispatch and one read and write per element, where `fft_radix2_dit` makes
+/// a dispatch and a round trip through the buffers per stage. The butterflies and their order
+/// match it, so the results are the same.
+@compute @workgroup_size(256, 1, 1)
+fn fft_dit_line(
+    @builtin(local_invocation_index) lid: u32,
+    @builtin(workgroup_id) wg: vec3<u32>,
+) {
+    let N = settings.size.x;
+    let line = wg.y;
+    for (var i = lid; i < N; i += WG) {
+        let v = read_fft_buf(pc.src_buffer, line_pos(i, line));
+        line_re[i] = v.re;
+        line_im[i] = v.im;
+    }
+    workgroupBarrier();
+    let half_n = N >> 1u;
+    for (var stage = 0u; stage < settings.orders; stage++) {
+        let m2 = 1u << stage;
+        for (var butterfly = lid; butterfly < half_n; butterfly += WG) {
+            let j = butterfly & (m2 - 1u);
+            let u = ((butterfly >> stage) << (stage + 1u)) + j;
+            let v = u + m2;
+            let root = get_fft_root(stage + 1u, j);
+            let a = c32_n(line_re[u], line_im[u]);
+            let b = mul_c32_n(c32_n(line_re[v], line_im[v]), splat_c32_n(root));
+            let out_u = add_c32_n(a, b);
+            let out_v = add_c32_n(a, neg_c32_n(b));
+            line_re[u] = out_u.re;
+            line_im[u] = out_u.im;
+            line_re[v] = out_v.re;
+            line_im[v] = out_v.im;
+        }
+        workgroupBarrier();
+    }
+    let inv_scale = 1.0 / f32(N);
+    for (var i = lid; i < N; i += WG) {
+        let pos = line_pos(i, line);
+        var out = c32_n(line_re[i], line_im[i]);
+        if ((pc.flags & FLAG_INVERSE_FINALIZE) != 0u) {
+            out = mul_c32_n(conj_c32_n(out), splat_c32_n(c32(inv_scale, 0.0)));
+        }
+        if ((pc.flags & FLAG_FORWARD_ALPHA) != 0u) {
+            out = mark_opaque_alpha(out);
+            write_shifted_d_re(pos, out.re);
+            write_shifted_d_im(pos, out.im);
+        }
+        write_fft_buf(pc.dst_buffer, pos, out);
+    }
+}
+
 @compute @workgroup_size(16, 16, 1)
 fn fft_copy_buffer(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p64 = vec2<u32>(gid.xy);

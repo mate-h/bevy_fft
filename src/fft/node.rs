@@ -15,7 +15,7 @@ use bevy::{
 
 use super::{
     FftSchedule, FftSettings,
-    resources::{FftBindGroups, FftPipelines, FftResolveBindGroups},
+    resources::{FFT_LINE_MAX, FftBindGroups, FftPipelines, FftResolveBindGroups},
 };
 
 #[repr(C)]
@@ -101,6 +101,76 @@ fn fft_dispatch_dit_chain(
     }
 }
 
+/// All DIT stages along `axis`, leaving the result in `src` as the stage chain plus its copy
+/// does: one `fft_dit_line` dispatch when the line fits in workgroup memory and its pipeline is
+/// ready, else one dispatch per stage.
+#[allow(clippy::too_many_arguments)]
+fn fft_dispatch_dits(
+    pipelines: &FftPipelines,
+    pipeline_cache: &PipelineCache,
+    pass: &mut ComputePass<'_>,
+    bind: &bevy::render::render_resource::BindGroup,
+    settings: &FftSettings,
+    axis: u32,
+    src: u32,
+    scratch: u32,
+    forward_alpha: bool,
+    inverse_finalize: bool,
+) {
+    let n = settings.size.x;
+    let orders = settings.orders;
+    let square = settings.size.x == settings.size.y;
+    if n <= FFT_LINE_MAX
+        && square
+        && let Some(line) = pipeline_cache.get_compute_pipeline(pipelines.dit_line)
+    {
+        let mut flags = 0u32;
+        if forward_alpha {
+            flags |= FLAG_FORWARD_ALPHA;
+        }
+        if inverse_finalize {
+            flags |= FLAG_INVERSE_FINALIZE;
+        }
+        pass.set_pipeline(line);
+        pass.set_bind_group(0, bind, &[]);
+        fft_set_immediates(
+            pass,
+            &FftPushConstants {
+                stage: 0,
+                axis,
+                src_buffer: src,
+                dst_buffer: src,
+                flags,
+            },
+        );
+        pass.dispatch_workgroups(1, n, 1);
+        return;
+    }
+    let Some(dit) = pipeline_cache.get_compute_pipeline(pipelines.radix2_dit) else {
+        once!(error!("Missing radix2_dit pipeline"));
+        return;
+    };
+    let Some(cpy) = pipeline_cache.get_compute_pipeline(pipelines.fft_copy) else {
+        once!(error!("Missing fft_copy pipeline"));
+        return;
+    };
+    fft_dispatch_dit_chain(
+        pass,
+        dit,
+        bind,
+        orders,
+        axis,
+        src,
+        scratch,
+        n,
+        forward_alpha,
+        inverse_finalize,
+    );
+    if orders % 2 == 1 {
+        fft_dispatch_copy(pass, cpy, bind, scratch, src, n);
+    }
+}
+
 fn fft_dispatch_copy(
     pass: &mut ComputePass<'_>,
     pipeline: &bevy::render::render_resource::ComputePipeline,
@@ -133,7 +203,6 @@ pub fn run_forward_fft(
     settings: &FftSettings,
 ) {
     let n = settings.size.x;
-    let orders = settings.orders;
 
     let Some(br_h) = pipeline_cache.get_compute_pipeline(pipelines.forward_br_horizontal) else {
         once!(error!("Missing forward_br_horizontal pipeline"));
@@ -143,15 +212,6 @@ pub fn run_forward_fft(
         once!(error!("Missing forward_br_vertical pipeline"));
         return;
     };
-    let Some(dit) = pipeline_cache.get_compute_pipeline(pipelines.radix2_dit) else {
-        once!(error!("Missing radix2_dit pipeline"));
-        return;
-    };
-    let Some(cpy) = pipeline_cache.get_compute_pipeline(pipelines.fft_copy) else {
-        once!(error!("Missing fft_copy pipeline"));
-        return;
-    };
-
     {
         pass.set_pipeline(br_h);
         pass.set_bind_group(0, bind, &[]);
@@ -160,11 +220,18 @@ pub fn run_forward_fft(
         pass.dispatch_workgroups(gx, gy, 1);
     }
 
-    fft_dispatch_dit_chain(pass, dit, bind, orders, 0, BUF_B, BUF_A, n, true, false);
-
-    if orders % 2 == 1 {
-        fft_dispatch_copy(pass, cpy, bind, BUF_A, BUF_B, n);
-    }
+    fft_dispatch_dits(
+        pipelines,
+        pipeline_cache,
+        pass,
+        bind,
+        settings,
+        0,
+        BUF_B,
+        BUF_A,
+        true,
+        false,
+    );
 
     {
         pass.set_pipeline(br_v);
@@ -174,11 +241,18 @@ pub fn run_forward_fft(
         pass.dispatch_workgroups(gx, gy, 1);
     }
 
-    fft_dispatch_dit_chain(pass, dit, bind, orders, 1, BUF_C, BUF_B, n, true, false);
-
-    if orders % 2 == 1 {
-        fft_dispatch_copy(pass, cpy, bind, BUF_B, BUF_C, n);
-    }
+    fft_dispatch_dits(
+        pipelines,
+        pipeline_cache,
+        pass,
+        bind,
+        settings,
+        1,
+        BUF_C,
+        BUF_B,
+        true,
+        false,
+    );
 }
 
 /// Inverse 2D FFT: spectrum in **C**; result real parts primarily in **B** after the pass.
@@ -190,7 +264,6 @@ pub fn run_inverse_fft(
     settings: &FftSettings,
 ) {
     let n = settings.size.x;
-    let orders = settings.orders;
 
     let Some(br_h) = pipeline_cache.get_compute_pipeline(pipelines.inverse_br_horizontal) else {
         once!(error!("Missing inverse_br_horizontal pipeline"));
@@ -200,15 +273,6 @@ pub fn run_inverse_fft(
         once!(error!("Missing inverse_br_vertical pipeline"));
         return;
     };
-    let Some(dit) = pipeline_cache.get_compute_pipeline(pipelines.radix2_dit) else {
-        once!(error!("Missing radix2_dit pipeline"));
-        return;
-    };
-    let Some(cpy) = pipeline_cache.get_compute_pipeline(pipelines.fft_copy) else {
-        once!(error!("Missing fft_copy pipeline"));
-        return;
-    };
-
     {
         pass.set_pipeline(br_h);
         pass.set_bind_group(0, bind, &[]);
@@ -217,11 +281,18 @@ pub fn run_inverse_fft(
         pass.dispatch_workgroups(gx, gy, 1);
     }
 
-    fft_dispatch_dit_chain(pass, dit, bind, orders, 0, BUF_A, BUF_C, n, false, true);
-
-    if orders % 2 == 1 {
-        fft_dispatch_copy(pass, cpy, bind, BUF_C, BUF_A, n);
-    }
+    fft_dispatch_dits(
+        pipelines,
+        pipeline_cache,
+        pass,
+        bind,
+        settings,
+        0,
+        BUF_A,
+        BUF_C,
+        false,
+        true,
+    );
 
     {
         pass.set_pipeline(br_v);
@@ -231,11 +302,18 @@ pub fn run_inverse_fft(
         pass.dispatch_workgroups(gx, gy, 1);
     }
 
-    fft_dispatch_dit_chain(pass, dit, bind, orders, 1, BUF_B, BUF_A, n, false, true);
-
-    if orders % 2 == 1 {
-        fft_dispatch_copy(pass, cpy, bind, BUF_A, BUF_B, n);
-    }
+    fft_dispatch_dits(
+        pipelines,
+        pipeline_cache,
+        pass,
+        bind,
+        settings,
+        1,
+        BUF_B,
+        BUF_A,
+        false,
+        true,
+    );
 }
 
 /// Registers the stock FFT compute chain on the root [`RenderGraph`] schedule, before the camera driver.
