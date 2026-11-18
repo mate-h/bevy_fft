@@ -726,15 +726,77 @@ fn log_boat(
     window.clear();
 }
 
-fn boat_panel(mut contexts: EguiContexts, chase: Res<Chase>) {
+/// Speed, helm and heading, with the controls, and a tuning section for the drive, the sea and
+/// the water forces.
+#[allow(clippy::type_complexity)]
+fn boat_panel(
+    mut contexts: EguiContexts,
+    chase: Res<Chase>,
+    mut settings: ResMut<FloatingBodySettings>,
+    mut boat: Query<(&mut BoatDrive, &Transform, &Velocity, &FloatingBody)>,
+    mut cascades: Query<&mut OceanSimSettings>,
+) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
+    let Ok((mut drive, transform, velocity, body)) = boat.single_mut() else {
+        return;
+    };
     egui::Window::new("Boat").show(ctx, |ui| {
+        let forward = (transform.rotation * Vec3::NEG_Z).with_y(0.0).normalize_or(Vec3::NEG_Z);
+        let speed = velocity.linear.dot(forward);
+        let heading = forward.x.atan2(-forward.z).to_degrees().rem_euclid(360.0);
+        ui.heading(format!("{:.1} kn", speed * 1.943_844));
+        ui.label(format!("{speed:.2} m/s, heading {heading:03.0}°"));
+        ui.add(
+            egui::ProgressBar::new(drive.helm.throttle.abs())
+                .text(format!("throttle {:+.0}%", drive.helm.throttle * 100.0)),
+        );
+        let rudder = drive.helm.rudder.to_degrees();
+        ui.label(format!(
+            "rudder {:.0}° {}",
+            rudder.abs(),
+            if rudder > 0.5 {
+                "starboard"
+            } else if rudder < -0.5 {
+                "port"
+            } else {
+                ""
+            }
+        ));
+        let wet = body.submerged_volume * SEA_WATER / body.mass.max(1.0);
+        ui.label(format!("displacement {:.0}%", wet * 100.0));
+        ui.separator();
         ui.label(if chase.free {
             "F: back to the chase camera"
         } else {
-            "F: free camera. Wheel: distance. R: set upright"
+            "W/S: throttle. A/D: rudder. Space: stop.\nR: set upright. F: free camera. Wheel: distance."
+        });
+        ui.collapsing("Tuning", |ui| {
+            let params = &mut drive.params;
+            ui.add(egui::Slider::new(&mut params.max_thrust, 500.0..=12000.0).text("Thrust N"));
+            ui.add(egui::Slider::new(&mut params.rudder_area, 0.02..=0.5).text("Rudder m²"));
+            ui.add(egui::Slider::new(&mut params.skeg_area, 0.0..=1.0).text("Skeg m²"));
+            let mut max_rudder = params.max_rudder.to_degrees();
+            ui.add(egui::Slider::new(&mut max_rudder, 5.0..=45.0).text("Rudder max °"));
+            params.max_rudder = max_rudder.to_radians();
+            ui.separator();
+            let mut wind = cascades.iter().next().map_or(0.0, |c| c.wind_speed);
+            if ui
+                .add(egui::Slider::new(&mut wind, 0.0..=14.0).text("Wind m/s"))
+                .changed()
+            {
+                for mut cascade in &mut cascades {
+                    cascade.wind_speed = wind;
+                }
+            }
+            ui.add(
+                egui::Slider::new(&mut settings.pressure_quadratic, 0.0..=2000.0)
+                    .text("Pressure drag"),
+            );
+            ui.add(
+                egui::Slider::new(&mut settings.splash.rate, 0.0..=8000.0).text("Splash rate"),
+            );
         });
     });
 }
