@@ -1,0 +1,13 @@
+[package]
+name = "river_geometry"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+description = "River channels on a heightfield: routing, long profiles, channel sizing and bed rasters"
+license = "MIT"
+repository = "https://github.com/mate-h/bevy_fft"
+keywords = ["river", "terrain", "heightfield", "hydrology", "gamedev"]
+categories = ["game-development", "simulation"]
+
+[dependencies]
+glam = "0.33"

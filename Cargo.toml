@@ -10,6 +10,9 @@ readme = "README.md"
 keywords = ["bevy", "fft", "gpu", "wgpu", "ocean"]
 categories = ["game-development", "graphics", "rendering::data-formats"]
 
+[workspace]
+members = ["crates/river_geometry"]
+
 [dependencies]
 bevy = "0.20.0"
 bytemuck = "1.24"
