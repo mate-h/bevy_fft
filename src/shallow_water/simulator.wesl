@@ -724,6 +724,84 @@ fn macW_combine(@builtin(global_invocation_id) id: vec3u) {
     textureStore(faceWTexture, id.xy, vec4f(clamp_face_vel(w_new), 0.0, 0.0, 0.0));
 }
 
+// Momentum-conserving advection after Stelling and Duinmeijer (2003), for flag bit 6. Each face
+// velocity changes by the momentum the discharge carries through the cell centres beside it
+// (along) and the corners beside it (across), less the velocity times the discharge's divergence,
+// over the face's mean depth. A bore then moves at its conservative speed, where MacCormack's
+// non-conservative form ran Stoker's bore about a quarter slow. Both kernels read the velocities
+// macU_copy and macW_copy saved in the temps' `.x`, so the order of the two doesn't matter.
+
+/// Discharge per unit width through u face (fi, jc), with the depth taken upwind.
+fn sd_qx(fi : i32, jc : i32) -> f32 {
+    let u = u_face_mac0_at(fi, jc);
+    return u * select(h_at(fi, jc), h_at(fi - 1, jc), u > 0.0);
+}
+
+/// Discharge per unit width through w face (ic, fj), with the depth taken upwind.
+fn sd_qy(ic : i32, fj : i32) -> f32 {
+    let w = w_face_mac0_at(ic, fj);
+    return w * select(h_at(ic, fj), h_at(ic, fj - 1), w > 0.0);
+}
+
+@compute @workgroup_size(16, 16)
+fn sdAdvectU(@builtin(global_invocation_id) id: vec3u) {
+    let sx = simulationSettings.size.x + 1u;
+    let sy = simulationSettings.size.y;
+    if (id.x >= sx || id.y >= sy) { return; }
+    let fi = i32(id.x);
+    let jc = i32(id.y);
+    let u = u_face_mac0_at(fi, jc);
+    let hbar = 0.5 * (h_at(fi - 1, jc) + h_at(fi, jc));
+    // The domain edges set their own faces after the step.
+    if (fi == 0 || fi == nx() || hbar <= simulationSettings.eps_wet) {
+        textureStore(faceUTexture, id.xy, vec4f(u, 0.0, 0.0, 0.0));
+        return;
+    }
+    // Along x, through the centres of the cells on either side.
+    let qc_r = 0.5 * (sd_qx(fi, jc) + sd_qx(fi + 1, jc));
+    let us_r = select(u_face_mac0_at(fi + 1, jc), u, qc_r > 0.0);
+    let qc_l = 0.5 * (sd_qx(fi - 1, jc) + sd_qx(fi, jc));
+    let us_l = select(u, u_face_mac0_at(fi - 1, jc), qc_l > 0.0);
+    let along = (qc_r * us_r - qc_l * us_l) - u * (qc_r - qc_l);
+    // Across, through the corners above and below.
+    let qy_t = 0.5 * (sd_qy(fi - 1, jc + 1) + sd_qy(fi, jc + 1));
+    let uu_t = select(u_face_mac0_at(fi, jc + 1), u, qy_t > 0.0);
+    let qy_b = 0.5 * (sd_qy(fi - 1, jc) + sd_qy(fi, jc));
+    let uu_b = select(u, u_face_mac0_at(fi, jc - 1), qy_b > 0.0);
+    let across = (qy_t * uu_t - qy_b * uu_b) - u * (qy_t - qy_b);
+    let rate = (along + across) / (simulationSettings.dx * hbar);
+    let u_new = u - simulationSettings.dt * rate;
+    textureStore(faceUTexture, id.xy, vec4f(clamp_face_vel(u_new), 0.0, 0.0, 0.0));
+}
+
+@compute @workgroup_size(16, 16)
+fn sdAdvectW(@builtin(global_invocation_id) id: vec3u) {
+    let sx = simulationSettings.size.x;
+    let sy = simulationSettings.size.y + 1u;
+    if (id.x >= sx || id.y >= sy) { return; }
+    let ic = i32(id.x);
+    let fj = i32(id.y);
+    let w = w_face_mac0_at(ic, fj);
+    let hbar = 0.5 * (h_at(ic, fj - 1) + h_at(ic, fj));
+    if (fj == 0 || fj == ny() || hbar <= simulationSettings.eps_wet) {
+        textureStore(faceWTexture, id.xy, vec4f(w, 0.0, 0.0, 0.0));
+        return;
+    }
+    let qc_t = 0.5 * (sd_qy(ic, fj) + sd_qy(ic, fj + 1));
+    let ws_t = select(w_face_mac0_at(ic, fj + 1), w, qc_t > 0.0);
+    let qc_b = 0.5 * (sd_qy(ic, fj - 1) + sd_qy(ic, fj));
+    let ws_b = select(w, w_face_mac0_at(ic, fj - 1), qc_b > 0.0);
+    let along = (qc_t * ws_t - qc_b * ws_b) - w * (qc_t - qc_b);
+    let qx_r = 0.5 * (sd_qx(ic + 1, fj - 1) + sd_qx(ic + 1, fj));
+    let ww_r = select(w_face_mac0_at(ic + 1, fj), w, qx_r > 0.0);
+    let qx_l = 0.5 * (sd_qx(ic, fj - 1) + sd_qx(ic, fj));
+    let ww_l = select(w, w_face_mac0_at(ic - 1, fj), qx_l > 0.0);
+    let across = (qx_r * ww_r - qx_l * ww_l) - w * (qx_r - qx_l);
+    let rate = (along + across) / (simulationSettings.dx * hbar);
+    let w_new = w - simulationSettings.dt * rate;
+    textureStore(faceWTexture, id.xy, vec4f(clamp_face_vel(w_new), 0.0, 0.0, 0.0));
+}
+
 fn h_adj_cell(ic : i32, jc : i32) -> f32 {
     let g = simulationSettings.gravity;
     let dt = simulationSettings.dt;

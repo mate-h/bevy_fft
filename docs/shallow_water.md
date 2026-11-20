@@ -86,10 +86,12 @@ The grid textures are a `ShallowWaterTextures` of texture views. `ShallowWaterTe
 Each `encode_*` method sets the solver's bind groups and pipelines and dispatches into a compute pass the caller has begun, so it can sit between the caller's own dispatches.
 
 - `encode_sync_bed` copies the bed input into `bed_water.x` and leaves the depth alone.
-- `encode_step` runs one full step: MacCormack advection of the face velocities, the depth update with sources, sinks and evaporation, pressure, domain edges, wet and dry faces, friction, the PML, and the overshoot limiter.
+- `encode_step` runs one full step: advection of the face velocities (MacCormack, or momentum-conserving with `momentum_conserving`), the depth update with sources, sinks and evaporation, pressure, domain edges, wet and dry faces, friction, the PML, and the overshoot limiter.
 - `encode_reconstruct_velocity` averages the faces into the cell-centered `velocity` texture.
 
 The plugin also uses `encode_clear`, `encode_load_preset`, `encode_seed_ocean`, `encode_interact`, `encode_ocean_band`, and `encode_particles`, which are public for callers that want them.
+
+By default the face velocities are advected with MacCormack's semi-Lagrangian steps, as in CMF10. That form is non-conservative, so a bore moves at the wrong speed: Stoker's dam break runs about a quarter short. `momentum_conserving`, on `ShallowWaterSettings` and `ShallowWaterController`, swaps it for Stelling and Duinmeijer's (2003) momentum-conserving advection. That form puts the bore within a cell and the depth behind it within 1%, and lets a flood front over a dry bed run further. It is two kernels instead of six. It damps a free vortex somewhat faster: after 6 s it keeps 51% of its energy against MacCormack's 61%. [`tests/shallow_water_dam_break_gpu.rs`](../tests/shallow_water_dam_break_gpu.rs) checks both schemes against Stoker and Ritter, and the vortex.
 
 The overshoot limiter blends a cell's depth toward its neighbours' where the surface steps down by more than 2 Δx, after CMF10 §2.2. It only lowers wet crests, so a dry boulder standing above the water stays dry. Lowering a crest still removes a little water, so tests that check volume turn it off.
 

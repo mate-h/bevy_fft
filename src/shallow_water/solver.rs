@@ -42,6 +42,8 @@ pub struct ShallowWaterPipelines {
     pub mac_u_sl_forward: CachedComputePipelineId,
     pub mac_u_sl_reverse: CachedComputePipelineId,
     pub mac_u_combine: CachedComputePipelineId,
+    pub sd_advect_u: CachedComputePipelineId,
+    pub sd_advect_w: CachedComputePipelineId,
     pub mac_w_copy: CachedComputePipelineId,
     pub mac_w_sl_forward: CachedComputePipelineId,
     pub mac_w_sl_reverse: CachedComputePipelineId,
@@ -135,6 +137,8 @@ impl FromWorld for ShallowWaterPipelines {
             mac_u_sl_forward: q("shallow_water_mac_u_fwd", "macU_sl_forward"),
             mac_u_sl_reverse: q("shallow_water_mac_u_rev", "macU_sl_reverse"),
             mac_u_combine: q("shallow_water_mac_u_comb", "macU_combine"),
+            sd_advect_u: q("shallow_water_sd_advect_u", "sdAdvectU"),
+            sd_advect_w: q("shallow_water_sd_advect_w", "sdAdvectW"),
             mac_w_copy: q("shallow_water_mac_w_copy", "macW_copy"),
             mac_w_sl_forward: q("shallow_water_mac_w_fwd", "macW_sl_forward"),
             mac_w_sl_reverse: q("shallow_water_mac_w_rev", "macW_sl_reverse"),
@@ -181,6 +185,8 @@ impl ShallowWaterPipelines {
             mac_u_sl_forward: get(self.mac_u_sl_forward)?,
             mac_u_sl_reverse: get(self.mac_u_sl_reverse)?,
             mac_u_combine: get(self.mac_u_combine)?,
+            sd_advect_u: get(self.sd_advect_u)?,
+            sd_advect_w: get(self.sd_advect_w)?,
             mac_w_copy: get(self.mac_w_copy)?,
             mac_w_sl_forward: get(self.mac_w_sl_forward)?,
             mac_w_sl_reverse: get(self.mac_w_sl_reverse)?,
@@ -223,6 +229,8 @@ pub struct ShallowWaterKernels {
     mac_u_sl_forward: ComputePipeline,
     mac_u_sl_reverse: ComputePipeline,
     mac_u_combine: ComputePipeline,
+    sd_advect_u: ComputePipeline,
+    sd_advect_w: ComputePipeline,
     mac_w_copy: ComputePipeline,
     mac_w_sl_forward: ComputePipeline,
     mac_w_sl_reverse: ComputePipeline,
@@ -413,6 +421,10 @@ pub struct ShallowWaterSettings {
     /// order upwind. Upwind diffuses about |u| Δx / 2, enough to damp roll waves well past the
     /// Froude number where they should grow.
     pub second_order_depth: bool,
+    /// Advects the face velocities in momentum-conserving form (Stelling and Duinmeijer 2003)
+    /// instead of MacCormack's non-conservative semi-Lagrangian steps, so bores and flood
+    /// fronts move at the right speed.
+    pub momentum_conserving: bool,
     /// Unit wind direction on the grid, for the ocean seed.
     pub wind_dir: Vec2,
     /// Step counter for the wave maker edge and particle respawns.
@@ -440,6 +452,7 @@ impl Default for ShallowWaterSettings {
             ocean_forcing: false,
             overshoot_limiter: true,
             second_order_depth: false,
+            momentum_conserving: false,
             wind_dir: Vec2::X,
             timestamp: 0,
         }
@@ -549,6 +562,9 @@ pub struct ShallowWaterSolver {
     settings_group: BindGroup,
     fallback_bed: TextureView,
     fallback_source: TextureView,
+    /// [`ShallowWaterSettings::momentum_conserving`] from the last
+    /// [`Self::write_settings`], which picks the advection kernels.
+    momentum_conserving: std::sync::atomic::AtomicBool,
 }
 
 impl ShallowWaterSolver {
@@ -660,6 +676,7 @@ impl ShallowWaterSolver {
             settings_group,
             fallback_bed,
             fallback_source,
+            momentum_conserving: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -710,6 +727,10 @@ impl ShallowWaterSolver {
             self.inputs.border.is_some(),
         );
         write_uniform(queue, &self.simulation, &uniform);
+        self.momentum_conserving.store(
+            settings.momentum_conserving,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     /// Writes the brush and preset parameters for [`Self::encode_interact`] and
@@ -810,14 +831,24 @@ impl ShallowWaterSolver {
             self.border_groups(),
         );
         self.bind(pass);
-        self.dispatch(pass, &k.mac_u_copy, u);
-        self.dispatch(pass, &k.mac_u_sl_forward, u);
-        self.dispatch(pass, &k.mac_u_sl_reverse, u);
-        self.dispatch(pass, &k.mac_u_combine, u);
-        self.dispatch(pass, &k.mac_w_copy, w);
-        self.dispatch(pass, &k.mac_w_sl_forward, w);
-        self.dispatch(pass, &k.mac_w_sl_reverse, w);
-        self.dispatch(pass, &k.mac_w_combine, w);
+        if self
+            .momentum_conserving
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            self.dispatch(pass, &k.mac_u_copy, u);
+            self.dispatch(pass, &k.mac_w_copy, w);
+            self.dispatch(pass, &k.sd_advect_u, u);
+            self.dispatch(pass, &k.sd_advect_w, w);
+        } else {
+            self.dispatch(pass, &k.mac_u_copy, u);
+            self.dispatch(pass, &k.mac_u_sl_forward, u);
+            self.dispatch(pass, &k.mac_u_sl_reverse, u);
+            self.dispatch(pass, &k.mac_u_combine, u);
+            self.dispatch(pass, &k.mac_w_copy, w);
+            self.dispatch(pass, &k.mac_w_sl_forward, w);
+            self.dispatch(pass, &k.mac_w_sl_reverse, w);
+            self.dispatch(pass, &k.mac_w_combine, w);
+        }
         self.dispatch(pass, &k.stage_movable_depth, cell);
         self.dispatch(pass, &k.limit_outflow, cell);
         if face_volumes {

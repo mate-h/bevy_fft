@@ -151,6 +151,10 @@ pub struct ShallowWaterController {
     pub brush_force: f32,
     /// Manning roughness n on top of [`Self::friction`]. Zero turns it off.
     pub manning_n: f32,
+    /// Advects velocity in momentum-conserving form, after Stelling and Duinmeijer (2003), so
+    /// bores and flood fronts move at the right speed. See
+    /// [`ShallowWaterSettings::momentum_conserving`].
+    pub momentum_conserving: bool,
     /// Fraction of the water depth that evaporates per second.
     pub evaporation: f32,
     /// Optional `Rgba32Float` source texture, one texel per cell. `.x` adds depth per second and
@@ -443,6 +447,7 @@ impl ShallowWaterController {
             brush_radius: 16.0,
             brush_force: 0.75,
             manning_n: 0.0,
+            momentum_conserving: false,
             evaporation: 0.0,
             source: None,
             pressure_head: None,
@@ -539,6 +544,7 @@ impl ShallowWaterController {
             ocean_forcing: self.ocean_forcing,
             overshoot_limiter: true,
             second_order_depth: false,
+            momentum_conserving: self.momentum_conserving,
             wind_dir,
             timestamp,
         }
