@@ -66,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The shallow water overshoot limiter no longer pours water onto dry cells. CMF10's test reads only surface heights, so a dry cell more than 2 Δx above wet water, such as a boulder, passed it, and the blend added an eighth of the wet neighbour's depth every step. The limiter now only lowers wet crests.
 - A free floating body that presses shallow water settles instead of bobbing without end: `FloatingBodySettings::pressure_relaxation` defaults to 0.05 instead of 0.25, so the head follows the hull over about 20 frames instead of counting its heave twice. The `pool` example's crate presses the water all the time again.
 - Baked terrain no longer rises to 0 m in a thin line around the map: `tools/pad_terrain_borders.py` replaces the edge tiles' outer texels, which the bevy_terrain processor fills with 0 m, with the data inside them, and both bake scripts run it. The `beach` example's water bed reads the whole map again.
 - A shallow water grid's ocean band and PML no longer drain land along an ocean border, so a river that runs in over a land edge keeps its water.

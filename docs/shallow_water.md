@@ -91,6 +91,8 @@ Each `encode_*` method sets the solver's bind groups and pipelines and dispatche
 
 The plugin also uses `encode_clear`, `encode_load_preset`, `encode_seed_ocean`, `encode_interact`, `encode_ocean_band`, and `encode_particles`, which are public for callers that want them.
 
+The overshoot limiter blends a cell's depth toward its neighbours' where the surface steps down by more than 2 Δx, after CMF10 §2.2. It only lowers wet crests, so a dry boulder standing above the water stays dry. Lowering a crest still removes a little water, so tests that check volume turn it off.
+
 Manning friction slows each face implicitly by `u / (1 + g Δt n² |u| / h^(4/3))`, with h the mean depth of the two cells beside the face, floored at the wet threshold. It applies after the linear `friction` factor, and a zero `manning_n` turns it off.
 
 Before the depth update, `limitOutflow` scales each cell's outgoing fluxes so one step never drains more than the cell holds, so the depth stays non-negative without a clamp that creates water. The height kernels stage their result in `pml_state.z` and `commitHeight` copies it into `bed_water.y`, so every cell reads its neighbours' depth from before the kernel. By default the depth moves through each face first-order upwind, which diffuses about |u| Δx / 2. `second_order_depth` adds a flux-limited Lax-Wendroff correction with van Leer's limiter (Sweby 1984), which stays TVD up to Courant number 1 and lets roll waves grow at lower Froude numbers.

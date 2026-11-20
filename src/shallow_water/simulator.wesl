@@ -1312,21 +1312,28 @@ fn overshootReduce(@builtin(global_invocation_id) id: vec3u) {
     let eta_e = eta_at(i + 1, j);
     let eta_s = eta_at(i, j - 1);
     let eta_n = eta_at(i, j + 1);
+    // CMF10 tests surface heights only, so a dry cell standing over 2 Δx above wet water, such
+    // as a boulder, passes too. Raising its depth there poured water onto it every step. The
+    // limiter only lowers wet crests.
+    if (bw.y <= simulationSettings.eps_wet) {
+        stage_height(id.xy, bw.y);
+        return;
+    }
     if (eta_c - eta_w > lam && eta_c > eta_e) {
         let half = max(0.0, 0.5 * (bw.y + h_at(i + 1, j)));
-        bw.y += a_edge * (half - bw.y);
+        bw.y += a_edge * min(half - bw.y, 0.0);
     }
     if (eta_c - eta_e > lam && eta_c > eta_w) {
         let half = max(0.0, 0.5 * (bw.y + h_at(i - 1, j)));
-        bw.y += a_edge * (half - bw.y);
+        bw.y += a_edge * min(half - bw.y, 0.0);
     }
     if (eta_c - eta_s > lam && eta_c > eta_n) {
         let half = max(0.0, 0.5 * (bw.y + h_at(i, j + 1)));
-        bw.y += a_edge * (half - bw.y);
+        bw.y += a_edge * min(half - bw.y, 0.0);
     }
     if (eta_c - eta_n > lam && eta_c > eta_s) {
         let half = max(0.0, 0.5 * (bw.y + h_at(i, j - 1)));
-        bw.y += a_edge * (half - bw.y);
+        bw.y += a_edge * min(half - bw.y, 0.0);
     }
     stage_height(id.xy, max(0.0, bw.y));
 }

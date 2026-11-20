@@ -72,7 +72,7 @@ Access: "open" means an author, institutional or arXiv copy was seen in search r
 | 1 | Ferguson 2007, Flow resistance equations for gravel- and boulder-bed streams, WRR 43 W05427 | Friction in cobble streams | https://dro.dur.ac.uk/4448 | Open (Durham) |
 | 2 | Chanson 2009, Current knowledge in hydraulic jumps and related phenomena, Eur. J. Mech. B/Fluids 28 | Jump validation, roller aeration | https://core.ac.uk/download/15057462.pdf | Open |
 | 3 | Gonzalez-Ochoa 2016, Rendering Rapids in Uncharted 4, SIGGRAPH Advances | White water look | https://advances.realtimerendering.com/s2016/index.html | Open |
-| 4 | Yu, Neyret, Bruneton, Holzschuch 2009, Scalable Real-Time Animation of Rivers, CGF 28(2) | Far-field river detail | https://hal.inria.fr/inria-00345903 | Open (HAL) |
+| 4 | Yu, Neyret, Bruneton, Holzschuch 2009, Scalable Real-Time Animation of Rivers, CGF 28(2) | Far-field river detail | https://hal.inria.fr/inria-00345903, doi:10.1111/j.1467-8659.2009.01363.x | Open (HAL) |
 | 5 | Ihmsen et al. 2012, Unified Spray, Foam and Air Bubbles for Particle-Based Fluids, Vis. Comput. 28 | Spray/foam/bubble classes at falls | https://cg.informatik.uni-freiburg.de/publications/2012_CGI_sprayFoamBubbles.pdf | Open |
 | 6 | Ervine and Falvey 1987, Behaviour of turbulent water jets in the atmosphere and in plunge pools, Proc. ICE 83 | Nappe breakup length, pool penetration | https://doi.org/10.1680/iicep.1987.353 | Paywalled |
 | 7 | Valle and Pasternack 2006, Air concentrations of submerged and unsubmerged hydraulic jumps in a bedrock step-pool channel, JGR 111 | Aeration calibration | https://pasternack.ucdavis.edu/research/projects/waterfalls/small-step-hydraulics | Project page open; paper uncertain (Wiley) |
@@ -87,7 +87,7 @@ Access: "open" means an author, institutional or arXiv copy was seen in search r
 | 16 | Wilcox and Wohl 2006, Flow resistance dynamics in step-pool channels 1, WRR 42 | Spill resistance at step lips | https://www.umt.edu/wilcox/documents/publications/wilcox_wohl-wrr2006.pdf | Open |
 | 17 | Chanson and Montes 1995, Characteristics of undular hydraulic jumps, J. Hydraul. Eng. 121(2) | Standing wave wavelength and amplitude | https://core.ac.uk/works/6239037 | Open (UQ) |
 | 18 | Pfaff, Thuerey, Cohen, Tariq, Gross 2010, Scalable Fluid Simulation using Anisotropic Turbulence Particles, TOG 29(6) | Subgrid turbulence detail | https://media.disneyanimation.com/uploads/production/publication_asset/27/asset/turbulence-pfaff.pdf | Open |
-| 19 | Jeschke et al. 2020, Making Procedural Water Waves Boundary-aware, CGF 39(8) | Detail waves near banks and rocks | https://research-explorer.ista.ac.at/record/8766 | Open |
+| 19 | Jeschke et al. 2020, Making Procedural Water Waves Boundary-aware, CGF 39(8) | Detail waves near banks and rocks | https://research-explorer.ista.ac.at/record/8766, doi:10.1111/cgf.14100 | Open |
 | 20 | Yu, Neyret, Bruneton, Holzschuch 2011, Lagrangian Texture Advection, TVCG 17(11) | Flow detail without stretching | HAL id to confirm (inria-00355827 is the earlier spectrum-preserving advection report) | Open (HAL) |
 | 21 | Mihalef, Metaxas, Sussman 2009, Simulation of Two-Phase Flow with Sub-Scale Droplet and Bubble Effects, CGF 28(2) | When a sheet breaks into drops | https://doi.org/10.1111/j.1467-8659.2009.01362.x | Paywalled |
 | 22 | DreamWorks 2019, Instafalls talk | Procedural waterfalls with landing foam | https://research.dreamworks.com/wp-content/uploads/2019/10/talk_dragon3_instafalls_embedded_v5.pdf | Open; authors not checked |
@@ -166,3 +166,5 @@ An independent review (2026-11-19) checked this survey against the code and the 
 - The stream example can't be P1 while it waits on P2 work. It is the acceptance scene at P3.
 
 The backlog that came out of this is bead epic bevy_fft-zog. Its parts are solver correctness, the river surface on the mesh, white water and waterfalls, and stream scale.
+
+As of 2026-11-20 these are in `.dev/papers/water`: Ferguson 2007, Chanson 2009, Ervine and Falvey 1987, Valle and Pasternack 2006, Jirka 2001, Abrahams 1995, Comiti 2007, Wilcox and Wohl 2006, Ihmsen 2012 and Pan 2012. Pan 2012 appeared at Pacific Graphics 2012. The Disney link in entry 18 serves Pfaff 2009, Synthetic Turbulence using Artificial Boundary Layers, not the 2010 paper; that file is in the corpus too.

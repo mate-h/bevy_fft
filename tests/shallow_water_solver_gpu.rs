@@ -5,7 +5,8 @@
 //! with `syncBed`, and runs several steps with a source texture. A Gaussian bump travels across
 //! the bed while sources add water. With walls on every edge and the overshoot limiter off, the
 //! solver conserves volume, so the water on the grid must equal what the sources added. A second
-//! run drains a strip with sink weight 1 and checks that it ends dry.
+//! run drains a strip with sink weight 1 and checks that it ends dry. A third raises a one-cell
+//! pinnacle out of the water with the overshoot limiter on, which must not wet it.
 use bevy::{
     app::PluginsState,
     prelude::*,
@@ -44,7 +45,13 @@ const SINK: std::ops::Range<u32> = 56..64;
 struct Scenario {
     sink: bool,
     evaporation: f32,
+    /// A dry one-cell pinnacle, and the overshoot limiter on.
+    pinnacle: bool,
 }
+
+/// The pinnacle's cell, just off the source block's corner so water reaches it, and its height,
+/// well over the limiter's 2 Δx.
+const PINNACLE: (u32, u32, f32) = (17, 12, 3.0);
 
 #[derive(Resource, Clone, ExtractResource)]
 #[extract_app(RenderApp)]
@@ -52,6 +59,7 @@ struct Grid {
     images: ShallowWaterImages,
     scenario_sink: bool,
     evaporation: f32,
+    pinnacle: bool,
     frames_done: Arc<AtomicU32>,
 }
 
@@ -70,7 +78,10 @@ struct Driver {
 }
 
 /// Bed height at cell `(x, y)` on frame `frame`: a gentle slope and a bump moving along +x.
-fn bed_height(x: u32, y: u32, frame: u32) -> f32 {
+fn bed_height(x: u32, y: u32, frame: u32, pinnacle: bool) -> f32 {
+    if pinnacle && (x, y) == (PINNACLE.0, PINNACLE.1) {
+        return PINNACLE.2;
+    }
     let cx = 20.0 + 0.4 * frame as f32;
     let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
     let r2 = (px - cx).powi(2) + (py - 32.0).powi(2);
@@ -173,7 +184,7 @@ fn prepare_driver(
                 gravity: 1.0,
                 manning_n: 0.03,
                 evaporation: grid.evaporation,
-                overshoot_limiter: false,
+                overshoot_limiter: grid.pinnacle,
                 ..default()
             },
         );
@@ -182,7 +193,7 @@ fn prepare_driver(
     }
     let frame = driver.frame;
     let heights: Vec<f32> = (0..N * N)
-        .map(|i| bed_height(i % N, i / N, frame))
+        .map(|i| bed_height(i % N, i / N, frame, grid.pinnacle))
         .collect();
     upload(
         &queue,
@@ -271,6 +282,7 @@ fn solver_app(scenario: Scenario) -> (App, Arc<AtomicU32>) {
         images,
         scenario_sink: scenario.sink,
         evaporation: scenario.evaporation,
+        pinnacle: scenario.pinnacle,
         frames_done: frames_done.clone(),
     });
     (app, frames_done)
@@ -315,12 +327,13 @@ fn core_solver_steps_a_moving_bed_with_sources_and_sinks() {
     let cells = run(Scenario {
         sink: false,
         evaporation: 0.0,
+        pinnacle: false,
     });
     let last = FRAMES - 1;
     for (i, c) in cells.iter().enumerate() {
         let (x, y) = (i as u32 % N, i as u32 / N);
         assert!(c.is_finite() && c.y >= 0.0, "cell ({x}, {y}) holds {c}");
-        assert_eq!(c.x, bed_height(x, y, last), "bed at ({x}, {y})");
+        assert_eq!(c.x, bed_height(x, y, last, false), "bed at ({x}, {y})");
     }
     let volume: f32 = cells.iter().map(|c| c.y).sum();
     let block = (SOURCE.len() * SOURCE.len()) as f32;
@@ -346,6 +359,7 @@ fn core_solver_steps_a_moving_bed_with_sources_and_sinks() {
     let cells = run(Scenario {
         sink: true,
         evaporation: 0.01,
+        pinnacle: false,
     });
     let mut drained = 0.0;
     for (i, c) in cells.iter().enumerate() {
@@ -359,5 +373,27 @@ fn core_solver_steps_a_moving_bed_with_sources_and_sinks() {
     assert!(
         drained < volume,
         "sink and evaporation left {drained}, at least the closed grid's {volume}"
+    );
+}
+
+/// CMF10's overshoot limiter blends a cell's depth toward its neighbours' where the surface steps
+/// down by more than 2 Δx. A dry pinnacle passes that test from its own bed height, so the blend
+/// used to pour an eighth of the wet neighbour's depth onto it every step.
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn overshoot_limiter_leaves_a_dry_pinnacle_dry() {
+    let cells = run(Scenario {
+        sink: false,
+        evaporation: 0.0,
+        pinnacle: true,
+    });
+    let block = (SOURCE.len() * SOURCE.len()) as f32;
+    let injected = RATE * DT * (FRAMES * STEPS_PER_FRAME) as f32 * block;
+    let volume: f32 = cells.iter().map(|c| c.y).sum();
+    let top = cells[(PINNACLE.1 * N + PINNACLE.0) as usize];
+    assert!(top.y < 1e-4, "the pinnacle holds {} m of water", top.y);
+    assert!(
+        (volume - injected).abs() < 1e-3 * injected,
+        "volume {volume} against {injected} added"
     );
 }
