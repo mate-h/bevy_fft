@@ -77,14 +77,22 @@ fn main() {
         }
     }
     let n = (SIDE / CELL) as u32;
-    let to_map = |p: [f32; 2]| [(p[0] - 0.5 * n as f32) * CELL, (p[1] - 0.5 * n as f32) * CELL];
+    let to_map = |p: [f32; 2]| {
+        [
+            (p[0] - 0.5 * n as f32) * CELL,
+            (p[1] - 0.5 * n as f32) * CELL,
+        ]
+    };
     let heights: Vec<f32> = (0..n * n)
         .map(|i| {
             let p = [(i % n) as f32 + 0.5, (i / n) as f32 + 0.5];
             height(&tiles, size, to_map(p))
         })
         .collect();
-    let source = [SOURCE[0] / CELL + 0.5 * n as f32, SOURCE[1] / CELL + 0.5 * n as f32];
+    let source = [
+        SOURCE[0] / CELL + 0.5 * n as f32,
+        SOURCE[1] / CELL + 0.5 * n as f32,
+    ];
     let cells = route(&heights, [n, n], source, |i| heights[i] < 0.0);
     // Smooth over about a channel width (14 m).
     let path = smooth_path(&cells, (7.0 / CELL).round() as usize);

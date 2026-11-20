@@ -169,50 +169,6 @@ const RIVER: [Vec2; 34] = [
 /// Channel width in meters where the river enters.
 const RIVER_WIDTH: f32 = 20.0;
 
-/// Thalweg of the reach where the LiDAR holds the river's water surface instead of its bed: about
-/// 200 m of near-flat ground 2.2 to 2.6 m above sea between the upper pool and the tidal lower
-/// river, which kept the river from reaching the sea. Traced as the lowest path through the
-/// settled grid's bed, smoothed, as x, z and the carved bed height above sea, falling about 0.6 m
-/// to the riffle where the river drops to the tide. [`carve_channel`] lowers the bed along it.
-const CHANNEL: [Vec3; 15] = [
-    Vec3::new(-854.1, -829.3, 1.45),
-    Vec3::new(-849.0, -815.0, 1.41),
-    Vec3::new(-837.6, -803.0, 1.36),
-    Vec3::new(-837.9, -787.0, 1.31),
-    Vec3::new(-837.6, -771.0, 1.27),
-    Vec3::new(-834.7, -755.0, 1.22),
-    Vec3::new(-830.4, -739.0, 1.17),
-    Vec3::new(-828.4, -723.0, 1.13),
-    Vec3::new(-824.1, -707.0, 1.08),
-    Vec3::new(-821.3, -691.0, 1.03),
-    Vec3::new(-819.6, -675.0, 0.99),
-    Vec3::new(-822.1, -659.0, 0.94),
-    Vec3::new(-821.6, -643.0, 0.90),
-    Vec3::new(-813.0, -629.0, 0.85),
-    Vec3::new(-804.7, -620.7, -0.70),
-];
-/// Width of the carved channel in meters, and how far its banks rise above its centreline.
-const CHANNEL_WIDTH: f32 = 14.0;
-const CHANNEL_BANK_RISE: f32 = 1.2;
-
-/// `height` above sea at `xz`, lowered into [`CHANNEL`] where it passes: a parabolic cross-section
-/// from the centreline's bed up [`CHANNEL_BANK_RISE`] at the banks, never raising the ground.
-fn carve_channel(xz: Vec2, height: f32) -> f32 {
-    let half = 0.5 * CHANNEL_WIDTH;
-    let mut carved = height;
-    for pair in CHANNEL.windows(2) {
-        let (a, b) = (pair[0], pair[1]);
-        let ab = b.xy() - a.xy();
-        let t = ((xz - a.xy()).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
-        let d = xz.distance(a.xy() + t * ab);
-        if d < half {
-            let bed = a.z + t * (b.z - a.z);
-            carved = carved.min(bed + CHANNEL_BANK_RISE * (d / half).powi(2));
-        }
-    }
-    carved
-}
-
 /// The river's discharge in m³/s, 4 unless `BEACH_RIVER` sets it. 0 turns the inflow off.
 fn river_discharge() -> f32 {
     std::env::var("BEACH_RIVER")
@@ -510,7 +466,7 @@ fn setup(
         .map(|i| {
             let cell = Vec2::new((i % grid) as f32, (i / grid) as f32) + 0.5;
             let xz = placement.center + (cell - 0.5 * grid as f32) * cell_size();
-            carve_channel(xz, bed.height(xz)) + SEA_LEVEL
+            bed.height(xz) + SEA_LEVEL
         })
         .collect();
     controller.bed_source = images.add(bed_source_image(grid, grid, &heights));

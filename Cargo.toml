@@ -43,6 +43,10 @@ path = "examples/pool/main.rs"
 required-features = ["free_camera"]
 
 [[example]]
+name = "carve_rivers"
+path = "examples/carve_rivers/main.rs"
+
+[[example]]
 name = "route_river"
 path = "examples/route_river/main.rs"
 

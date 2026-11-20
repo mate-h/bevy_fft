@@ -1,0 +1,13 @@
+[
+  {
+    "name": "Lumahai",
+    "source": [-905.4, -971.6],
+    "bankfull": 10.0,
+    "breach_depth": 1.5,
+    "sea_level": 0.0,
+    "smooth": 7.0,
+    "detail": 1.0,
+    "bank_width": 4.0,
+    "seed": 1
+  }
+]

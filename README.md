@@ -98,6 +98,12 @@ These environment variables change the beach:
 
 To bake another bay or river, [`tools/bake_topobathy.py`](tools/bake_topobathy.py) fetches heights from Esri TopoBathy, carves river channels along splines, and writes terrain tiles and a sea-floor depth texture. It needs an ArcGIS API key in `ARCGIS_API_KEY`.
 
+Elevation models record a river's water surface, not its bed. The `carve_rivers` example routes each river in a JSON file over the tiles with the `river_geometry` crate, cuts its long profile through recorded water surfaces, and carves a channel sized for its bankfull discharge into every LOD. The beach's tiles take its `examples/beach/rivers.json`; run it once after baking them:
+
+```bash
+cargo run --release --example carve_rivers -- assets/terrains/kauai_shoreline examples/beach/rivers.json
+```
+
 ## Modules
 
 | Module | Contents |
