@@ -16,6 +16,14 @@
 //! texels with texel centres at `+0.5`. Heights are in the caller's height unit, which is
 //! [`ChannelShape::cells_per_height`] texels tall.
 //!
+//! For heights in metres, as from an elevation model, set `cells_per_height` to
+//! `1 / metres_per_texel`; depths and `max_depth` are then metres too. The minimum sizes (a
+//! half-width of a texel, steps at least 3 samples apart, [`ChannelModel::min_width`]) stay in
+//! texels on purpose: they are what the grid can show. A river comes out the same size in
+//! metres at 1 m and 10 m texels (a test checks it), as long as the centreline runs near texel
+//! centres. On a coarse grid a centreline along texel edges carves a shallower, wider channel,
+//! since no texel sits on the thalweg.
+//!
 //! The code came from bevy_erosion's river brush and is shared with bevy_fft, which carves
 //! rivers into elevation models (`docs/river_ecosystem.md` in bevy_fft).
 
@@ -195,12 +203,7 @@ pub fn route(
                     seen[at(q)] = true;
                     parent[at(q)] = at(c) as u32;
                     order += 1;
-                    open.push(Reverse((
-                        sort_key(heights[at(q)]),
-                        order,
-                        q.x,
-                        q.y,
-                    )));
+                    open.push(Reverse((sort_key(heights[at(q)]), order, q.x, q.y)));
                 }
             }
         }
@@ -538,8 +541,8 @@ pub fn rasterize(
                 continue;
             }
             let (i, sec) = (i as usize, &secs[i as usize]);
-            let d = Vec2::new((j as u32 % size.x) as f32, (j as u32 / size.x) as f32) + 0.5
-                - path[i];
+            let d =
+                Vec2::new((j as u32 % size.x) as f32, (j as u32 / size.x) as f32) + 0.5 - path[i];
             // Past either end of the river.
             if d.dot(sec.tangent).abs() > 1.0 && (i == 0 || i == path.len() - 1) {
                 continue;
@@ -669,7 +672,11 @@ mod tests {
         });
         let cells = route(&h, SIZE, [5.5, 32.5], |_| false);
         assert_eq!(cells.last().unwrap()[0], SIZE[0] - 1);
-        assert!(cells.iter().all(|c| !h[(c[1] * SIZE[0] + c[0]) as usize].is_nan()));
+        assert!(
+            cells
+                .iter()
+                .all(|c| !h[(c[1] * SIZE[0] + c[0]) as usize].is_nan())
+        );
         let mut keys: Vec<f32> = vec![-2.0, -0.5, -0.0, 0.0, 0.25, 3.0];
         keys.sort_by_key(|&h| sort_key(h));
         assert_eq!(keys, [-2.0, -0.5, -0.0, 0.0, 0.25, 3.0]);
@@ -758,5 +765,69 @@ mod tests {
         let side = at(30, 32 + 5);
         assert!(side[1] > 0.0 && side[1] < 1.0, "{side:?}");
         assert_eq!(at(30, 5)[0], NO_RIVER);
+    }
+
+    /// A river of 50 m³/s down a 1 % valley in metres, carved at 1 m and at 10 m texels with
+    /// heights in metres, comes out the same size in metres: depth on the thalweg and width of
+    /// the channel.
+    #[test]
+    fn a_river_is_the_same_size_at_1_m_and_10_m_texels() {
+        let q = 50.0;
+        let measure = |metres_per_texel: f32| {
+            let span = 600.0;
+            let n = (span / metres_per_texel) as u32;
+            let shape = ChannelShape {
+                model: ChannelModel::default(),
+                metres_per_texel,
+                cells_per_height: 1.0 / metres_per_texel,
+                profile: 2.0,
+                max_depth: 100.0,
+                bank_width: 1.0,
+                bank_slope: 0.0,
+            };
+            // Falling 1 % along x, flat across.
+            // On texel centres: a centreline on a texel edge at 10 m texels puts the deepest texel
+            // 5 m off the thalweg, and the channel comes out 20 % shallower and a texel wider.
+            let path: Vec<[f32; 2]> = (0..n)
+                .map(|i| [i as f32 + 0.5, n as f32 / 2.0 + 0.5])
+                .collect();
+            let profile: Vec<f32> = path
+                .iter()
+                .map(|p| 10.0 - 0.01 * p[0] * metres_per_texel)
+                .collect();
+            let river = River {
+                flow: vec![q; path.len()],
+                profile: profile.clone(),
+                seed: 1,
+                path,
+            };
+            let cells = rasterize(&[river], &shape, 0.0, 0.0, [n, n]);
+            let x = n / 2;
+            let column: Vec<RiverCell> = (0..n).map(|y| cells[(y * n + x) as usize]).collect();
+            let level = 10.0 - 0.01 * (x as f32 + 0.5) * metres_per_texel;
+            let depth = column.iter().map(|c| level - c[0]).fold(0.0f32, f32::max);
+            let width = column.iter().filter(|c| c[1] == 0.0).count() as f32 * metres_per_texel;
+            (depth, width)
+        };
+        let (fine_depth, fine_width) = measure(1.0);
+        let (coarse_depth, coarse_width) = measure(10.0);
+        let (w, h) = ChannelModel::default().section(q, 1.0);
+        println!(
+            "model {w:.1} m x {h:.2} m; 1 m texels {fine_width} m x {fine_depth:.2} m; \
+             10 m texels {coarse_width} m x {coarse_depth:.2} m"
+        );
+        assert!(
+            (fine_depth - h).abs() < 0.05 * h,
+            "{fine_depth} against {h}"
+        );
+        assert!(
+            (coarse_depth - fine_depth).abs() < 0.1 * h,
+            "{coarse_depth} against {fine_depth}"
+        );
+        assert!((fine_width - w).abs() <= 2.0, "{fine_width} against {w}");
+        assert!(
+            (coarse_width - fine_width).abs() <= 10.0,
+            "{coarse_width} against {fine_width}"
+        );
     }
 }
