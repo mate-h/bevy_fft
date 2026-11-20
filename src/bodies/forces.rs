@@ -85,7 +85,8 @@ pub struct FloatingBodySettings {
     /// through the head: when it sinks, the head rises before the water has flowed away, so its
     /// buoyancy briefly counts the motion twice, and with the forces read back a few frames late
     /// a light body bobs without end. At 0.05, about 20 frames, the head follows the hull slowly
-    /// enough that a dropped crate settles; at 0.25 it never did.
+    /// enough that a dropped crate settles; at 0.25 it never did. The head moves with the hull,
+    /// so it eases in the hull's frame and doesn't trail a moving one.
     pub pressure_relaxation: f32,
     /// Splashes thrown off the waterline into the water particles, when
     /// [`WaterParticlesPlugin`](crate::particles::WaterParticlesPlugin) is in the app.
@@ -795,6 +796,9 @@ struct GridParams {
     height_scale: f32,
     relaxation: f32,
     has_obstruction: u32,
+    gravity: f32,
+    dt: f32,
+    parity: u32,
 }
 
 /// One shallow water grid that bodies press down, with its volume sums.
@@ -809,6 +813,8 @@ struct GridBuffers {
     cells: UVec2,
     displaced: Buffer,
     previous: Buffer,
+    /// Which half of `previous` holds last frame's head.
+    parity: u32,
     params: UniformBuffer<GridParams>,
 }
 
@@ -921,9 +927,13 @@ fn prepare_floating_bodies(
                 entity,
                 GridBuffers {
                     cells,
-                    // Displaced volume, then waterline area, per cell.
-                    displaced: per_cell("floating_body_displaced_volume", 2),
-                    previous: per_cell("floating_body_previous_head", 1),
+                    // Displaced volume, waterline area, the volume without the footprint
+                    // scale, waterline area times the hull's velocity along X and Z, and times
+                    // its squared speed through the water, per cell.
+                    displaced: per_cell("floating_body_displaced_volume", 6),
+                    // Last frame's head and this frame's, swapping each frame.
+                    previous: per_cell("floating_body_previous_head", 2),
+                    parity: 0,
                     params: UniformBuffer::default(),
                 },
             );
@@ -936,7 +946,11 @@ fn prepare_floating_bodies(
             height_scale,
             relaxation: frame.pressure_relaxation,
             has_obstruction: u32::from(obstruction.is_some()),
+            gravity: frame.params.gravity,
+            dt: frame.params.dt,
+            parity: buffers.parity,
         });
+        buffers.parity = 1 - buffers.parity;
         buffers.params.write_buffer(&device, &queue);
         let Some(params) = buffers.params.binding() else {
             continue;

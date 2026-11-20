@@ -144,8 +144,18 @@ fn dispersive_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     let st = c.yzw;
     let rise = -((east.z - west.z) + (north.w - south.w)) * inv;
     // The flow lane `.w` carries the pressure head, so body forces read the surface the water
-    // would have without the bodies.
-    let flow = vec4<f32>(st.yz / max(st.x, MIN_FLOW_DEPTH), rise, pressure_at(g));
+    // would have without the bodies. Under a hull it carries the whole deviation instead, and the
+    // patch adds no flow there, so the body reads the water below the patch and not the patch's
+    // response to its own pressure. A hull at rest holds the patch at its open level anyway, by
+    // the obstruction, but a moving hull lets the water under it go free so that its pressure
+    // makes its wake. The voxel forces, which arrive frames late and have no planing lift, can't
+    // ride that wave field: the boat example sat in its own trough and porpoised. Its drag is
+    // calibrated without it.
+    let head = pressure_at(g);
+    var flow = vec4<f32>(st.yz / max(st.x, MIN_FLOW_DEPTH), rise, head);
+    if head > 0.0 {
+        flow = vec4<f32>(0.0, 0.0, 0.0, -eta);
+    }
     let base_v = textureLoad(base_flow, gid.xy, slice, 0);
 
     let base = textureLoad(base_displacement, gid.xy, slice, 0);
