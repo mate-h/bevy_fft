@@ -7,10 +7,13 @@
 // multiple-scattered light of Eq. 9 and the single-scattered sunlight of Eq. 5, and is lit as if
 // by the downwelling irradiance at its depth, which is the `exp(-K_d y_S)` factor of Eq. 10. The
 // sun's share fades over its refracted beam's slant path, the same way beds seen from above do.
+// The air of white water clouds the view where the ray runs through it.
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 import bevy_pbr::render::mesh_view_bindings::{view, lights};
 import bevy_pbr::render::view_transformations::position_ndc_to_world;
-import bevy_fft::water::lod::{WaterLodSlices, displaced_height, lod_coverage, sample_lod_filtered};
+import bevy_fft::water::lod::{WaterLodSlices, displaced_height, lod_coverage, sample_lod, sample_lod_filtered};
+import bevy_fft::water::aeration::aerated_scattering;
+import bevy_render::maths::PI;
 import bevy_fft::water::underside::{
     MEDIUM_MAX_PATH,
     downwelling_irradiance,
@@ -31,6 +34,8 @@ import bevy_fft::water::underside::{
 @group(constants::MATERIAL_BIND_GROUP) @binding(6) var lod_sampler: sampler;
 /// Height of the water mesh plane in `x`.
 @group(constants::MATERIAL_BIND_GROUP) @binding(7) var<uniform> water_plane: vec4<f32>;
+/// Foam sim state, whose `.b` holds the air fraction of the water column.
+@group(constants::MATERIAL_BIND_GROUP) @binding(8) var lod_foam_state: texture_2d_array<f32>;
 
 /// Meters a scene point may sit below the displaced surface and still count as the surface, which
 /// covers the difference between the mesh and the per-pixel height.
@@ -88,6 +93,18 @@ fn water_column(xz: vec2<f32>) -> f32 {
     return mix(OPEN_WATER_DEPTH, sample_lod_filtered(lod_foam, lod_sampler, lod, xz, 0.0).g, c);
 }
 
+/// Air fraction of the water column under `xz`, from the foam sim.
+fn water_air(xz: vec2<f32>) -> f32 {
+    return max(sample_lod(lod_foam_state, lod, xz, 0.0).b, 0.0) * lod_coverage(lod, xz);
+}
+
+/// Light scattered around inside the bubbles of white water `depth` meters below the surface. The
+/// bubbles barely absorb, so deep in the cloud the light runs in all directions with the radiance
+/// of a diffuse field carrying the downwelling irradiance `e0` that reaches that depth.
+fn air_cloud_radiance(e0: vec3<f32>, depth: f32) -> vec3<f32> {
+    return e0 * exp(-max(medium.diffuse_attenuation, vec3<f32>(0.0)) * depth) / PI;
+}
+
 @fragment
 fn water_medium(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(in.position.xy);
@@ -130,6 +147,16 @@ fn water_medium(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     let transmittance = exp(-sigma_t * path);
     let scattered = medium_multiple_scattering(depth_near, descent, path, floor_depth, e0)
         + single_scattering(near, direction, path, water_plane.x, in.position.xy);
-    let lit = color.rgb * lighting * transmittance + scattered * view.exposure;
+    var lit = color.rgb * lighting * transmittance + scattered * view.exposure;
+    // The air of white water clouds the ray. Its transport scattering stands in for the extinction,
+    // since bubbles scatter mostly forward and the light they turn aside comes back from the rest of
+    // the cloud. The air is read at the ends of the ray, within a few meters of the eye.
+    let reach = min(path, 4.0);
+    let air = 0.5 * (water_air(near.xz) + water_air(near.xz + direction.xz * reach));
+    if air > 0.0 {
+        let cloud = 1.0 - exp(-aerated_scattering(air) * path);
+        let glow = air_cloud_radiance(e0, depth_near + 0.5 * reach * max(descent, 0.0)) * view.exposure;
+        lit = mix(lit, glow, cloud);
+    }
     return vec4<f32>(lit * meniscus, color.a);
 }

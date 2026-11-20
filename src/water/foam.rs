@@ -102,6 +102,16 @@ pub struct WaterAerationSettings {
     /// Shallower water counts as this deep for the detrainment, in meters, so a thin film doesn't
     /// lose its air in a single frame.
     pub min_depth: f32,
+    /// Residual foam coverage that each meter of air leaving the column leaves on the surface, per
+    /// meter of air per unit area. The bubbles that leave rise and gather into the streaks of foam
+    /// that trail rapids and jumps, which then fade over
+    /// [`WaterFoamSettings::residual_half_life`]. A single layer of millimetre bubbles holds about a
+    /// millimetre of air, and most bubbles burst as they surface, so the default of 20 lets about
+    /// one in fifty of them survive into lasting foam. Water that keeps an air fraction `C` then
+    /// holds residual foam of `foam_yield * C * detrainment_speed * residual_half_life / ln 2`,
+    /// about `69 C` with the defaults, so it is fully covered above 1.5 percent of air. An
+    /// appearance choice.
+    pub foam_yield: f32,
 }
 
 impl Default for WaterAerationSettings {
@@ -110,6 +120,7 @@ impl Default for WaterAerationSettings {
             formation_time: 0.08,
             detrainment_speed: 1.0,
             min_depth: 0.1,
+            foam_yield: 20.0,
         }
     }
 }
@@ -142,6 +153,8 @@ pub struct WaterFoamParams {
     pub air_detrainment: f32,
     /// See [`WaterAerationSettings::min_depth`].
     pub air_min_depth: f32,
+    /// See [`WaterAerationSettings::foam_yield`].
+    pub air_foam: f32,
 }
 
 impl WaterFoamParams {
@@ -185,6 +198,7 @@ impl WaterFoamParams {
             air_formation: 0.0,
             air_detrainment: 0.0,
             air_min_depth: 1.0,
+            air_foam: 0.0,
         }
     }
 
@@ -193,6 +207,7 @@ impl WaterFoamParams {
         self.air_formation = (-self.dt / settings.formation_time.max(1e-4)).exp();
         self.air_detrainment = settings.detrainment_speed.max(0.0) * self.dt;
         self.air_min_depth = settings.min_depth.max(1e-3);
+        self.air_foam = settings.foam_yield.max(0.0);
         self
     }
 }

@@ -9,6 +9,9 @@
 //! as Bevy's deferred lighting does, so it lights the medium with the same sun and sky as the
 //! surface.
 //!
+//! The air of white water, from the blue lane of [`WaterLodData::foam_state`], clouds the medium
+//! where the viewer's ray runs through it.
+//!
 //! When [`super::WaterCausticsSettings::enabled`] is set, the sun's share of the light on scene
 //! points under water follows [`super::WaterCaustics::map`]. Each point looks up the map where
 //! the refracted sun beam through it crosses the receiver plane.
@@ -101,6 +104,7 @@ pub(super) fn init_water_medium_layout(
                 ),
                 (6, sampler(SamplerBindingType::Filtering)),
                 (7, uniform_buffer::<Vec4>(false)),
+                (8, texture_2d_array(unfiltered)),
                 (112, uniform_buffer::<WaterMediumUniform>(false)),
                 (113, texture_2d_array(unfiltered)),
                 (114, uniform_buffer::<CausticsLookup>(false)),
@@ -275,10 +279,11 @@ pub(super) fn water_medium(
     let Some(lod) = lod else {
         return;
     };
-    let (Some(mask), Some(displacement), Some(foam), Some(caustic_map)) = (
+    let (Some(mask), Some(displacement), Some(foam), Some(foam_state), Some(caustic_map)) = (
         images.get(frame.mask()),
         images.get(&lod.displacement),
         images.get(&lod.foam),
+        images.get(&lod.foam_state),
         images.get(caustics.map()),
     ) else {
         return;
@@ -322,6 +327,7 @@ pub(super) fn water_medium(
             (5, &foam.texture_view),
             (6, &displacement.sampler),
             (7, plane),
+            (8, &foam_state.texture_view),
             (112, medium),
             (113, &caustic_map.texture_view),
             (114, caustic_params),

@@ -4,8 +4,8 @@
 // that the flow would hold where it loses energy fast enough to entrain air: at hydraulic jumps
 // and bores, in steep fast flow, and at waterfall lips and landings. They store it in the LOD
 // aeration lane. The foam sim carries the air along the drift and relaxes it toward that value
-// while bubbles leave the column. The surface turns the air fraction into a bright, scattering,
-// opaque layer.
+// while bubbles leave the column. The surface turns the air fraction into a bright, scattering
+// layer that hides more of the bed the more air it holds.
 
 /// Gravity in m/s².
 const AIR_GRAVITY: f32 = 9.81;
@@ -64,9 +64,16 @@ fn aeration_fall(drop: f32) -> f32 {
     return FALL_AIR * smoothstep(FALL_SPEED_START, FALL_SPEED_END, impact);
 }
 
-/// Radius in meters of the bubbles in aerated water. Bubbles in a jump roller are millimetres
-/// across. An appearance choice within that range.
-const AIR_BUBBLE_RADIUS: f32 = 0.002;
+/// Radius in meters that sets how much light the air of white water scatters per unit of air: the
+/// Sauter mean radius, three times the air's volume over its surface. A jump roller holds bubbles
+/// from a fraction of a millimetre to centimetres and larger air packets that it traps and sheds.
+/// The many small bubbles dominate the count, but the few large ones hold most of the air, so the
+/// Sauter radius sits well above the most common bubble. The same large packets set the
+/// detrainment speed of about 1 m/s that `WaterAerationSettings` takes from Vallé and Pasternack
+/// (2006), several times what a millimetre bubble rises at. An appearance choice in that range: at
+/// 4 mm, 5 percent of air over 0.2 m of water hides 43 percent of the bed and 30 percent hides 97
+/// percent. With 2 mm bubbles 5 percent already hid 68 percent, and every patch looked opaque.
+const AIR_BUBBLE_RADIUS: f32 = 0.004;
 /// Mean cosine of the light a bubble scatters. Geometric optics gives about 0.85 for air bubbles in
 /// water much larger than the wavelength, so most light carries on nearly straight.
 const AIR_BUBBLE_ASYMMETRY: f32 = 0.85;
@@ -88,15 +95,20 @@ struct AeratedLayer {
     opacity: f32,
 }
 
+/// Transport scattering coefficient in 1/m of water holding air fraction `air`. Bubbles of radius
+/// r scatter with an efficiency of 2, so N = C / (4/3 π r³) of them per cubic meter scatter
+/// 3 C / (2 r) per meter, and (1 - g) of that turns the light around.
+fn aerated_scattering(air: f32) -> f32 {
+    return 1.5 * max(air, 0.0) / AIR_BUBBLE_RADIUS * (1.0 - AIR_BUBBLE_ASYMMETRY);
+}
+
 /// Look of a column `depth` m deep holding air fraction `air` in water of absorption `absorption`
-/// per meter. Bubbles of radius r scatter with an efficiency of 2, so N = C / (4/3 π r³) of them
-/// per cubic meter scatter 3 C / (2 r) per meter, and (1 - g) of that turns the light around. The
-/// reflectance of a deep layer is Kubelka and Munk's, with K = 2 a and S the transport
-/// scattering, scaled by how much of the light the layer stops, and the surface returns part of
-/// what leaves it back down into the bubbles.
+/// per meter, with the scattering of `aerated_scattering`. The reflectance of a deep layer is
+/// Kubelka and Munk's, with K = 2 a and S the transport scattering, scaled by how much of the light
+/// the layer stops, and the surface returns part of what leaves it back down into the bubbles.
 fn aerated_layer(air: f32, depth: f32, absorption: vec3<f32>) -> AeratedLayer {
     var out: AeratedLayer;
-    let scattering = 1.5 * max(air, 0.0) / AIR_BUBBLE_RADIUS * (1.0 - AIR_BUBBLE_ASYMMETRY);
+    let scattering = aerated_scattering(air);
     out.opacity = 1.0 - exp(-scattering * max(depth, 0.0));
     if out.opacity <= 0.0 {
         return out;

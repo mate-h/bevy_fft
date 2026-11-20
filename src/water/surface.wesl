@@ -488,6 +488,88 @@ fn water_flow_detail(xz: vec2<f32>, pick: LodPick, footprint: f32) -> vec2<f32> 
     return strength * strain * slopes;
 }
 
+/// Meters of water covered by one repeat of the foam texture where it textures the air of white
+/// water. At twice the foam's tile its larger cells are a meter across, near the size of the boils
+/// and air packets a roller sheds. An appearance choice.
+const AIR_TILE: f32 = 12.0;
+/// Seconds of drift over which the air pattern is smeared along the flow. Each air packet leaves a
+/// trail of bubbles as the current carries it, so the pattern draws streaks that grow with the
+/// speed. An appearance choice.
+const AIR_STREAK_TIME: f32 = 0.6;
+/// Longest streak in meters.
+const AIR_STREAK_MAX: f32 = 2.5;
+/// Pattern samples along each streak.
+const AIR_STREAK_TAPS: u32 = 4u;
+/// Size of the coarse air pattern relative to the streaked one.
+const AIR_COARSE_SCALE: f32 = 2.7;
+/// Standard deviation of the air pattern before its contrast is set, which brings it to unit
+/// spread. One sample of the foam texture is even over [0, 1], a deviation of 0.29. Averaging
+/// along a streak lowers that toward 0.14 as the taps decorrelate, and with the coarse sample the
+/// pattern lands between 0.23 and 0.29.
+const AIR_PATTERN_SPREAD: f32 = 0.25;
+/// How far the air fraction swings either side of its mean across the pattern, in units of the
+/// mean. Air in a roller comes in packets and clusters, which a probe in the flow sees as an
+/// intermittent signal rather than a steady fraction. An appearance choice.
+const AIR_TEXTURE_CONTRAST: f32 = 0.85;
+/// Air fractions at or below this skip the pattern.
+const AIR_SKIP: f32 = 1e-3;
+
+/// Air pattern of one phase, centred on zero: the foam texture averaged over a streak along
+/// `along`, read at the advected texture coordinate `xz + offset`, plus one sample of it at
+/// `AIR_COARSE_SCALE` times the size, so the air also gathers into patches several meters across
+/// that still show from a distance. The sum is scaled back to the spread of one sample.
+fn water_air_streak(xz: vec2<f32>, offset: vec2<f32>, along: vec2<f32>) -> f32 {
+    let p = xz + offset;
+    var sum = 0.0;
+    for (var k = 0u; k < AIR_STREAK_TAPS; k++) {
+        let s = (f32(k) + 0.5) / f32(AIR_STREAK_TAPS) - 0.5;
+        sum += textureSampleLevel(foam_texture, foam_sampler, (p + along * s) / AIR_TILE, 0.0).r;
+    }
+    let turn = mat2x2<f32>(0.6, 0.8, -0.8, 0.6);
+    let coarse_uv = turn * p / (AIR_TILE * AIR_COARSE_SCALE) + vec2<f32>(0.53, 0.29);
+    let coarse = textureSampleLevel(foam_texture, foam_sampler, coarse_uv, 0.0).r;
+    return (sum / f32(AIR_STREAK_TAPS) - 0.5 + coarse - 0.5) * inverseSqrt(2.0);
+}
+
+/// Air pattern of one flow layer, its two phases blended so the spread does not pulse as they
+/// trade places.
+fn water_air_layer(xz: vec2<f32>, offsets: vec4<f32>, layer: u32, along: vec2<f32>) -> f32 {
+    let a = water_air_streak(xz, offsets.xy, along);
+    let b = water_air_streak(xz, offsets.zw, along);
+    let w = foam_flow_weight(surface.time, layer);
+    return (w * a + (1.0 - w) * b) * inverseSqrt(max(w * w + (1.0 - w) * (1.0 - w), 1e-4));
+}
+
+/// Air fraction at undisplaced `xz`, where the column holds `air` on average. The foam sim carries
+/// only the mean, so the air is spread into packets and streaks by the foam texture's cells, read
+/// through the advected texture coordinates of Neyret (2003) that the foam uses, so the pattern
+/// moves with the water. Along the flow each sample averages a streak of the pattern in texture
+/// space, which moves with the coordinates, so the streaks ride the current instead of standing in
+/// it. The mean air stays the same. `footprint` is the pixel's width in meters; where it covers the
+/// pattern's cells the air falls back to its mean.
+fn water_air_texture(xz: vec2<f32>, pick: LodPick, air: f32, footprint: f32) -> f32 {
+    if !water_quad_any(select(air, 0.0, air <= AIR_SKIP)) {
+        return air;
+    }
+    let texel = AIR_TILE / FOAM_TEXTURE_SIZE;
+    let resolved = 1.0 - smoothstep(3.0, 12.0, footprint / texel);
+    if resolved <= 0.0 {
+        return air;
+    }
+    var along = sample_pick(lod_drift, pick, 1u, 0u).xy * AIR_STREAK_TIME;
+    along *= min(1.0, AIR_STREAK_MAX / max(length(along), 1e-6));
+    let flow = water_foam_flow(pick);
+    var z = water_air_layer(xz, flow.long, 1u, along);
+    if flow.long_weight < 1.0 {
+        let short = water_air_layer(xz, flow.short, 0u, along);
+        let w = flow.long_weight;
+        z = (w * z + (1.0 - w) * short) * inverseSqrt(max(w * w + (1.0 - w) * (1.0 - w), 1e-4));
+    }
+    // A lognormal factor whose mean is one for a pattern of unit spread, so the mean air stays.
+    let k = AIR_TEXTURE_CONTRAST * resolved;
+    return air * exp(k * z / AIR_PATTERN_SPREAD - 0.5 * k * k);
+}
+
 /// Bends `n` by the foam relief.
 fn water_foam_normal(n: vec3<f32>, foam: WaterFoamSurface) -> vec3<f32> {
     return normalize(n - vec3<f32>(foam.slope.x, 0.0, foam.slope.y));
@@ -603,6 +685,8 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     let pick = lod_pick(water_lod, xz, 0.0);
     let lod_surface = water_lod_surface(pick);
     let foam = water_foam_surface(xz, pick, lod_surface.foam);
+    let footprint = sqrt(max(length(dpdx(xz)) * length(dpdy(xz)), 1e-12));
+    let air = water_air_texture(xz, pick, lod_surface.air, footprint);
     if water_is_dry(lod_surface.depth) {
         discard;
     }
@@ -615,7 +699,6 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
     let wave_normal = water_pixel_normal(pick);
-    let footprint = sqrt(max(length(dpdx(xz)) * length(dpdy(xz)), 1e-12));
     let detail = water_flow_detail(xz, pick, footprint);
     // Surface gradients add: the ripples ride on the waves, and the foam relief on both.
     let n_world = water_foam_normal(
@@ -626,7 +709,7 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = water_mix_foam_into_material(
         foam.opacity,
-        water_mix_air_into_material(lod_surface.air, lod_surface.depth, pbr_input.material.base_color),
+        water_mix_air_into_material(air, lod_surface.depth, pbr_input.material.base_color),
     );
     pbr_input.material.perceptual_roughness =
         water_unresolved_roughness(pbr_input.material.perceptual_roughness, lod_surface.variance);
@@ -643,6 +726,7 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
             lod_surface.depth,
             pbr_input.material.perceptual_roughness,
             foam.opacity,
+            air,
             in.position.xy,
         );
         out.color = main_pass_post_lighting_processing(pbr_input, vec4<f32>(radiance, 1.0));
@@ -655,7 +739,7 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
             lod_surface.depth,
             foam.opacity,
             lod_surface.foam.x,
-            lod_surface.air,
+            air,
             surface.plane_height,
         );
         out.color = main_pass_post_lighting_processing(pbr_input, out.color);
@@ -695,12 +779,14 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
     let foam = water_foam_surface(xz, pick, lod_surface.foam);
+    let footprint = sqrt(max(length(dpdx(xz)) * length(dpdy(xz)), 1e-12));
+    let air = water_air_texture(xz, pick, lod_surface.air, footprint);
     let n_world = water_foam_normal(water_pixel_normal(pick), foam);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = water_mix_foam_into_material(
         foam.opacity,
-        water_mix_air_into_material(lod_surface.air, lod_surface.depth, pbr_input.material.base_color),
+        water_mix_air_into_material(air, lod_surface.depth, pbr_input.material.base_color),
     );
     return deferred_output(in, pbr_input);
 }

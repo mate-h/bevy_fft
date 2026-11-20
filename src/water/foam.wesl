@@ -14,7 +14,8 @@
 // as a concentration, so it does not gather where the drift converges. Where a writer stored in
 // the LOD aeration lane more air than the column holds, the air rises toward that value with the
 // formation factor. Elsewhere it falls toward it as bubbles leave the column, by e each time the
-// column's depth worth of `air_detrainment` has gone by.
+// column's depth worth of `air_detrainment` has gone by. The bubbles that leave rise to the
+// surface, and `air_foam` of residual foam forms per meter of air that reaches it.
 //
 // Last frame's foam sits on last frame's slice placement. A lookup that leaves its own slice there
 // falls back to the next coarser slice, as Crest's foam sim does, and returns no foam past the
@@ -56,6 +57,8 @@ struct WaterFoamParams {
     air_detrainment: f32,
     /// Shallower water counts as this deep for the detrainment, in meters.
     air_min_depth: f32,
+    /// Residual foam coverage per meter of air that leaves the column and reaches the surface.
+    air_foam: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: WaterFoamParams;
@@ -190,15 +193,19 @@ fn foam_correct(@builtin(global_invocation_id) gid: vec3<u32>) {
     let deposited = f32(deposit[(slice * lod.resolution + gid.y) * lod.resolution + gid.x])
         / FOAM_DEPOSIT_UNIT;
     let fresh = foam.x * params.active_decay + breaking * params.source_active + deposited;
-    let residual = foam.y * params.residual_decay + foam.x * params.residual_gain
-        + breaking * params.source_residual;
     let held = saturate(textureLoad(lod_aeration, texel, slice, 0).r);
     var air = max(foam.z, 0.0);
+    // Meters of air per unit area that leave the column this step.
+    var surfaced = 0.0;
     if held > air {
         air = held + (air - held) * params.air_formation;
     } else {
-        air = max(held, air * exp(-params.air_detrainment / max(lane.g, params.air_min_depth)));
+        let left = max(held, air * exp(-params.air_detrainment / max(lane.g, params.air_min_depth)));
+        surfaced = (air - left) * max(lane.g, 0.0);
+        air = left;
     }
+    let residual = foam.y * params.residual_decay + foam.x * params.residual_gain
+        + breaking * params.source_residual + surfaced * params.air_foam;
     let result = saturate(vec3<f32>(fresh, residual, air));
     textureStore(foam_out, gid.xy, slice, vec4<f32>(result, 0.0));
 }

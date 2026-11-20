@@ -9,6 +9,7 @@ import bevy_pbr::render::mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLE
 import bevy_pbr::render::shadows::fetch_directional_shadow;
 import bevy_pbr::render::utils::interleaved_gradient_noise;
 import bevy_render::maths::{PI, quat_rotate};
+import bevy_fft::water::aeration::aerated_layer;
 
 struct WaterMediumUniform {
     absorption: vec3<f32>,
@@ -405,7 +406,8 @@ fn foam_from_below(upwelling: vec3<f32>) -> vec3<f32> {
 /// upward normal is `n`. Inside Snell's window the sky refracts through the surface. Outside it,
 /// total internal reflection shows the lit water body (Monzon et al. 2024, Eq. 11), with both its
 /// multiple-scattered and single-scattered light. The sun shows through as a lobe as wide as
-/// `perceptual_roughness` makes it. Foam of opacity `foam` covers that with `foam_from_below`. The
+/// `perceptual_roughness` makes it. Foam of opacity `foam` covers that with `foam_from_below`, and so
+/// does the air of white water, air fraction `air` over the column, as far as it hides the surface. The
 /// medium between the surface and the eye then dims it all and adds its own light. `floor_depth`
 /// is the water column below the surface point. Depths run from `surface_y`, the height of the
 /// mesh plane, as in the medium pass, so the light seen through the surface and past it agree.
@@ -417,6 +419,7 @@ fn shade_underside(
     floor_depth: f32,
     perceptual_roughness: f32,
     foam: f32,
+    air: f32,
     frag_xy: vec2<f32>,
 ) -> vec3<f32> {
     let to_eye = eye - position;
@@ -444,9 +447,13 @@ fn shade_underside(
     let roughness = clamp(perceptual_roughness, MIN_PERCEPTUAL_ROUGHNESS, 1.0);
     let sun = sun_transmission(n, V, roughness * roughness);
     var surface = (1.0 - reflectance) * sky + reflectance * body + sun;
-    if foam > 0.0 {
+    // Bubbles between the eye and the surface diffuse its light as foam does, so they take the same
+    // look from below.
+    let cloud = aerated_layer(air, column, medium.absorption).opacity;
+    let cover = 1.0 - (1.0 - saturate(foam)) * (1.0 - cloud);
+    if cover > 0.0 {
         let upwelling = medium_multiple_scattering(0.0, 1.0, column, column, e0);
-        surface = mix(surface, foam_from_below(upwelling), saturate(foam));
+        surface = mix(surface, foam_from_below(upwelling), cover);
     }
     // The view ray runs from the eye up to the surface point.
     let eye_depth = max(surface_y - eye.y, 0.0);

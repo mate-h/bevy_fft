@@ -5,7 +5,8 @@
 //! The discharge per unit width is the same everywhere, so nothing but the jump loses energy. The
 //! air fraction the foam sim keeps in `foam_state.b` should peak at the jump and fall off
 //! downstream at the rate bubbles leave the deeper water. Still water, gently varying subcritical
-//! flow, and uniform supercritical flow with no jump should hold none.
+//! flow, and uniform supercritical flow with no jump should hold none. The air that leaves the
+//! column downstream of a jump leaves residual foam behind.
 use bevy::{
     app::PluginsState,
     asset::RenderAssetUsages,
@@ -160,6 +161,12 @@ fn aeration_app((bed_water, velocity): (Image, Image)) -> App {
 /// Air fraction along the grid's middle row, one value per texel from west to east, after
 /// `seconds` of simulated time.
 fn air_profile(app: &mut App, seconds: f32) -> Vec<f32> {
+    state_profile(app, seconds).iter().map(|t| t.z).collect()
+}
+
+/// Foam state along the grid's middle row after `seconds` of simulated time: active foam,
+/// residual foam and air fraction in `x`, `y` and `z`.
+fn state_profile(app: &mut App, seconds: f32) -> Vec<Vec3> {
     for _ in 0..(seconds * 60.0) as u32 {
         step(app);
     }
@@ -175,8 +182,11 @@ fn air_profile(app: &mut App, seconds: f32) -> Vec<f32> {
     let y = res / 2;
     (0..res)
         .map(|x| {
-            let o = y * row + x * 16 + 8;
-            f32::from_le_bytes(bytes[o..o + 4].try_into().unwrap())
+            let lane = |i: usize| {
+                let o = y * row + x * 16 + 4 * i;
+                f32::from_le_bytes(bytes[o..o + 4].try_into().unwrap())
+            };
+            Vec3::new(lane(0), lane(1), lane(2))
         })
         .collect()
 }
@@ -240,6 +250,53 @@ fn a_hydraulic_jump_aerates_the_water_at_its_face_and_the_air_leaves_downstream(
     // a jump at Fr1 = 2, and peaks of 40 to 50 percent.
     check_jump(2.0, 0.26..=0.48);
     check_jump(3.0, 0.4..=0.5);
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn air_leaving_the_water_trails_residual_foam_downstream() {
+    // The same jump with and without foam from surfacing air, so the foam the jump makes by
+    // breaking cancels out.
+    let run = |foam_yield: f32| {
+        let mut app = aeration_app(jump(2.0));
+        app.insert_resource(WaterAerationSettings {
+            foam_yield,
+            ..default()
+        });
+        // Long enough for foam to drift 10 m at the tailwater's 1.2 m/s.
+        state_profile(&mut app, 10.0)
+    };
+    let with = run(WaterAerationSettings::default().foam_yield);
+    let without = run(0.0);
+    let gained = |x: f32| with[texel(x)].y - without[texel(x)].y;
+    let peak = with.iter().map(|t| t.z).fold(0.0, f32::max);
+    println!(
+        "residual foam gained: upstream {:.3}, +2 m {:.3}, +6 m {:.3}, +10 m {:.3}; air at +6 m {:.4} of peak {peak:.3}",
+        gained(JUMP_X - 6.0),
+        gained(JUMP_X + 2.0),
+        gained(JUMP_X + 6.0),
+        gained(JUMP_X + 10.0),
+        with[texel(JUMP_X + 6.0)].z,
+    );
+    assert!(
+        gained(JUMP_X - 6.0).abs() < 0.01,
+        "foam upstream of the jump"
+    );
+    // Six metres on, the air is nearly gone but the foam it left is still there.
+    assert!(with[texel(JUMP_X + 6.0)].z < 0.1 * peak);
+    assert!(gained(JUMP_X + 6.0) > 0.2, "{}", gained(JUMP_X + 6.0));
+    // Past the air the foam only drifts and fades, so over the next 4 m it halves once per
+    // residual half-life at the tailwater's speed.
+    let u2 = inflow_discharge(2.0) / conjugate_depth(2.0);
+    let half_life = WaterFoamSettings::default().residual_half_life;
+    let expected = 0.5f32.powf(4.0 / u2 / half_life);
+    let fade = gained(JUMP_X + 10.0) / gained(JUMP_X + 6.0);
+    println!("foam fades to {fade:.3} over 4 m, expected {expected:.3}");
+    assert!((fade / expected - 1.0).abs() < 0.25, "{fade} vs {expected}");
+    // The air is the same either way.
+    for (a, b) in with.iter().zip(&without) {
+        assert!((a.z - b.z).abs() < 1e-3, "air changed with the foam yield");
+    }
 }
 
 #[test]
