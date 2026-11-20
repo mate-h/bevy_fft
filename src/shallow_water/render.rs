@@ -501,6 +501,11 @@ pub fn run_shallow_water_sim(
         for n in nested {
             n.child.encode_interact(&mut pass);
         }
+        // The root grid has no parent to clear its `.w` lane, so clear both lanes here, or
+        // `.w` would add up for as long as the grid runs.
+        if !nested.is_empty() {
+            solver.encode_clear_all_face_volumes(&mut pass);
+        }
         encode_nested_frame(&mut pass, solver, nested);
         for n in nested {
             n.child.encode_reconstruct_velocity(&mut pass);
