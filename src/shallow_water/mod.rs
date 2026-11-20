@@ -44,7 +44,8 @@ use bevy::{
 use crate::water::{WaterHeightfield, WaterHeightfieldDry};
 
 pub use banks::{
-    BankLeak, LowBank, RiverBankCheck, RiverBankReport, SettledGrid, check_river_banks,
+    BankLeak, ClampedFall, LowBank, RiverBankCheck, RiverBankReport, SettledGrid,
+    check_river_banks, clamped_falls,
 };
 pub use nest::{
     NEST_REFINEMENT, ShallowWaterNest, ShallowWaterNestDescriptor, ShallowWaterNestPipelines,

@@ -283,6 +283,66 @@ fn arc_samples(river: &RiverSpline, spacing: f32) -> Vec<(Vec2, f32, Vec2)> {
     out
 }
 
+/// A waterfall lip where water falling the drop would outrun the solver's velocity clamp.
+#[derive(Clone, Copy, Debug)]
+pub struct ClampedFall {
+    /// World XZ of the face between the lip cell and the cell below it.
+    pub at: Vec2,
+    /// Bed drop across the face in meters.
+    pub drop: f32,
+    /// √(2 g drop), the speed the water reaches at the foot, in m/s.
+    pub fall_speed: f32,
+}
+
+/// Wet lips in a settled `grid` whose bed drops by more than `slope_cap` cell widths to a
+/// neighbour, as the waterfall test finds them, and where free fall down that drop reaches more
+/// than `velocity_clamp`, the solver's 0.5 Δx/Δt. Faster water than that is clipped and piles up
+/// at the foot of the fall instead of running on. Sorted by the drop, largest first.
+pub fn clamped_falls(
+    grid: &SettledGrid,
+    gravity: f32,
+    velocity_clamp: f32,
+    slope_cap: f32,
+    wet_depth: f32,
+) -> Vec<ClampedFall> {
+    let mut falls = Vec::new();
+    let (nx, ny) = (grid.cells.x, grid.cells.y);
+    for j in 0..ny {
+        for i in 0..nx {
+            let c = UVec2::new(i, j);
+            let k = grid.index(c);
+            if grid.depth[k] <= wet_depth {
+                continue;
+            }
+            for (di, dj) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                let (a, b) = (i as i32 + di, j as i32 + dj);
+                if a < 0 || b < 0 || a >= nx as i32 || b >= ny as i32 {
+                    continue;
+                }
+                let n = grid.index(UVec2::new(a as u32, b as u32));
+                let drop = grid.bed[k] - grid.bed[n];
+                // The lower cell filled to the lip is a pool, not a fall.
+                if drop <= slope_cap * grid.cell_size || grid.bed[n] + grid.depth[n] >= grid.bed[k]
+                {
+                    continue;
+                }
+                let fall_speed = (2.0 * gravity * drop).sqrt();
+                if fall_speed > velocity_clamp {
+                    let face =
+                        grid.centre(c) + 0.5 * grid.cell_size * Vec2::new(di as f32, dj as f32);
+                    falls.push(ClampedFall {
+                        at: face,
+                        drop,
+                        fall_speed,
+                    });
+                }
+            }
+        }
+    }
+    falls.sort_by(|a, b| b.drop.total_cmp(&a.drop));
+    falls
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,5 +434,27 @@ mod tests {
         assert_eq!(low.side, 1.0);
         assert!(low.along.0 >= 27.5 && low.along.1 <= 34.5, "{low:?}");
         assert!(low.crest < low.surface);
+    }
+
+    /// A 3 m drop on 1 m cells: free fall reaches 7.7 m/s, past the clamp of 6.25 m/s at
+    /// dt 0.08, and within the clamp of 30 m/s at dt 1/60.
+    #[test]
+    fn clamped_falls_flags_drops_faster_than_the_clamp() {
+        let cells = UVec2::new(8, 1);
+        let bed: Vec<f32> = (0..8).map(|i| if i < 4 { 3.0 } else { 0.0 }).collect();
+        let depth: Vec<f32> = (0..8).map(|i| if i < 4 { 0.2 } else { 0.1 }).collect();
+        let grid = SettledGrid {
+            cells,
+            cell_size: 1.0,
+            corner: Vec2::ZERO,
+            bed: &bed,
+            depth: &depth,
+        };
+        let clamp = |dt: f32| 0.5 * 1.0 / dt;
+        let falls = clamped_falls(&grid, 9.81, clamp(0.08), 1.5, 0.01);
+        assert_eq!(falls.len(), 1, "{falls:?}");
+        assert!((falls[0].drop - 3.0).abs() < 1e-6);
+        assert!((falls[0].at - Vec2::new(4.0, 0.5)).length() < 1e-6);
+        assert!(clamped_falls(&grid, 9.81, clamp(1.0 / 60.0), 1.5, 0.01).is_empty());
     }
 }

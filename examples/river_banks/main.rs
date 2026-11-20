@@ -267,6 +267,19 @@ fn main() {
     };
 
     let mut problems = 0;
+    let falls = clamped_falls(&grid, G, 0.5 * site.cell_size / dt, 1.5, 0.01);
+    if let Some(fall) = falls.first() {
+        println!(
+            "{} waterfall faces fall faster than the velocity clamp of {:.1} m/s; the largest \
+             drops {:.1} m to {:.1} m/s at world ({:.1}, {:.1}). Shorten dt or use finer cells.",
+            falls.len(),
+            0.5 * site.cell_size / dt,
+            fall.drop,
+            fall.fall_speed,
+            fall.at.x,
+            fall.at.y
+        );
+    }
     for (index, river) in site.rivers.iter().enumerate() {
         let length: f32 = river
             .sample(32)

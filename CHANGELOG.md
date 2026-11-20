@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `clamped_falls` finds waterfall lips in a settled shallow water grid where free fall outruns the solver's velocity clamp of 0.5 Δx/Δt, and the `river_banks` example reports them.
 - `ShallowWaterSettings::momentum_conserving` and `ShallowWaterController::momentum_conserving` advect shallow water velocity in momentum-conserving form, after Stelling and Duinmeijer (2003), instead of MacCormack's. A dam-break bore then lands within a cell of Stoker's exact solution instead of a quarter short. Off by default.
 - `FloatingBody::footprint_scale` multiplies the volume a body presses the water down with. A planing hull, carried mostly by dynamic lift, can then press its wake with its whole weight. The `boat` example's wake waves at 15 knots grew from 5 to 17 cm with it.
 - The `boat` example's chase camera has a wake view, toggled with `C` or started with `BOAT_VIEW=wake`: it looks down from above the starboard quarter at the whole boat and its wake.
