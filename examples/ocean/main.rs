@@ -250,7 +250,14 @@ fn setup(
         AtmosphereEnvironmentMapLight::default(),
         Msaa::Off,
         Fxaa::default(),
-        ScreenSpaceReflections::default(),
+        // Bevy's reflections trace one stochastic ray per pixel with no temporal filter, so on
+        // the water, roughened toward the horizon by its unresolved slopes, they speckle where
+        // rays hit the waves. Starting them above the water's roughness keeps them on the buoys
+        // and leaves the water its environment reflection, as in the forward pass.
+        ScreenSpaceReflections {
+            min_perceptual_roughness: 0.45..0.5,
+            ..default()
+        },
     ));
 
     let cascade_shadow_config = CascadeShadowConfigBuilder {

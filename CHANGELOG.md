@@ -76,6 +76,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Water drawn deferred, as in the `boat`, `ocean`, `wake` and `floating` examples, now gets the unresolved slope variance in its roughness and the flow detail in its normal. The deferred prepass left both out, so distant glitter stayed thin and flowing water stayed smooth there. The G-buffer now carries them to the deferred lighting, which matches the forward pass. The `ocean` example starts its screen-space reflections at a perceptual roughness of 0.45, so the roughened far water doesn't pick up their speckle.
 - The shallow water overshoot limiter no longer pours water onto dry cells. CMF10's test reads only surface heights, so a dry cell more than 2 Δx above wet water, such as a boulder, passed it, and the blend added an eighth of the wet neighbour's depth every step. The limiter now only lowers wet crests.
 - A free floating body that presses shallow water settles instead of bobbing without end: `FloatingBodySettings::pressure_relaxation` defaults to 0.05 instead of 0.25, so the head follows the hull over about 20 frames instead of counting its heave twice. The `pool` example's crate presses the water all the time again.
 - Baked terrain no longer rises to 0 m in a thin line around the map: `tools/pad_terrain_borders.py` replaces the edge tiles' outer texels, which the bevy_terrain processor fills with 0 m, with the data inside them, and both bake scripts run it. The `beach` example's water bed reads the whole map again.

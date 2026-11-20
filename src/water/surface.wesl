@@ -488,6 +488,12 @@ fn water_flow_detail(xz: vec2<f32>, pick: LodPick, footprint: f32) -> vec2<f32> 
     return strength * strain * slopes;
 }
 
+/// `wave_normal` with the flow detail's `slopes` added. Surface gradients add: the ripples ride on
+/// the waves, and the foam relief later rides on both.
+fn water_detail_normal(wave_normal: vec3<f32>, slopes: vec2<f32>) -> vec3<f32> {
+    return normalize(wave_normal / max(wave_normal.y, 1e-3) - vec3<f32>(slopes.x, 0.0, slopes.y));
+}
+
 /// Meters of water covered by one repeat of the foam texture where it textures the air of white
 /// water. At twice the foam's tile its larger cells are a meter across, near the size of the boils
 /// and air packets a roller sheds. An appearance choice.
@@ -700,11 +706,7 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
     let wave_normal = water_pixel_normal(pick);
     let detail = water_flow_detail(xz, pick, footprint);
-    // Surface gradients add: the ripples ride on the waves, and the foam relief on both.
-    let n_world = water_foam_normal(
-        normalize(wave_normal / max(wave_normal.y, 1e-3) - vec3<f32>(detail.x, 0.0, detail.y)),
-        foam,
-    );
+    let n_world = water_foam_normal(water_detail_normal(wave_normal, detail), foam);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = water_mix_foam_into_material(
@@ -781,13 +783,18 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     let foam = water_foam_surface(xz, pick, lod_surface.foam);
     let footprint = sqrt(max(length(dpdx(xz)) * length(dpdy(xz)), 1e-12));
     let air = water_air_texture(xz, pick, lod_surface.air, footprint);
-    let n_world = water_foam_normal(water_pixel_normal(pick), foam);
+    let detail = water_flow_detail(xz, pick, footprint);
+    let n_world = water_foam_normal(water_detail_normal(water_pixel_normal(pick), detail), foam);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
     pbr_input.material.base_color = water_mix_foam_into_material(
         foam.opacity,
         water_mix_air_into_material(air, lod_surface.depth, pbr_input.material.base_color),
     );
+    // The G-buffer carries the roughness to the deferred lighting pass, so the unresolved slopes
+    // widen the glitter there as they do in the forward pass.
+    pbr_input.material.perceptual_roughness =
+        water_unresolved_roughness(pbr_input.material.perceptual_roughness, lod_surface.variance);
     return deferred_output(in, pbr_input);
 }
 }
