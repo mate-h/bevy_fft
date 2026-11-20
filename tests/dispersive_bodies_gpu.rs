@@ -105,7 +105,39 @@ fn patch_app() -> App {
     for _ in 0..30 {
         step(&mut app);
     }
+    wait_for_pipelines(&mut app);
     app
+}
+
+/// Steps until every queued pipeline has compiled. The patch and the body passes skip frames
+/// while theirs compile, and how long that takes depends on what an earlier app in the process
+/// left in the shader cache, so counting frames from the start would put two runs at different
+/// simulation steps.
+fn wait_for_pipelines(app: &mut App) {
+    use bevy::render::{
+        RenderApp,
+        render_resource::{CachedPipelineState, PipelineCache},
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let cache = app.sub_app(RenderApp).world().resource::<PipelineCache>();
+        let mut ready = cache.waiting_pipelines().next().is_none();
+        for pipeline in cache.pipelines() {
+            match &pipeline.state {
+                CachedPipelineState::Ok(_) => {}
+                CachedPipelineState::Err(error) => panic!("a pipeline failed: {error}"),
+                _ => ready = false,
+            }
+        }
+        if ready {
+            return;
+        }
+        step(app);
+        assert!(
+            Instant::now() < deadline,
+            "pipelines never finished compiling"
+        );
+    }
 }
 
 fn settle(app: &mut App) {
@@ -237,6 +269,8 @@ fn after_splash(with_barge: bool, with_splash: bool) -> Vec<f32> {
     let mut app = patch_app();
     if with_barge {
         app.world_mut().spawn((wall(), Transform::IDENTITY));
+        step(&mut app);
+        wait_for_pipelines(&mut app);
     }
     // Let the barge settle into its dent.
     for _ in 0..300 {
