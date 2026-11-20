@@ -346,9 +346,12 @@ fn a_towed_body_trails_a_wake_in_deep_mode() {
     let mut app = patch_app();
     let mut body = barge();
     body.estimate_velocity = true;
+    // At the draft its 8 t float at, 0.24 m. Held half under water it pressed with 32 t, whose
+    // linear wake reaches 3 m. At this draft the linear wake reaches 0.8 m.
+    let draft = 8000.0 / (1025.0 * 32.0);
     let entity = app
         .world_mut()
-        .spawn((body, Transform::from_xyz(-40.0, 0.0, 0.0)))
+        .spawn((body, Transform::from_xyz(-40.0, 1.0 - draft, 0.0)))
         .id();
     for _ in 0..60 {
         step(&mut app);

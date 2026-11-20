@@ -51,6 +51,16 @@ Set `DispersiveController::placement` to a `DispersivePlacement` to put the patc
 
 `DispersiveLodBlend::Add` adds the free-surface elevation on top of the ocean, so swell keeps running through the patch and a wake rides on it. Linear waves superpose, so nothing is counted twice. `DispersiveLodBlend::Replace` takes over the height and the water depth lane instead, which suits flooding and shorelines. Both fade out over `blend_cells` along the patch edge. The domain is still periodic, so waves that reach the edge wrap around under the fade band.
 
+## Hulls on the patch
+
+With `enable_bodies`, floating bodies press the patch down with a pressure head, the depth of their hull below the water's open level in each cell, and in deep mode the Airy step drives the flux with the surface plus that head. A moving hull then trails the wake a moving pressure patch makes in linear theory (Havelock). The test `a_towed_hull_makes_the_wake_hull_theory_gives` tows the boat example's hull at 15 knots and reads 0.39 m crest to trough 10 m abeam, where the steady linear field of its own head gives 0.39 to 0.45 m over the 58 m of patch behind it. `the_wake_has_the_height_hull_theory_gives` drives the boat itself and reads 0.40 m. Measured small-craft wakes are of this size or more: a review by the Virginia Institute of Marine Science (2017) lists 0.41 m 100 m from the sailing line of an 8 m planing cruiser at 10 knots, from Zabawa and Ostrom (1980) and Sorensen (1973).
+
+The head's memory, which eases it toward its new value each frame (`FloatingBodySettings::pressure_relaxation`), moves with the hull: each cell reads last frame's head where the part of the hull over it was then. Where no hull is, the head is zero.
+
+Gilligan's obstruction map makes a hull a wall to the waves: the water under it rests at its open level and no flux crosses it. That suits a hull at rest, which reflects and shadows passing waves. A hull of draft d moving at speed U through the water meets mostly its own waves, whose transverse waves have wavenumber k = g / U², and in deep water e^{-k d} of a wave's flux runs below depth d. So a cell is a wall while that share is under half and open once it is more. For the boat's 0.3 to 0.6 m draft that happens at 2 to 3 m/s. Obstructing a fast hull cut its wake to 40% of the pressure's.
+
+Bodies read the water under their own hull without the patch's height and flow there, only the water below the patch, as the obstruction made them do. The voxel forces arrive frames late and have no planing lift, so riding their own wave field made the boat sit in its own trough and porpoise, and its drag curve is calibrated without it. A hull therefore doesn't feel other waves in the patch under itself either, such as another boat's wake.
+
 ## NumPy reference
 
 ```bash

@@ -38,7 +38,7 @@ A `BoatDrive` component with the helm state and coefficients. Each frame, before
 
 - A deep-mode patch with `enable_bodies`, following the boat with a margin of 4 cells, as in the `wake` example.
   - Free floating bodies already write their footprint into the patch through `BodyFootprintTarget` (`body_footprints` in `forces.rs`, gated by `displaces_water`).
-  - The head memory is keyed per world cell, so follow shifts and the footprint cooperate.
+  - The head memory is keyed per world cell, so follow shifts and the footprint cooperate, and it moves with the hull so the head doesn't lag a fast boat. A moving hull stops obstructing the patch once its own waves pass under its keel (see [Hulls on the patch](dispersive.md#hulls-on-the-patch)), so its wake has the height of a pressure patch of its weight.
 - **Cell size**: try 0.5 m cells (256 cells, 128 m) against 1 m. The dent is only 2–3 cells wide at 1 m on a 2.5 m beam, and the transverse wavelength at 3 m/s is 5.8 m. The code comment against finer cells concerns the hybrid decomposition, which deep mode skips.
 - **Time step**: the patch steps a fixed `controller.dt` (1/60 s) per rendered frame, while Rapier and the boat run on real time. At 120 Hz the wake would run twice as fast as the boat, and the Kelvin wavelength and angle would be wrong. Set `controller.dt` from the clamped frame delta each frame, or make the library do so, in bead 4. `pressure_relaxation` is per frame too.
 - **Speed**: the waterline is 7 m, so hull speed is about 3.3 m/s (Froude 0.4). The force model has no wave-making resistance, so nothing caps speed naturally. Target 2–4 m/s, and cap thrust by the drag curve from bead 3. Planing is out of scope.

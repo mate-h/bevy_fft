@@ -370,17 +370,31 @@ struct Grid {
     relaxation: f32,
     /// 1 when `obstruction_out` is the grid's own map, 0 for the placeholder.
     has_obstruction: u32,
+    /// m/s².
+    gravity: f32,
+    /// Seconds since the last frame.
+    dt: f32,
+    /// Which half of `previous_head` holds last frame's head, 0 or 1. The other gets this one's.
+    parity: u32,
 }
 
 /// Fixed-point unit of the waterline area sums, in square meters.
 const AREA_UNIT: f32 = 1.0e-4;
 /// Fixed-point unit of the volume sums, in cubic meters.
 const VOLUME_UNIT: f32 = 1.0e-6;
+/// Fixed-point units of the sums of waterline area times velocity, in m³/s, and times squared
+/// speed, in m⁴/s², and the largest speed in m/s they count, which keeps a cell's sums well
+/// inside 32 bits.
+const VELOCITY_AREA_UNIT: f32 = 1.0e-5;
+const SPEED_AREA_UNIT: f32 = 1.0e-3;
+const MAX_SPEED: f32 = 50.0;
+const LN_2: f32 = 0.6931472;
 
 @group(1) @binding(0) var<uniform> grid: Grid;
 @group(1) @binding(1) var<storage, read_write> displaced: array<atomic<u32>>;
 @group(1) @binding(2) var pressure_out: texture_storage_2d<r32float, write>;
-/// The head of the previous frame per cell, in the grid's height units.
+/// The head per world cell, in the grid's height units: last frame's in one half, this frame's
+/// in the other.
 @group(1) @binding(3) var<storage, read_write> previous_head: array<f32>;
 /// Obstruction per cell (Gilligan §3.3): 1 in open water, 0 where a hull fills the cell at the
 /// waterline. Waves multiplied by it reflect off hulls.
@@ -425,14 +439,26 @@ fn body_footprints(
         }
         let water = water_at(at);
         let fraction = clamp((water.height - (p.y - 0.5 * s)) / s, 0.0, 1.0);
-        let volume = voxel.w * fraction * bitcast<f32>(body.flags.y);
+        let bare = voxel.w * fraction;
+        let volume = bare * bitcast<f32>(body.flags.y);
         if volume <= 0.0 {
             continue;
         }
         // A voxel the surface cuts through, or touches at its top, puts its horizontal area on the
-        // waterline. The second half of the buffer sums that area per cell.
+        // waterline. The buffer's second sixth sums that area per cell, the third the volume
+        // without the footprint scale, the fourth and fifth the waterline area times the hull's
+        // velocity along X and Z, and the last the waterline area times the squared speed of the
+        // hull through the water.
         let on_waterline = (water.height - (p.y - 0.5 * s)) / s <= 1.0;
         let n_cells = grid.cells.x * grid.cells.y;
+        let arm = p - body.center_of_mass.xyz;
+        let hull = clamp(
+            (body.linear_velocity.xyz + cross(body.angular_velocity.xyz, arm)).xz,
+            vec2(-MAX_SPEED),
+            vec2(MAX_SPEED),
+        );
+        let through = hull - water.velocity.xz;
+        let speed2 = min(dot(through, through), MAX_SPEED * MAX_SPEED);
         let c0 = vec2<i32>(max(floor(lo), vec2(0.0)));
         let c1 = vec2<i32>(min(ceil(hi), n)) - 1;
         let inv_area = 1.0 / (4.0 * half * half);
@@ -446,12 +472,38 @@ fn body_footprints(
                 }
                 let index = u32(cy) * grid.cells.x + u32(cx);
                 atomicAdd(&displaced[index], u32(round(volume * share / VOLUME_UNIT)));
+                atomicAdd(&displaced[2u * n_cells + index], u32(round(bare * share / VOLUME_UNIT)));
                 if on_waterline {
-                    atomicAdd(&displaced[n_cells + index], u32(round(s * s * share / AREA_UNIT)));
+                    let area = s * s * share;
+                    atomicAdd(&displaced[n_cells + index], u32(round(area / AREA_UNIT)));
+                    let moving = vec2<i32>(round(area * hull / VELOCITY_AREA_UNIT));
+                    atomicAdd(&displaced[3u * n_cells + index], bitcast<u32>(moving.x));
+                    atomicAdd(&displaced[4u * n_cells + index], bitcast<u32>(moving.y));
+                    atomicAdd(
+                        &displaced[5u * n_cells + index],
+                        u32(round(area * speed2 / SPEED_AREA_UNIT)),
+                    );
                 }
             }
         }
     }
+}
+
+/// Last frame's head at world cell coordinate `at`, bilinear, from the half of `previous_head`
+/// that starts at `offset`. The memory wraps onto the grid like the world cells.
+fn previous_head_at(at: vec2<f32>, offset: u32) -> f32 {
+    let cells = vec2<i32>(grid.cells);
+    let i0 = vec2<i32>(floor(at));
+    let f = at - floor(at);
+    var sum = 0.0;
+    for (var dy = 0; dy < 2; dy++) {
+        for (var dx = 0; dx < 2; dx++) {
+            let c = ((i0 + vec2(dx, dy)) % cells + cells) % cells;
+            let w = select(1.0 - f.x, f.x, dx == 1) * select(1.0 - f.y, f.y, dy == 1);
+            sum += w * previous_head[offset + u32(c.y) * grid.cells.x + u32(c.x)];
+        }
+    }
+    return sum;
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -460,24 +512,60 @@ fn resolve_pressure(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let index = gid.y * grid.cells.x + gid.x;
+    let n_cells = grid.cells.x * grid.cells.y;
     let volume = f32(atomicLoad(&displaced[index])) * VOLUME_UNIT;
+    let area = f32(atomicLoad(&displaced[n_cells + index])) * AREA_UNIT;
     let target_head = volume / (grid.cell_size * grid.cell_size) / grid.height_scale;
     // The volume is measured against the surface plus last frame's head, which the head itself
     // just moved. Taken whole, the head swings between none and the full draft from frame to
     // frame, so it only moves part of the way.
     // The memory is kept per world cell, wrapped onto the grid, so a grid that moves by whole
     // cells, such as a dispersive patch that follows a boat, finds each cell's last head again.
+    // It moves with the hull: a cell reads last frame's head where the hull over it was then.
+    // Kept per world cell alone, it lagged a moving hull. At 7 m/s the head took 20 frames, 2 m
+    // of travel, to build under the bow, and lingered as far behind the transom, so the hull
+    // pressed the water 2 m aft of itself and sat in the trough it made there.
     let origin = vec2<i32>(round(grid.center / grid.cell_size));
     let cells = vec2<i32>(grid.cells);
     let world = ((vec2<i32>(gid.xy) + origin) % cells + cells) % cells;
     let memory = u32(world.y) * grid.cells.x + u32(world.x);
-    let head = mix(previous_head[memory], target_head, grid.relaxation);
-    previous_head[memory] = head;
+    var moving = vec2(0.0);
+    if area > 0.0 {
+        let sum = vec2<i32>(
+            bitcast<i32>(atomicLoad(&displaced[3u * n_cells + index])),
+            bitcast<i32>(atomicLoad(&displaced[4u * n_cells + index])),
+        );
+        moving = vec2<f32>(sum) * VELOCITY_AREA_UNIT / area;
+    }
+    let read = grid.parity * n_cells;
+    let behind = vec2<f32>(world) - moving * grid.dt / grid.cell_size;
+    let previous = previous_head_at(behind, read);
+    // Where no hull is, nothing presses the water.
+    var head = 0.0;
+    if volume > 0.0 {
+        head = mix(previous, target_head, grid.relaxation);
+    }
+    previous_head[(1u - grid.parity) * n_cells + memory] = head;
     textureStore(pressure_out, gid.xy, vec4<f32>(head, 0.0, 0.0, 0.0));
     if grid.has_obstruction != 0u {
-        let n_cells = grid.cells.x * grid.cells.y;
-        let area = f32(atomicLoad(&displaced[n_cells + index])) * AREA_UNIT;
-        let open = 1.0 - clamp(area / (grid.cell_size * grid.cell_size), 0.0, 1.0);
-        textureStore(obstruction_out, gid.xy, vec4<f32>(open, 0.0, 0.0, 0.0));
+        let cover = clamp(area / (grid.cell_size * grid.cell_size), 0.0, 1.0);
+        // A hull blocks the waves only down to its keel. In deep water the flux of a wave of
+        // wavenumber k below depth d is e^{-k d} of the whole, and it passes under the hull. A
+        // hull at rest is a wall to the waves that reach it, as in Gilligan, but a hull moving
+        // at speed U through the water meets mostly the waves it makes, whose transverse waves
+        // have k = g / U². The cell is a wall while their share that gets under the keel,
+        // e^{-g d / U²}, is under half, and open water once it is more. The obstruction acts on
+        // every step, so a partial one would compound into a damping that hangs on the step
+        // rate; it stays 0 or 1 per cell, apart from cells the hull only partly covers.
+        // Obstructing a fast hull pinned the water under it to rest, against the pressure that
+        // makes its wake, and cut the wake of the boat example at 15 knots to 40% of the
+        // pressure's.
+        var blocked = 1.0;
+        if area > 0.0 {
+            let draft = f32(atomicLoad(&displaced[2u * n_cells + index])) * VOLUME_UNIT / area;
+            let speed2 = f32(atomicLoad(&displaced[5u * n_cells + index])) * SPEED_AREA_UNIT / area;
+            blocked = select(0.0, 1.0, grid.gravity * draft > LN_2 * speed2);
+        }
+        textureStore(obstruction_out, gid.xy, vec4<f32>(1.0 - cover * blocked, 0.0, 0.0, 0.0));
     }
 }
