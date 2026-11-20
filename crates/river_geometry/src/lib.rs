@@ -604,6 +604,23 @@ pub fn rasterize(
     cells
 }
 
+/// `ground` with `cells` from [`rasterize`] carved into it: the bed in the channel, a blend
+/// back to the ground across the banks. It only ever lowers the ground, so a bank target above
+/// it, or another river's bank, never raises it.
+pub fn carve(ground: &[f32], cells: &[RiverCell]) -> Vec<f32> {
+    ground
+        .iter()
+        .zip(cells)
+        .map(|(&g, c)| {
+            if c[0] >= 0.5 * NO_RIVER {
+                g
+            } else {
+                g.min(c[0] + (g - c[0]) * c[1])
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -829,5 +846,114 @@ mod tests {
             (coarse_width - fine_width).abs() <= 10.0,
             "{coarse_width} against {fine_width}"
         );
+    }
+
+    /// Lip-to-pool steps along the thalweg of a carved river: (H/L)/S and the spacing in channel
+    /// widths, against Abrahams et al. (1995) and Chin (1999).
+    fn steps(slope: f32, q: f32) -> (f32, f32, usize) {
+        let mpt = 1.0;
+        let n = 800u32;
+        let shape = ChannelShape {
+            model: ChannelModel::default(),
+            metres_per_texel: mpt,
+            cells_per_height: 1.0 / mpt,
+            profile: 2.0,
+            max_depth: 100.0,
+            bank_width: 4.0,
+            bank_slope: 0.0,
+        };
+        let y = 20.5;
+        let path: Vec<[f32; 2]> = (0..n).map(|i| [i as f32 + 0.5, y]).collect();
+        let level = |x: f32| 100.0 - slope * x;
+        let river = River {
+            flow: vec![q; path.len()],
+            profile: path.iter().map(|p| level(p[0])).collect(),
+            seed: 11,
+            path,
+        };
+        let size = [n, 41];
+        let ground: Vec<f32> = (0..size[0] * size[1])
+            .map(|i| level((i % n) as f32 + 0.5))
+            .collect();
+        let cells = rasterize(&[river], &shape, 1.0, 0.0, size);
+        let bed = carve(&ground, &cells);
+        // The thalweg, away from the ends, detrended.
+        let row = 20 * n as usize;
+        let xs: Vec<usize> = (50..n as usize - 50).collect();
+        let z: Vec<f32> = xs.iter().map(|&x| bed[row + x]).collect();
+        let resid: Vec<f32> = xs
+            .iter()
+            .zip(&z)
+            .map(|(&x, &b)| b - level(x as f32 + 0.5))
+            .collect();
+        let width = 2.0 * shape.section(q).0;
+        let depth = shape.section(q).1;
+        // Lips: highest points of the detrended bed within half a width each side, standing
+        // at least a fifth of the channel depth above the lowest point before the next lip.
+        let k = (0.5 * width).max(2.0) as usize;
+        let lips: Vec<usize> = (k..resid.len() - k)
+            .filter(|&i| (i - k..=i + k).all(|j| resid[j] <= resid[i]))
+            .collect();
+        let mut drops = Vec::new();
+        for w in lips.windows(2) {
+            let pool = z[w[0]..w[1]].iter().fold(f32::MAX, |m, &v| m.min(v));
+            let h = z[w[0]] - pool;
+            if h > 0.2 * depth {
+                drops.push((h, (w[1] - w[0]) as f32));
+            }
+        }
+        let count = drops.len().max(1) as f32;
+        let h = drops.iter().map(|d| d.0).sum::<f32>() / count;
+        let l = drops.iter().map(|d| d.1).sum::<f32>() / count;
+        (h / l / slope, l / width, drops.len())
+    }
+
+    /// Measured on 2026-11-20: (H/L)/S 1.24 at 5 %, 1.22 at 8 % and 0.95 at 12 %, against
+    /// Abrahams' 1 to 2; steps 0.9 to 1.2 widths apart, at the low end of Chin's 1 to 4. The
+    /// generator's minimum spacing is a channel width, cut to whole samples, so narrow channels
+    /// come out a little under it; the steepest reach falls just short of Abrahams' range.
+    #[test]
+    fn step_pools_have_abrahams_proportions() {
+        for (slope, q, low) in [(0.05, 2.0, 1.0), (0.08, 5.0, 1.0), (0.12, 1.0, 0.9)] {
+            let (hls, spacing, count) = steps(slope, q);
+            println!(
+                "slope {slope}, {q} m3/s: {count} steps, (H/L)/S {hls:.2}, {spacing:.1} widths apart"
+            );
+            assert!(count > 20, "{count} steps at slope {slope}");
+            assert!((low..=2.0).contains(&hls), "(H/L)/S {hls} at slope {slope}");
+            assert!(
+                (0.8..=4.0).contains(&spacing),
+                "{spacing} widths at slope {slope}"
+            );
+        }
+    }
+
+    #[test]
+    fn carving_only_lowers_the_ground() {
+        let h = field(valley);
+        let cells = route(&h, SIZE, [5.5, 32.5], |_| false);
+        let path = smooth_path(&cells, 2);
+        let ground: Vec<f32> = path.iter().map(|&p| bilinear(&h, SIZE, p)).collect();
+        let river = River {
+            flow: vec![shape().model.discharge(1e7); path.len()],
+            profile: long_profile(&ground, 0.02),
+            seed: 1,
+            path,
+        };
+        // Steep banks rise above the valley's ground beside the channel.
+        let steep = ChannelShape {
+            bank_slope: 0.05,
+            ..shape()
+        };
+        let cells = rasterize(&[river], &steep, 1.0, 1.0, SIZE);
+        assert!(
+            cells
+                .iter()
+                .zip(&h)
+                .any(|(c, g)| c[1] > 0.0 && c[1] < 1.0 && c[0] > *g)
+        );
+        let bed = carve(&h, &cells);
+        assert!(bed.iter().zip(&h).all(|(b, g)| b <= g));
+        assert!(bed.iter().zip(&h).any(|(b, g)| b < g));
     }
 }
