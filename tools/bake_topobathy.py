@@ -29,7 +29,19 @@ to cut channels to a depth set along each spline:
 Points are local meters (x east, z north, from the square's centre). Depth is meters below the
 model's surface along the centerline and is interpolated along the spline. The cross-section is
 parabolic: full depth on the centerline, zero at the banks. The optional discharge in m³/s is
-what the `river_banks` example feeds each river with when it checks the banks:
+what the `river_banks` example feeds each river with when it checks the banks.
+
+An optional "bedforms" entry shapes the channel's bed along it instead of a smooth carve:
+
+  "bedforms": {"kind": "step-pool"}     steep streams, steps of boulders with pools between
+  "bedforms": {"kind": "riffle-pool"}   gentler gravel rivers, shallow riffles and deep pools
+
+Step-pools sit `spacing` apart, 2 channel widths by default, with step height H over spacing L
+at `ratio` times the local slope S, 1.5 by default, inside the 1 < (H/L)/S < 2 that Abrahams, Li
+and Atkinson (1995) found for natural step-pools. Between steps the bed rises slightly toward the
+next lip, and a pool is scoured just below each step. Riffle-pools are a sine along the river,
+`spacing` 6 channel widths by default with `amplitude` a third of the depth. Both keep the mean
+bed slope, so the river still drops by the same height overall. Check the banks with:
 
   cargo run --release --example river_banks -- <name>
 
@@ -168,6 +180,36 @@ def catmull_rom(points, spacing):
     return np.vstack(out)
 
 
+def bedform_offsets(s, surface, width, depth, spec):
+    """Height to add to the carved bed at arc lengths `s` along a river, for a "bedforms" spec.
+
+    `surface` is the model's height at each sample, for the local slope. Positive raises the bed.
+    """
+    s = np.asarray(s, dtype=np.float64)
+    if not spec:
+        return np.zeros_like(s)
+    kind = spec.get('kind')
+    if kind == 'riffle-pool':
+        spacing = float(spec.get('spacing', 6.0 * width))
+        amplitude = float(spec.get('amplitude', np.mean(depth) / 3.0))
+        return amplitude * np.sin(2.0 * np.pi * s / spacing)
+    if kind == 'step-pool':
+        spacing = float(spec.get('spacing', 2.0 * width))
+        ratio = float(spec.get('ratio', 1.5))
+        # Local slope over two step spacings, from the surface the model recorded.
+        window = max(int(round(2.0 * spacing / max(s[1] - s[0], 1e-6))), 2) if len(s) > 1 else 1
+        smooth = np.convolve(surface, np.ones(window) / window, mode='same')
+        slope = np.clip(-np.gradient(smooth, s), 0.0, None) if len(s) > 1 else np.zeros_like(s)
+        step = ratio * slope * spacing
+        frac = (s / spacing) % 1.0
+        # Rises by H toward each lip, then drops H over the step, around the mean slope; a pool
+        # half a step deep is scoured just below the step.
+        stair = step * (frac - 0.5)
+        pool = -0.5 * step * np.exp(-(frac / 0.15) ** 2)
+        return stair + pool
+    raise ValueError(f'unknown bedforms kind {kind!r}')
+
+
 def carve(heights, rivers, side, resolution):
     """Lowers heights along each spline. The model's height on the centerline is the water surface."""
     n = heights.shape[0]
@@ -180,12 +222,14 @@ def carve(heights, rivers, side, resolution):
         cols = np.clip(((line[:, 0] + side / 2) / resolution).astype(int), 0, n - 1)
         rows = np.clip(((side / 2 - line[:, 1]) / resolution).astype(int), 0, n - 1)
         surface = original[rows, cols]
+        arc = np.concatenate(([0.0], np.cumsum(np.linalg.norm(np.diff(line[:, :2], axis=0), axis=1))))
+        raise_bed = bedform_offsets(arc, surface, 2 * half, line[:, 2], river.get('bedforms'))
         reach = int(math.ceil(half / resolution)) + 1
         # Each pixel takes its bed from the nearest centerline sample, so a sloping river surface
         # doesn't let downstream samples cut the bed lower.
         nearest = np.full(heights.shape, np.inf, dtype=np.float32)
         bed = np.full(heights.shape, np.inf, dtype=np.float32)
-        for (x, z, depth), level in zip(line, surface):
+        for (x, z, depth), level, lift in zip(line, surface, raise_bed):
             c, r = int((x + side / 2) / resolution), int((side / 2 - z) / resolution)
             r0, r1, c0, c1 = max(r - reach, 0), min(r + reach + 1, n), max(c - reach, 0), min(c + reach + 1, n)
             if r0 >= r1 or c0 >= c1:
@@ -195,7 +239,7 @@ def carve(heights, rivers, side, resolution):
             d2 = dx * dx + dz * dz
             closer = (d2 < half * half) & (d2 < nearest[r0:r1, c0:c1])
             nearest[r0:r1, c0:c1][closer] = d2[closer]
-            bed[r0:r1, c0:c1][closer] = (level - depth * (1 - d2 / (half * half)))[closer]
+            bed[r0:r1, c0:c1][closer] = (level - depth * (1 - d2 / (half * half)) + lift)[closer]
         np.minimum(heights, bed, out=heights)
         print(f'  river {index}: {len(river["points"])} points, {half * 2:g} m wide, '
               f'lowered by up to {float((original - heights).max()):.2f} m', flush=True)
