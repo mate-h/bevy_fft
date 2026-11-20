@@ -9,9 +9,13 @@
 // slope should meet its banks. Flow takes the solver's velocity the
 // same way, with the vertical lane from mass conservation. The foam lane gets the breaking
 // intensity of CMF10 fronts between wet columns, of bores running up the beach, and of shear in the
-// current. The base data comes from a scratch copy made just before this pass.
+// current. The aeration lane gets the air fraction of white water, from `aeration.wesl`, where the
+// flow slows sharply across a jump or bore, runs fast down a steep surface, or pours over a
+// waterfall. The base data comes from a scratch copy made just before this pass, except the
+// aeration lane, which this pass reads and writes in place.
 
 import bevy_fft::water::breaking::{breaking_front, breaking_swash, breaking_turbulence, max_abs};
+import bevy_fft::water::aeration::{aeration_chute, aeration_fall, aeration_jump};
 import bevy_fft::water::lod::{WaterLodSlices, lod_texel_world};
 
 struct WaterHeightfieldParams {
@@ -78,6 +82,15 @@ const BREAK_FADE_END: f32 = 3.0;
 @group(0) @binding(19) var base_drift: texture_2d_array<f32>;
 /// Pressure head per cell in `.x`, in units of `params.height_scale`, when `has_pressure` is 1.
 @group(0) @binding(20) var pressure_head: texture_2d<f32>;
+/// Air fraction white water holds, blended over what earlier writers stored.
+@group(0) @binding(21) var aeration_out: texture_storage_2d_array<r32float, read_write>;
+
+/// Bed drop across a face, in cell widths, beyond which water falls instead of flowing. Matches
+/// the CMF10 waterfall test of `ShallowWaterWaterfalls::slope_cap`.
+const FALL_SLOPE_CAP: f32 = 1.5;
+/// Shortest reach in cells of the jump test either side of a texel. A shock-capturing solver spreads
+/// a jump over two to four cells, so the test spans it whole.
+const JUMP_REACH: f32 = 2.0;
 
 fn load_pressure(p: vec2<i32>) -> f32 {
     let hi = vec2<i32>(params.cells) - 1;
@@ -219,6 +232,62 @@ fn flux_at(g: vec2<f32>) -> vec2<f32> {
     return bed_water_at(g).y * velocity_at(g);
 }
 
+/// Bed drop across a face when water pours over it from the cell with bed and depth `a` into its
+/// neighbour `b`, which lies along `toward` from it, carrying the summed cell velocities `u`. This
+/// is the CMF10 waterfall test of `waterfalls.wesl`: the water flows from `a` toward `b`, the bed
+/// drops by more than `FALL_SLOPE_CAP` cells, and `b` is not filled up to `a`'s bed. Zero
+/// otherwise.
+fn fall_drop(a: vec2<f32>, b: vec2<f32>, u: vec2<f32>, toward: vec2<f32>) -> f32 {
+    let drop = a.x - b.x;
+    if a.y <= BREAK_MIN_DEPTH || dot(u, toward) <= 0.0 || drop <= FALL_SLOPE_CAP * params.cell_size
+        || b.x + b.y >= a.x {
+        return 0.0;
+    }
+    return drop;
+}
+
+/// Air fraction of white water at grid coordinate `g`, for a LOD texel `span` cells wide, where the
+/// bed and depth are `bw`, the velocity `current`, the surface slope `slope`, and `wet` fades out
+/// thin water. See `aeration.wesl` for the three sources.
+fn aeration_at(
+    g: vec2<f32>,
+    span: f32,
+    bw: vec2<f32>,
+    current: vec2<f32>,
+    slope: vec2<f32>,
+    wet: f32,
+) -> f32 {
+    // Jumps and bores: how much the flow slows across the stencil, which is the divergence times
+    // the stencil width, against the shallow side's wave speed.
+    let r = max(span, JUMP_REACH);
+    let rx = vec2<f32>(r, 0.0);
+    let rz = vec2<f32>(0.0, r);
+    let drop = (velocity_at(g - rx).x - velocity_at(g + rx).x)
+        + (velocity_at(g - rz).y - velocity_at(g + rz).y);
+    let inflow = min(
+        min(bed_water_at(g + rx).y, bed_water_at(g - rx).y),
+        min(bed_water_at(g + rz).y, bed_water_at(g - rz).y),
+    );
+    let jump = aeration_jump(drop, inflow);
+    // Steep fast flow.
+    let u = length(current);
+    let froude = u / sqrt(9.81 * max(bw.y, 1e-3));
+    let chute = aeration_chute(length(slope), froude, u);
+    // Waterfall lips and landings: the faces of the cell under the texel, either way.
+    let c = vec2<i32>(floor(g));
+    let here = load_bed_water(c);
+    let u_here = load_velocity(c);
+    var fall = 0.0;
+    for (var k = 0; k < 4; k++) {
+        let o = select(vec2(0, 1), vec2(1, 0), k < 2) * select(-1, 1, k % 2 == 0);
+        let there = load_bed_water(c + o);
+        let u = u_here + load_velocity(c + o);
+        let toward = vec2<f32>(o);
+        fall = max(fall, max(fall_drop(there, here, u, -toward), fall_drop(here, there, u, toward)));
+    }
+    return max(max(jump, chute) * wet, aeration_fall(fall));
+}
+
 /// Free-surface height used for the mesh. With `dry_mode` 0 or 2, dry cells sit at the
 /// still-water level so a triangle onto land does not climb the bed; `cell_render_eta` handles
 /// mode 2's cells beside water.
@@ -340,6 +409,9 @@ fn water_heightfield(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(flow_out, gid.xy, slice, mix(base_v, flow, w));
     let base_d = textureLoad(base_drift, gid.xy, slice, 0).xy;
     textureStore(drift_out, gid.xy, slice, vec4<f32>(mix(base_d, current, w), 0.0, 0.0));
+    let base_a = textureLoad(aeration_out, gid.xy, slice).r;
+    let air = aeration_at(g, span, bw, current, slope, wet);
+    textureStore(aeration_out, gid.xy, slice, vec4<f32>(mix(base_a, air, w), 0.0, 0.0, 0.0));
 }
 
 // Breaking front cells for `WaterBreakingFronts`. One thread per grid cell appends the cells of
@@ -375,8 +447,8 @@ struct FrontParams {
     _pad: f32,
 }
 
-@group(0) @binding(21) var<storage, read_write> front_cells: FrontCells;
-@group(0) @binding(22) var<uniform> front_params: FrontParams;
+@group(0) @binding(22) var<storage, read_write> front_cells: FrontCells;
+@group(0) @binding(23) var<uniform> front_params: FrontParams;
 
 fn cell_eta(p: vec2<i32>) -> f32 {
     return cell_render_eta(p);

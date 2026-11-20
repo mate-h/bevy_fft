@@ -72,6 +72,7 @@ import bevy_pbr::render::pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT;
 
 @if(!PREPASS_PIPELINE && VIEW_TRANSMISSION_TEXTURE)
 import bevy_fft::water::optics::{optics, shade_water, water_point};
+import bevy_fft::water::aeration::{AIR_PURE_WATER_ABSORPTION, aerated_layer};
 @if(!PREPASS_PIPELINE)
 import bevy_fft::water::underside::shade_underside;
 @if(!PREPASS_PIPELINE)
@@ -94,7 +95,8 @@ struct WaterSurfaceUniform {
 @group(constants::MATERIAL_BIND_GROUP) @binding(103) var lod_foam: texture_2d_array<f32>;
 /// Linear, clamped to edge. Shared by the filterable LOD arrays.
 @group(constants::MATERIAL_BIND_GROUP) @binding(105) var lod_sampler: sampler;
-/// Active foam in `.r` and residual foam in `.g`, kept by the foam sim.
+/// Active foam in `.r`, residual foam in `.g` and the air fraction of the water column in `.b`,
+/// kept by the foam sim.
 @group(constants::MATERIAL_BIND_GROUP) @binding(108) var lod_foam_state: texture_2d_array<f32>;
 
 /// Tiling foam pattern whose values are evenly spread over [0, 1].
@@ -242,14 +244,37 @@ fn water_pixel_normal(pick: LodPick) -> vec3<f32> {
 /// Depth reported past the coarsest slice, deep enough that no bed shows through.
 const OPEN_WATER_DEPTH: f32 = 1000.0;
 
-/// Active foam in `.x`, residual foam in `.y`, water depth in meters in `.z` and the mean square
-/// slope of the waves too short for the slice in `.w`, at undisplaced position `xz`, read at its
-/// pick. Foam fades out past the coarsest slice.
-fn water_foam_and_depth(pick: LodPick) -> vec4<f32> {
+/// What the LOD data says about the water at a pick, besides its shape.
+struct WaterLodSurface {
+    /// Active foam in `.x` and residual foam in `.y`.
+    foam: vec2<f32>,
+    /// Water depth in meters.
+    depth: f32,
+    /// Mean square slope of the waves too short for the slice.
+    variance: f32,
+    /// Air fraction of the water column.
+    air: f32,
+}
+
+/// The LOD data at undisplaced position `xz`, read at its pick. Foam and air fade out past the
+/// coarsest slice.
+fn water_lod_surface(pick: LodPick) -> WaterLodSurface {
     let f = sample_pick_filtered(lod_foam, lod_sampler, pick);
     let state = sample_pick(lod_foam_state, pick, 1u, 0u);
     let c = pick.coverage;
-    return vec4<f32>(state.rg * c, mix(OPEN_WATER_DEPTH, f.g, c), max(f.a, 0.0) * c);
+    return WaterLodSurface(
+        state.rg * c,
+        mix(OPEN_WATER_DEPTH, f.g, c),
+        max(f.a, 0.0) * c,
+        max(state.b, 0.0) * c,
+    );
+}
+
+/// `base_color` under a column `depth` meters deep holding air fraction `air`, for surfaces drawn
+/// without the water optics: the bubbles' own color over the share of the water they hide.
+fn water_mix_air_into_material(air: f32, depth: f32, base_color: vec4<f32>) -> vec4<f32> {
+    let layer = aerated_layer(air, depth, AIR_PURE_WATER_ABSORPTION);
+    return vec4<f32>(base_color.rgb * (1.0 - layer.opacity) + layer.reflectance, base_color.a);
 }
 
 /// Perceptual roughness of a surface of `perceptual_roughness` whose facets also carry waves of
@@ -576,9 +601,9 @@ fn water_flat_xz(in: FragVertexOutput) -> vec2<f32> {
 fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     let xz = water_flat_xz(in);
     let pick = lod_pick(water_lod, xz, 0.0);
-    let foam_depth = water_foam_and_depth(pick);
-    let foam = water_foam_surface(xz, pick, foam_depth.xy);
-    if water_is_dry(foam_depth.z) {
+    let lod_surface = water_lod_surface(pick);
+    let foam = water_foam_surface(xz, pick, lod_surface.foam);
+    if water_is_dry(lod_surface.depth) {
         discard;
     }
     var pbr_input = pbr_input_from_standard_material(in, is_front);
@@ -599,9 +624,12 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     );
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
-    pbr_input.material.base_color = water_mix_foam_into_material(foam.opacity, pbr_input.material.base_color);
+    pbr_input.material.base_color = water_mix_foam_into_material(
+        foam.opacity,
+        water_mix_air_into_material(lod_surface.air, lod_surface.depth, pbr_input.material.base_color),
+    );
     pbr_input.material.perceptual_roughness =
-        water_unresolved_roughness(pbr_input.material.perceptual_roughness, foam_depth.w);
+        water_unresolved_roughness(pbr_input.material.perceptual_roughness, lod_surface.variance);
     var out: FragmentOutput;
     // Back faces are seen from under the water. They draw only when the material leaves them unculled.
     if !is_front {
@@ -612,7 +640,7 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
             view.world_position,
             wave_normal,
             surface.plane_height,
-            foam_depth.z,
+            lod_surface.depth,
             pbr_input.material.perceptual_roughness,
             foam.opacity,
             in.position.xy,
@@ -622,7 +650,14 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     }
 @if(VIEW_TRANSMISSION_TEXTURE) {
     if optics.enabled != 0u {
-        out.color = shade_water(water_point(pbr_input), foam_depth.z, foam.opacity, foam_depth.x, surface.plane_height);
+        out.color = shade_water(
+            water_point(pbr_input),
+            lod_surface.depth,
+            foam.opacity,
+            lod_surface.foam.x,
+            lod_surface.air,
+            surface.plane_height,
+        );
         out.color = main_pass_post_lighting_processing(pbr_input, out.color);
         return out;
     }
@@ -641,8 +676,8 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
 fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     let xz = water_flat_xz(in);
     let pick = lod_pick(water_lod, xz, 0.0);
-    let foam_depth = water_foam_and_depth(pick);
-    if water_is_dry(foam_depth.z) {
+    let lod_surface = water_lod_surface(pick);
+    if water_is_dry(lod_surface.depth) {
         discard;
     }
 @if(!NORMAL_PREPASS_OR_DEFERRED_PREPASS) {
@@ -659,11 +694,14 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     );
     let double_sided =
         (pbr_input.material.flags & STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
-    let foam = water_foam_surface(xz, pick, foam_depth.xy);
+    let foam = water_foam_surface(xz, pick, lod_surface.foam);
     let n_world = water_foam_normal(water_pixel_normal(pick), foam);
     pbr_input.world_normal = prepare_world_normal(n_world, double_sided, is_front);
     pbr_input.N = normalize(pbr_input.world_normal);
-    pbr_input.material.base_color = water_mix_foam_into_material(foam.opacity, pbr_input.material.base_color);
+    pbr_input.material.base_color = water_mix_foam_into_material(
+        foam.opacity,
+        water_mix_air_into_material(lod_surface.air, lod_surface.depth, pbr_input.material.base_color),
+    );
     return deferred_output(in, pbr_input);
 }
 }

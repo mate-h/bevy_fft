@@ -45,16 +45,16 @@ pub use caustics::{
 };
 pub use curl::{WaterBreakerCurl, curl_mesh, curl_profile};
 pub use foam::{
-    WATER_FOAM_SHADER, WATER_FOAM_STATE_FORMAT, WaterFoamDeposit, WaterFoamFrame, WaterFoamParams,
-    WaterFoamSettings, WaterFoamSim,
+    WATER_FOAM_SHADER, WATER_FOAM_STATE_FORMAT, WaterAerationSettings, WaterFoamDeposit,
+    WaterFoamFrame, WaterFoamParams, WaterFoamSettings, WaterFoamSim,
 };
 pub use foam_texture::{WATER_FOAM_TEXTURE_SIZE, WaterFoamTexture, foam_texture_image};
 pub use fronts::{FrontLine, FrontPoint, FrontTrackingStats, WaterBreakingFronts};
 pub use heightfield::{WATER_HEIGHTFIELD_SHADER, WaterHeightfield, WaterHeightfieldDry};
 pub use lod_data::{
-    WATER_FOAM_FLOW_FORMAT, WATER_FOAM_FLOW_LAYERS_PER_SLICE, WATER_LOD_DRIFT_FORMAT,
-    WATER_LOD_MAX_SLICES, WATER_LOD_SURFACE_FORMAT, WaterLodClear, WaterLodData, WaterLodGpu,
-    WaterLodSettings, WaterLodSlices, WaterViewer,
+    WATER_FOAM_FLOW_FORMAT, WATER_FOAM_FLOW_LAYERS_PER_SLICE, WATER_LOD_AERATION_FORMAT,
+    WATER_LOD_DRIFT_FORMAT, WATER_LOD_MAX_SLICES, WATER_LOD_SURFACE_FORMAT, WaterLodClear,
+    WaterLodData, WaterLodGpu, WaterLodSettings, WaterLodSlices, WaterViewer,
 };
 pub use medium::{WATER_MEDIUM_SHADER, WaterMedium};
 pub use quadtree::{
@@ -119,6 +119,7 @@ impl Plugin for WaterPlugin {
         bevy::shader::load_shader_library!(app, "lod.wesl");
         bevy::shader::load_shader_library!(app, "optics.wesl");
         bevy::shader::load_shader_library!(app, "breaking.wesl");
+        bevy::shader::load_shader_library!(app, "aeration.wesl");
         bevy::shader::load_shader_library!(app, "underside.wesl");
         bevy::shader::load_shader_library!(app, "foam_flow.wesl");
         embedded_asset!(app, "surface.wesl");
@@ -137,6 +138,8 @@ impl Plugin for WaterPlugin {
             .register_type::<JerlovWaterType>()
             .register_type::<WaterFoamSettings>()
             .init_resource::<WaterFoamSettings>()
+            .register_type::<WaterAerationSettings>()
+            .init_resource::<WaterAerationSettings>()
             .init_resource::<WaterFoamFrame>()
             .add_plugins(ExtractResourcePlugin::<WaterFoamFrame>::default())
             .register_type::<WaterQuadtree>()

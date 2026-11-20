@@ -16,6 +16,7 @@ import bevy_pbr::render::pbr_lighting::{D_GGX, F_AB, V_SmithGGXCorrelated};
 import bevy_pbr::render::shadows::fetch_directional_shadow;
 import bevy_pbr::render::view_transformations::position_ndc_to_world;
 import bevy_render::maths::PI;
+import bevy_fft::water::aeration::aerated_layer;
 
 struct WaterOpticsUniform {
     extinction: vec3<f32>,
@@ -260,9 +261,17 @@ fn scene_color(uv: vec2<f32>) -> vec3<f32> {
 }
 
 /// Water over the opaque scene. `foam` is the opacity of the foam layer on top and `bubbles` the
-/// coverage of active foam, whose bubble cloud brightens the water below it. `surface_y` is the
-/// height of the undisplaced surface. Beds below it fade with depth and take the caustic map.
-fn shade_water(input: WaterPoint, solver_depth: f32, foam: f32, bubbles: f32, surface_y: f32) -> vec4<f32> {
+/// coverage of active foam, whose bubble cloud brightens the water below it. `air` is the air
+/// fraction of the water column, whose bubbles scatter light back up and hide the bed. `surface_y`
+/// is the height of the undisplaced surface. Beds below it fade with depth and take the caustic map.
+fn shade_water(
+    input: WaterPoint,
+    solver_depth: f32,
+    foam: f32,
+    bubbles: f32,
+    air: f32,
+    surface_y: f32,
+) -> vec4<f32> {
     if any(textureDimensions(opaque_depth) != textureDimensions(view_transmission_texture)) {
         return vec4<f32>(surface_light(input, input.base_color).color, 1.0);
     }
@@ -288,9 +297,13 @@ fn shade_water(input: WaterPoint, solver_depth: f32, foam: f32, bubbles: f32, su
         bottom *= underwater_lighting(receiver.position, e0, surface_y, surface_y - receiver.position.y);
     }
     let direct = bottom;
+    // The bubbles of white water fill the solver's column, so they hide the bed whatever path the
+    // view takes to it.
+    let aerated = aerated_layer(air, min(solver_depth, optics.max_distance), max(optics.extinction, vec3<f32>(0.0)));
+    let clear = 1.0 - aerated.opacity;
     var refraction_confidence = 0.0;
     let thin_fade = smoothstep(0.0, 0.3, min(column, solver_depth));
-    if receiver.valid && optics.refraction_strength > 0.0 && thin_fade > 0.0 {
+    if receiver.valid && optics.refraction_strength > 0.0 && thin_fade > 0.0 && clear > 0.01 {
         let ray = refract(-input.V, input.N, 1.0 / max(input.ior, 1.0));
         let hit = trace_scene(input.world_position.xyz, ray, min(optics.max_distance, path * 1.5 + 1.0), false);
         refraction_confidence = hit.confidence;
@@ -309,7 +322,7 @@ fn shade_water(input: WaterPoint, solver_depth: f32, foam: f32, bubbles: f32, su
     // which a screen-space hit replaces.
     let extinction = max(optics.extinction, vec3<f32>(0.0));
     let bubble = saturate(bubbles) * BUBBLE_REFLECTANCE * exp(-2.0 * extinction * BUBBLE_DEPTH);
-    let body = optics.scattering * (1.0 - transmittance) + bubble;
+    let body = optics.scattering * (1.0 - transmittance) * clear + bubble + aerated.reflectance;
     let surface = surface_light(input, mix(body, vec3<f32>(FOAM_ALBEDO), foam));
     var lit = surface.color;
     if optics.ssr_strength > 0.0 && foam < 0.95 {
@@ -320,7 +333,7 @@ fn shade_water(input: WaterPoint, solver_depth: f32, foam: f32, bubbles: f32, su
             lit += (scene_color(hit.uv) * fresnel - surface.environment_specular) * weight;
         }
     }
-    let transmitted = (vec3<f32>(1.0) - fresnel) * transmittance * bottom * (1.0 - foam);
+    let transmitted = (vec3<f32>(1.0) - fresnel) * transmittance * bottom * (1.0 - foam) * clear;
     var color = mix(background, lit + transmitted, coverage);
     if optics.debug_view == 1u { color = vec3<f32>(clamp(path / 5.0, 0.0, 1.0)); }
     if optics.debug_view == 2u { color = transmittance; }

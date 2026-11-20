@@ -11,10 +11,10 @@ The crate runs rivers on a CMF10-style shallow water grid (Chentanez and Müller
 | Eddies behind rocks | Unverified | MacCormack keeps some vorticity; nothing measures it | Resolve rocks over 2 to 3 cells, test wake length (Jirka 2001), subgrid wakes (Pan et al. 2012) below that |
 | Boils below plunges and jumps | Missing | | Procedural divergence sources seeded below high dissipation |
 | Foam lines | Covered for convergence | `src/water/foam.rs`, `foam_flow.wesl` (Neyret 2003) | Shear as a source for eddy lines |
-| White water in rapids | Partial | Breaking foam on steep bores only | Aeration field from energy loss, driving albedo and opacity (Valle and Pasternack 2006) |
+| White water in rapids | Partial | Air fraction from jumps, steep fast flow and falls, advected and detrained, whitening and clouding the water (`src/water/aeration.wesl`, [water_rendering.md](water_rendering.md#white-water)) | Spray from aerated water; texture inside the white patches |
 | Waterfall sheet breaking into ligaments | Missing | `src/shallow_water/waterfalls.rs` emits spray and mist only | Ballistic curtain mesh along the lip, breaking up by fall length (Ervine and Falvey 1987) |
 | Waterfall mass and momentum | Simplified | The grid still passes the water down the drop (`waterfalls.wesl`), which conserves mass and places the jump within a cell or two; particles are for the eye | CMF10 §2.4.3: reflecting lip face, particles carry the volume |
-| Plunge pool aeration and mist | Partial | Mist at the foot; bubbles are bead 2xl | Aeration field plus 2xl |
+| Plunge pool aeration and mist | Partial | Mist and air at the foot; bubbles are bead 2xl | 2xl |
 | Splashes from objects | Covered for bodies | `FloatingBodySettings::splash` | Movers don't splash; reuse the rule |
 | Wading ripples at the right speed | Missing | Every wave moves at √(gh) | v1v.16 Airy layer |
 | Wet banks that dry | Missing | Left to the ground material | Terrain-space wetness buffer |

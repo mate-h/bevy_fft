@@ -127,8 +127,8 @@ fn slice_mean(bytes: &[u8], slice: usize) -> Vec2 {
     let lane = |o: usize| f32::from_le_bytes(texels[o..o + 4].try_into().unwrap());
     let sum: Vec2 = (0..RES * RES)
         .map(|i| {
-            let active = lane(i * 8);
-            Vec2::new(active, (active + lane(i * 8 + 4)).min(1.0))
+            let active = lane(i * 16);
+            Vec2::new(active, (active + lane(i * 16 + 4)).min(1.0))
         })
         .sum();
     sum / (RES * RES) as f32

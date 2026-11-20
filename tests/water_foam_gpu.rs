@@ -44,7 +44,7 @@ fn foam_texels(bytes: &[u8]) -> Vec<Vec2> {
     (0..RES)
         .flat_map(|y| {
             (0..RES).map(move |x| {
-                let o = y * row + x * 8;
+                let o = y * row + x * 16;
                 let lane =
                     |i: usize| f32::from_le_bytes(bytes[o + i..o + i + 4].try_into().unwrap());
                 Vec2::new(lane(0), lane(4))

@@ -238,7 +238,8 @@ pub struct WaterSurfaceExtension {
     pub opaque_depth: Option<Handle<Image>>,
     #[uniform(107)]
     pub optics: WaterOpticsUniform,
-    /// Active and residual foam from the foam sim. Full precision, so the shader blends it with loads.
+    /// Active foam, residual foam and the air fraction of the water column from the foam sim. Full
+    /// precision, so the shader blends it with loads.
     #[texture(108, dimension = "2d_array", sample_type = "float", filterable = false)]
     pub lod_foam_state: Handle<Image>,
     /// Texture coordinates of the foam pattern, carried along the drift by the foam sim.

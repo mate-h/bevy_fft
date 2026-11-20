@@ -10,6 +10,12 @@
 // foam lane this frame, from 0 to 1. Foam deposited this frame, by water particles landing, adds
 // straight to the active foam.
 //
+// The air fraction of the water column rides in `.b`. It moves along the drift with the foam, but
+// as a concentration, so it does not gather where the drift converges. Where a writer stored in
+// the LOD aeration lane more air than the column holds, the air rises toward that value with the
+// formation factor. Elsewhere it falls toward it as bubbles leave the column, by e each time the
+// column's depth worth of `air_detrainment` has gone by.
+//
 // Last frame's foam sits on last frame's slice placement. A lookup that leaves its own slice there
 // falls back to the next coarser slice, as Crest's foam sim does, and returns no foam past the
 // coarsest one.
@@ -44,6 +50,12 @@ struct WaterFoamParams {
     time: f32,
     /// One on the first step, which gives every phase a fresh offset.
     restart: f32,
+    /// Share of the gap to the aeration lane's air fraction left after `dt`.
+    air_formation: f32,
+    /// Meters of water column the air leaves over `dt`.
+    air_detrainment: f32,
+    /// Shallower water counts as this deep for the detrainment, in meters.
+    air_min_depth: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: WaterFoamParams;
@@ -52,11 +64,12 @@ struct WaterFoamParams {
 @group(0) @binding(2) var previous_foam: texture_2d_array<f32>;
 /// Result of `foam_forward`, on `lod`. Read by `foam_correct` only.
 @group(0) @binding(3) var forward_foam: texture_2d_array<f32>;
-/// LOD foam lane, whose `.r` holds the breaking intensity the writers produced this frame.
+/// LOD foam lane, whose `.r` holds the breaking intensity the writers produced this frame and `.g`
+/// the water depth in meters.
 @group(0) @binding(4) var lod_foam: texture_2d_array<f32>;
 /// LOD drift lane in meters per second along X and Z.
 @group(0) @binding(5) var lod_drift: texture_2d_array<f32>;
-@group(0) @binding(6) var foam_out: texture_storage_2d_array<rg32float, write>;
+@group(0) @binding(6) var foam_out: texture_storage_2d_array<rgba32float, write>;
 /// Advected texture coordinates and deformation at the end of the previous frame, on
 /// `params.previous`, with `FOAM_FLOW_LAYERS_PER_SLICE` layers per slice.
 @group(0) @binding(7) var previous_flow: texture_2d_array<f32>;
@@ -64,6 +77,8 @@ struct WaterFoamParams {
 /// Active foam deposited this frame, such as by water particles landing, per texel in units of
 /// `1 / FOAM_DEPOSIT_UNIT`, with slice `s` texel `(x, y)` at `(s * resolution + y) * resolution + x`.
 @group(0) @binding(9) var<storage, read> deposit: array<u32>;
+/// LOD aeration lane, whose `.r` holds the air fraction the flow can hold this frame.
+@group(0) @binding(10) var lod_aeration: texture_2d_array<f32>;
 
 /// Fixed-point scale of `deposit`.
 const FOAM_DEPOSIT_UNIT: f32 = 65536.0;
@@ -99,9 +114,9 @@ fn previous_slice_holding(xz: vec2<f32>, start: u32) -> i32 {
 /// Previous foam bilinearly blended at a lookup, with the smallest and largest of the four texels
 /// it blends.
 struct PreviousLookup {
-    foam: vec2<f32>,
-    lo: vec2<f32>,
-    hi: vec2<f32>,
+    foam: vec3<f32>,
+    lo: vec3<f32>,
+    hi: vec3<f32>,
 }
 
 /// Previous foam at world `xz`, looked up from slice `start` outward. Full-precision foam has no
@@ -109,15 +124,15 @@ struct PreviousLookup {
 fn previous_at(xz: vec2<f32>, start: u32) -> PreviousLookup {
     let i = previous_slice_holding(xz, start);
     if i < 0 {
-        return PreviousLookup(vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0));
+        return PreviousLookup(vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
     }
     let x = uv_in(params.previous.slices[i], xz) * f32(params.previous.resolution) - 0.5;
     let i0 = vec2<i32>(floor(x));
     let f = x - floor(x);
-    let a = textureLoad(previous_foam, i0, i, 0).rg;
-    let b = textureLoad(previous_foam, i0 + vec2(1, 0), i, 0).rg;
-    let c = textureLoad(previous_foam, i0 + vec2(0, 1), i, 0).rg;
-    let d = textureLoad(previous_foam, i0 + vec2(1, 1), i, 0).rg;
+    let a = textureLoad(previous_foam, i0, i, 0).rgb;
+    let b = textureLoad(previous_foam, i0 + vec2(1, 0), i, 0).rgb;
+    let c = textureLoad(previous_foam, i0 + vec2(0, 1), i, 0).rgb;
+    let d = textureLoad(previous_foam, i0 + vec2(1, 1), i, 0).rgb;
     let foam = mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
     return PreviousLookup(foam, min(min(a, b), min(c, d)), max(max(a, b), max(c, d)));
 }
@@ -136,7 +151,7 @@ fn foam_forward(@builtin(global_invocation_id) gid: vec3<u32>) {
     let xz = texel_world(gid.xy, slice);
     let u = drift_at(vec2<i32>(gid.xy), slice);
     let foam = previous_at(xz - u * params.dt, slice).foam;
-    textureStore(foam_out, gid.xy, slice, vec4<f32>(foam, 0.0, 0.0));
+    textureStore(foam_out, gid.xy, slice, vec4<f32>(foam, 0.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -152,31 +167,40 @@ fn foam_correct(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // MacCormack: carry the forward result back to the start of the step and correct by half the
     // round-trip error. A back lookup that leaves this slice keeps the forward result.
-    let forward = textureLoad(forward_foam, texel, slice, 0).rg;
+    let forward = textureLoad(forward_foam, texel, slice, 0).rgb;
     var foam = forward;
     let back_uv = uv_in(lod.slices[slice], xz + step);
     let margin = 1.0 / f32(max(lod.resolution, 2u));
     if all(back_uv > vec2(margin)) && all(back_uv < vec2(1.0 - margin)) {
-        let back = bilinear_clamp_layer(forward_foam, back_uv, slice).rg;
+        let back = bilinear_clamp_layer(forward_foam, back_uv, slice).rgb;
         let range = previous_at(xz - step, slice);
         foam = clamp(forward + 0.5 * (previous_at(xz, slice).foam - back), range.lo, range.hi);
     }
 
-    // Area change of a drifting patch, so pure transport keeps the total amount of foam.
+    // Area change of a drifting patch, so pure transport keeps the total amount of foam. The air is
+    // a fraction of the water's volume, which the area change does not alter.
     let texel_width = lod.slices[slice].z;
     let du = drift_at(texel + vec2(1, 0), slice) - drift_at(texel - vec2(1, 0), slice);
     let dv = drift_at(texel + vec2(0, 1), slice) - drift_at(texel - vec2(0, 1), slice);
     let divergence = (du.x + dv.y) / (2.0 * texel_width);
-    foam *= exp(-params.dt * divergence);
+    foam = vec3<f32>(foam.xy * exp(-params.dt * divergence), foam.z);
 
-    let breaking = saturate(textureLoad(lod_foam, texel, slice, 0).r);
+    let lane = textureLoad(lod_foam, texel, slice, 0);
+    let breaking = saturate(lane.r);
     let deposited = f32(deposit[(slice * lod.resolution + gid.y) * lod.resolution + gid.x])
         / FOAM_DEPOSIT_UNIT;
     let fresh = foam.x * params.active_decay + breaking * params.source_active + deposited;
     let residual = foam.y * params.residual_decay + foam.x * params.residual_gain
         + breaking * params.source_residual;
-    let result = saturate(vec2<f32>(fresh, residual));
-    textureStore(foam_out, gid.xy, slice, vec4<f32>(result, 0.0, 0.0));
+    let held = saturate(textureLoad(lod_aeration, texel, slice, 0).r);
+    var air = max(foam.z, 0.0);
+    if held > air {
+        air = held + (air - held) * params.air_formation;
+    } else {
+        air = max(held, air * exp(-params.air_detrainment / max(lane.g, params.air_min_depth)));
+    }
+    let result = saturate(vec3<f32>(fresh, residual, air));
+    textureStore(foam_out, gid.xy, slice, vec4<f32>(result, 0.0));
 }
 
 /// The three flow layers of one slice at a lookup, bilinearly blended, or nothing found.

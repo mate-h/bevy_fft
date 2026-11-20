@@ -731,8 +731,8 @@ impl FromWorld for WaterFrontsPipeline {
                 (0, uniform_buffer::<WaterHeightfieldParams>(false)),
                 (8, texture_2d(unfiltered)),
                 (9, texture_2d(unfiltered)),
-                (21, storage_buffer_sized(false, None)),
-                (22, uniform_buffer::<FrontParams>(false)),
+                (22, storage_buffer_sized(false, None)),
+                (23, uniform_buffer::<FrontParams>(false)),
             ),
         );
         let layout = BindGroupLayoutDescriptor::new("water_front_cells_layout", &entries);
@@ -811,8 +811,8 @@ pub(super) fn prepare_water_fronts(
                 (0, grid),
                 (8, &bed_water.texture_view),
                 (9, &velocity.texture_view),
-                (21, output.buffer.as_entire_binding()),
-                (22, params),
+                (22, output.buffer.as_entire_binding()),
+                (23, params),
             )),
         );
         state.passes.push(FrontsPass {

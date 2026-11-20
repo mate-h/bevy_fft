@@ -264,7 +264,7 @@ fn a_particle_lands_on_still_water_and_foams_its_texel() {
     let bytes = &app.world().resource::<FoamCapture>().bytes;
     let row = bytes.len() / RES as usize;
     let active = |x: u32, y: u32| {
-        let o = y as usize * row + x as usize * 8;
+        let o = y as usize * row + x as usize * 16;
         f32::from_le_bytes(bytes[o..o + 4].try_into().unwrap())
     };
     let lod = app.world().resource::<WaterLodData>().slices;

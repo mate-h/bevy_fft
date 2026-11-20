@@ -87,9 +87,15 @@ pub struct WaterLodSlices {
 /// [`WATER_LOD_SURFACE_FORMAT`] with a linear clamped sampler, and `drift` uses
 /// [`WATER_LOD_DRIFT_FORMAT`].
 ///
+/// `aeration` holds, in its red channel, the air fraction that the flow in each texel would hold
+/// this frame where it loses energy fast enough to entrain air: at hydraulic jumps, in steep fast
+/// flow and at waterfalls. Solver writers store it, and the foam sim carries the air and relaxes
+/// it toward this value. It uses [`WATER_LOD_AERATION_FORMAT`], which writers can read and write in
+/// one pass to blend over what is there, and it is emptied at the start of every frame.
+///
 /// `foam_state` is not written by solvers. The foam sim in [`super::WaterFoamSettings`] keeps it,
-/// with active foam in its red channel and residual foam in green, carried over from frame to
-/// frame. It uses [`super::WATER_FOAM_STATE_FORMAT`]. The foam sim also keeps `foam_flow`, the
+/// with active foam in its red channel, residual foam in green and the air fraction of the water
+/// column in blue, carried over from frame to frame. It uses [`super::WATER_FOAM_STATE_FORMAT`]. The foam sim also keeps `foam_flow`, the
 /// advected texture coordinates of the foam pattern, with [`WATER_FOAM_FLOW_LAYERS_PER_SLICE`]
 /// layers per slice in [`WATER_FOAM_FLOW_FORMAT`]. `foam_flow.wesl` describes its layout.
 #[derive(Resource, Clone, ExtractResource)]
@@ -99,6 +105,7 @@ pub struct WaterLodData {
     pub foam: Handle<Image>,
     pub flow: Handle<Image>,
     pub drift: Handle<Image>,
+    pub aeration: Handle<Image>,
     pub foam_state: Handle<Image>,
     pub foam_flow: Handle<Image>,
     pub slices: WaterLodSlices,
@@ -118,7 +125,8 @@ impl WaterLodData {
 /// Empties the `displacement`, `foam`, `flow`, and `drift` arrays of the [`WaterLodData`] at the
 /// start of each frame, for scenes with no base writer such as the FFT ocean. Without a base, a
 /// texel that a regional writer left would keep a value written for last frame's slice placement.
-/// Empty texels hold a still surface on the mesh plane with no water under it.
+/// Empty texels hold a still surface on the mesh plane with no water under it. The `aeration`
+/// array is emptied every frame either way, since no base writer covers it.
 #[derive(Resource, Clone, Copy, Debug, Default, ExtractResource, Reflect)]
 #[extract_app(RenderApp)]
 pub struct WaterLodClear;
@@ -129,10 +137,16 @@ pub(super) fn clear_water_lod(
     lod: Option<Res<WaterLodData>>,
     images: Res<RenderAssets<GpuImage>>,
 ) {
-    let (Some(_), Some(lod)) = (clear, lod) else {
+    let Some(lod) = lod else {
         return;
     };
     let encoder = ctx.command_encoder();
+    if let Some(image) = images.get(&lod.aeration) {
+        encoder.clear_texture(&image.texture, &ImageSubresourceRange::default());
+    }
+    if clear.is_none() {
+        return;
+    }
     for handle in [&lod.displacement, &lod.foam, &lod.flow, &lod.drift] {
         if let Some(image) = images.get(handle) {
             encoder.clear_texture(&image.texture, &ImageSubresourceRange::default());
@@ -152,6 +166,10 @@ pub const WATER_LOD_SURFACE_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 /// Format of the `drift` array of [`WaterLodData`]. Two full-precision lanes, which every backend
 /// can bind as a storage texture.
 pub const WATER_LOD_DRIFT_FORMAT: TextureFormat = TextureFormat::Rg32Float;
+
+/// Format of the `aeration` array of [`WaterLodData`]. One full-precision lane, the one float
+/// format every backend can bind as a read-write storage texture.
+pub const WATER_LOD_AERATION_FORMAT: TextureFormat = TextureFormat::R32Float;
 
 /// Format of the `foam_flow` array of [`WaterLodData`]. Texture offsets grow by the drift over a
 /// whole latency, so they stay at full precision.
@@ -204,6 +222,7 @@ pub(super) fn create_water_lod_data(
         foam: images.add(lod_array_image(&settings, WATER_LOD_SURFACE_FORMAT)),
         flow: images.add(lod_array_image(&settings, TextureFormat::Rgba32Float)),
         drift: images.add(lod_array_image(&settings, WATER_LOD_DRIFT_FORMAT)),
+        aeration: images.add(lod_array_image(&settings, WATER_LOD_AERATION_FORMAT)),
         foam_state: images.add(lod_array_image(&settings, super::WATER_FOAM_STATE_FORMAT)),
         foam_flow: images.add(lod_layers_image(
             &settings,
@@ -295,6 +314,7 @@ mod tests {
             foam: Handle::default(),
             flow: Handle::default(),
             drift: Handle::default(),
+            aeration: Handle::default(),
             foam_state: Handle::default(),
             foam_flow: Handle::default(),
             slices,

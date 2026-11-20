@@ -195,7 +195,7 @@ fn set_foam_state(app: &mut App, active: f32, residual: f32) {
     let handle = app.world().resource::<WaterLodData>().foam_state.clone();
     let mut images = app.world_mut().resource_mut::<Assets<Image>>();
     let mut image = images.get_mut(&handle).unwrap();
-    for texel in image.data.as_mut().unwrap().chunks_exact_mut(8) {
+    for texel in image.data.as_mut().unwrap().chunks_exact_mut(16) {
         texel[0..4].copy_from_slice(&active.to_le_bytes());
         texel[4..8].copy_from_slice(&residual.to_le_bytes());
     }

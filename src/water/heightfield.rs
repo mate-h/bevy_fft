@@ -25,8 +25,8 @@ use bevy::{
 use crate::{
     ocean::{OCEAN_MAX_CASCADES, OceanLodWriteFrame},
     water::{
-        WATER_LOD_DRIFT_FORMAT, WATER_LOD_SURFACE_FORMAT, WaterLodData, WaterLodGpu,
-        WaterLodScratch, WaterLodSlices,
+        WATER_LOD_AERATION_FORMAT, WATER_LOD_DRIFT_FORMAT, WATER_LOD_SURFACE_FORMAT, WaterLodData,
+        WaterLodGpu, WaterLodScratch, WaterLodSlices,
     },
 };
 
@@ -211,6 +211,10 @@ impl FromWorld for WaterHeightfieldPipeline {
                 texture_storage_2d_array(WATER_LOD_DRIFT_FORMAT, StorageTextureAccess::WriteOnly),
                 texture_2d_array(unfiltered),
                 texture_2d(unfiltered),
+                texture_storage_2d_array(
+                    WATER_LOD_AERATION_FORMAT,
+                    StorageTextureAccess::ReadWrite,
+                ),
             ),
         );
         let layout = BindGroupLayoutDescriptor::new("water_heightfield_layout", &entries);
@@ -259,11 +263,12 @@ pub(super) fn prepare_water_heightfields(
     let Some(lod) = lod else {
         return;
     };
-    let (Some(disp_out), Some(foam_out), Some(flow_out), Some(drift_out)) = (
+    let (Some(disp_out), Some(foam_out), Some(flow_out), Some(drift_out), Some(aeration)) = (
         images.get(&lod.displacement),
         images.get(&lod.foam),
         images.get(&lod.flow),
         images.get(&lod.drift),
+        images.get(&lod.aeration),
     ) else {
         return;
     };
@@ -372,6 +377,7 @@ pub(super) fn prepare_water_heightfields(
                 &drift_out.texture_view,
                 drift_in,
                 pressure.unwrap_or(&bed_water.texture_view),
+                &aeration.texture_view,
             )),
         );
         state.passes.push(HeightfieldPass { group, dispatch });

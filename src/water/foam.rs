@@ -9,6 +9,13 @@
 //! Stage B patches in Monahan and Woolf's model. Sources and decay use the exact solution over each
 //! step, so foam does not depend on the frame rate.
 //!
+//! The sim also keeps the air fraction of the water column in the blue lane of the foam state, for
+//! white water. Writers store in [`WaterLodData::aeration`] the air fraction the flow would hold
+//! where it loses energy fast enough to entrain air. The sim carries the air along the drift like
+//! foam, without gathering it where the drift converges, raises it toward that value over
+//! [`WaterAerationSettings::formation_time`], and lets it leave the column as
+//! [`WaterAerationSettings`] describes.
+//!
 //! The same pass carries the foam texture coordinates in [`WaterLodData::foam_flow`] along the
 //! drift, after Neyret (2003), so the rendered foam pattern moves with the foam instead of standing
 //! still under it. `foam_flow.wesl` describes the layout.
@@ -28,13 +35,12 @@ use bevy::{
     },
 };
 
-use super::{
-    WATER_FOAM_FLOW_FORMAT, WATER_LOD_DRIFT_FORMAT, WaterLodData, WaterLodGpu, WaterLodSlices,
-};
+use super::{WATER_FOAM_FLOW_FORMAT, WaterLodData, WaterLodGpu, WaterLodSlices};
 
-/// Format of [`WaterLodData::foam_state`] and the sim's working arrays. Half floats would lose a
-/// little foam to rounding on every store, so the two lanes stay at full precision.
-pub const WATER_FOAM_STATE_FORMAT: TextureFormat = WATER_LOD_DRIFT_FORMAT;
+/// Format of [`WaterLodData::foam_state`] and the sim's working arrays: active foam, residual
+/// foam, air fraction, and a spare lane. Half floats would lose a little foam to rounding on every
+/// store, so the lanes stay at full precision. Two-lane `Rg32Float` storage is unreliable on Metal.
+pub const WATER_FOAM_STATE_FORMAT: TextureFormat = TextureFormat::Rgba32Float;
 
 /// Embedded path of the foam sim shader.
 pub const WATER_FOAM_SHADER: &str = "embedded://bevy_fft/water/foam.wesl";
@@ -75,6 +81,39 @@ impl Default for WaterFoamSettings {
     }
 }
 
+/// How fast white water takes up air and loses it again. The air fraction is the volume of air over
+/// the volume of air and water, averaged over the water column.
+///
+/// The defaults follow the unsubmerged hydraulic jump that Vallé and Pasternack (2006) surveyed in
+/// a bedrock step-pool channel: 0.27 m of water at Froude number 2 jumping to about 0.64 m. Air
+/// peaked at 40 to 50 percent 0.25 m past the toe, which the inflow at about 3.3 m/s covers in
+/// 0.08 s, and fell below 2 percent 2.8 m past it. The tailwater runs at about 1.4 m/s, so the
+/// air fell by e about every 0.6 s, which over 0.64 m of water is a detrainment speed near 1 m/s.
+/// That is faster than a millimetre bubble rises on its own, about 0.25 m/s, since the roller's
+/// air packets are larger and the probe saw only the top 0.1 m.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Reflect)]
+#[reflect(Resource)]
+pub struct WaterAerationSettings {
+    /// Seconds over which entraining flow raises the air fraction to what it can hold.
+    pub formation_time: f32,
+    /// Meters per second at which air leaves the water column. The air fraction falls by e every
+    /// `depth / detrainment_speed` seconds, so deep plunge pools stay white for longer.
+    pub detrainment_speed: f32,
+    /// Shallower water counts as this deep for the detrainment, in meters, so a thin film doesn't
+    /// lose its air in a single frame.
+    pub min_depth: f32,
+}
+
+impl Default for WaterAerationSettings {
+    fn default() -> Self {
+        Self {
+            formation_time: 0.08,
+            detrainment_speed: 1.0,
+            min_depth: 0.1,
+        }
+    }
+}
+
 /// Per-step decay factors for the foam sim. Layout matches `WaterFoamParams` in `foam.wesl`.
 #[derive(Clone, Copy, Debug, Default, ShaderType)]
 pub struct WaterFoamParams {
@@ -97,6 +136,12 @@ pub struct WaterFoamParams {
     /// One on the first step the sim runs, which gives every advected texture coordinate a fresh
     /// offset. The render world sets it.
     pub restart: f32,
+    /// Share of the gap to the air fraction the flow can hold that is left after `dt`.
+    pub air_formation: f32,
+    /// Meters of water column the air leaves over `dt`.
+    pub air_detrainment: f32,
+    /// See [`WaterAerationSettings::min_depth`].
+    pub air_min_depth: f32,
 }
 
 impl WaterFoamParams {
@@ -137,7 +182,18 @@ impl WaterFoamParams {
             source_residual: k * (held(lr, residual_decay) - overlap) * inv_formation,
             time: 0.0,
             restart: 0.0,
+            air_formation: 0.0,
+            air_detrainment: 0.0,
+            air_min_depth: 1.0,
         }
+    }
+
+    /// Sets the air fraction's factors for this step from `settings`.
+    pub fn with_aeration(mut self, settings: &WaterAerationSettings) -> Self {
+        self.air_formation = (-self.dt / settings.formation_time.max(1e-4)).exp();
+        self.air_detrainment = settings.detrainment_speed.max(0.0) * self.dt;
+        self.air_min_depth = settings.min_depth.max(1e-3);
+        self
     }
 }
 
@@ -151,6 +207,7 @@ pub struct WaterFoamFrame {
 pub(super) fn gather_water_foam(
     time: Res<Time>,
     settings: Res<WaterFoamSettings>,
+    aeration: Res<WaterAerationSettings>,
     lod: Option<Res<WaterLodData>>,
     mut frame: ResMut<WaterFoamFrame>,
     mut last: Local<Option<WaterLodSlices>>,
@@ -162,7 +219,7 @@ pub(super) fn gather_water_foam(
     *last = Some(lod.slices);
     frame.params = WaterFoamParams {
         time: time.elapsed_secs_wrapped(),
-        ..WaterFoamParams::step(&settings, previous, time.delta_secs())
+        ..WaterFoamParams::step(&settings, previous, time.delta_secs()).with_aeration(&aeration)
     };
 }
 
@@ -192,6 +249,7 @@ impl FromWorld for WaterFoamPipeline {
                 texture_2d_array(unfiltered),
                 texture_storage_2d_array(WATER_FOAM_FLOW_FORMAT, StorageTextureAccess::WriteOnly),
                 storage_buffer_read_only::<u32>(false),
+                texture_2d_array(unfiltered),
             ),
         );
         let layout = BindGroupLayoutDescriptor::new("water_foam_layout", &entries);
@@ -292,11 +350,12 @@ pub(super) fn prepare_water_foam(
     let Some(lod) = lod else {
         return;
     };
-    let (Some(state), Some(source), Some(drift), Some(flow), Some(slices)) = (
+    let (Some(state), Some(source), Some(drift), Some(flow), Some(aeration), Some(slices)) = (
         images.get(&lod.foam_state),
         images.get(&lod.foam),
         images.get(&lod.drift),
         images.get(&lod.foam_flow),
+        images.get(&lod.aeration),
         lod_gpu.slices.binding(),
     ) else {
         return;
@@ -374,6 +433,7 @@ pub(super) fn prepare_water_foam(
                 &flow.texture_view,
                 &flow_out.view,
                 deposit.as_entire_buffer_binding(),
+                &aeration.texture_view,
             )),
         )
     };
@@ -536,6 +596,23 @@ mod tests {
         let fine = residual_after(&s, 0.01, 100);
         assert!((coarse.1 - fine.1).abs() < 1e-5);
         assert!(coarse.1.is_finite() && coarse.1 > 0.0);
+    }
+
+    #[test]
+    fn air_factors_do_not_depend_on_step_size() {
+        // Over one second the gap to the held air closes by e^(-1 / formation time), and air over
+        // a meter of water falls by e^(-detrainment speed).
+        let a = WaterAerationSettings::default();
+        let s = WaterFoamSettings::default();
+        let step =
+            |dt: f32| WaterFoamParams::step(&s, WaterLodSlices::default(), dt).with_aeration(&a);
+        let (coarse, fine) = (step(1.0 / 30.0), step(1.0 / 120.0));
+        let formation = (coarse.air_formation.powi(30), fine.air_formation.powi(120));
+        assert!((formation.0 - formation.1).abs() < 1e-6, "{formation:?}");
+        assert!((formation.0 - (-1.0 / a.formation_time).exp()).abs() < 1e-6);
+        let left = |p: WaterFoamParams, n: i32| (-p.air_detrainment / 1.0f32).exp().powi(n);
+        assert!((left(coarse, 30) - (-a.detrainment_speed).exp()).abs() < 1e-5);
+        assert!((left(fine, 120) - (-a.detrainment_speed).exp()).abs() < 1e-5);
     }
 
     #[test]
