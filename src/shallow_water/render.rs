@@ -231,6 +231,7 @@ pub fn prepare_shallow_water_gpu(
         offset,
         band: nested.band,
         parent_cell_size: placement.cell_size,
+        child_steps: NEST_REFINEMENT,
     };
     let stale = gpu.nested.as_ref().is_none_or(|n| {
         !n.child.matches(child_cells, &child_textures, 0) || n.bed.view.id() != bed.view.id()

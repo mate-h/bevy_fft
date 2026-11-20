@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `ShallowWaterNestDescriptor::child_steps` sets how many steps a nested grid takes per parent step, instead of always three, so a fine grid can step as its own stability limit allows. The parent still holds its water to 1e-7 with 1, 2, 3 and 5.
 - `tools/bake_topobathy.py` shapes a carved river's bed with step-pools or riffle-pools when its `rivers.json` entry has `"bedforms"`. Step-pools follow Abrahams, Li and Atkinson (1995): step height over spacing is 1.5 times the local slope, with a pool scoured below each step. The mean slope of the bed stays the same.
 - `WaterHeightfieldDry::Extend` draws dry cells within two cells of water at that water's surface, and the rest at a still level. A stream above the still level then keeps its surface out into its banks, which hide it, instead of the mesh sinking to the still level wherever no vertex lands inside the stream. Placed shallow water grids use it.
 - `clamped_falls` finds waterfall lips in a settled shallow water grid where free fall outruns the solver's velocity clamp of 0.5 Δx/Δt, and the `river_banks` example reports them.

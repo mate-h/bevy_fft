@@ -35,6 +35,13 @@ const N: u32 = 96;
 const OFFSET: i32 = 32;
 const G: f32 = 9.81;
 const DT: f32 = 0.08;
+/// Child steps per parent step, 3 unless `NEST_CHILD_STEPS` sets it, to check other counts.
+fn child_steps() -> u32 {
+    std::env::var("NEST_CHILD_STEPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3)
+}
 
 #[derive(Clone, Copy)]
 struct Scenario {
@@ -110,7 +117,7 @@ fn prepare(
             return;
         };
         parent.write_settings(&queue, &settings(1.0, DT));
-        child.write_settings(&queue, &settings(1.0 / 3.0, DT / 3.0));
+        child.write_settings(&queue, &settings(1.0 / 3.0, DT / child_steps() as f32));
         driver.solvers = Some((parent, child));
     }
     if grids.nested && driver.nest.is_none() {
@@ -125,6 +132,7 @@ fn prepare(
                 offset: IVec2::splat(OFFSET),
                 band: 1,
                 parent_cell_size: 1.0,
+                child_steps: child_steps(),
             },
         );
     }

@@ -121,6 +121,11 @@ pub struct ShallowWaterNestDescriptor {
     pub band: u32,
     /// Parent cell width. The child's is a third of it.
     pub parent_cell_size: f32,
+    /// Child steps per parent step, each of the parent's step over this many. 3 refines time as
+    /// space, after Debreu and Blayo (2008). A child whose own stability limit allows longer
+    /// steps can take fewer, and one that needs shorter steps more; write its settings with the
+    /// matching `dt`. At least 1.
+    pub child_steps: u32,
 }
 
 /// A child [`ShallowWaterSolver`] nested in a parent one, coupled both ways. See
@@ -137,7 +142,8 @@ pub struct ShallowWaterNest {
     prolong: ComputePipeline,
     feedback: ComputePipeline,
     /// Settings with `time_blend` at 1/3, 2/3 and 1.
-    settings: [(Buffer, BindGroup); 3],
+    /// One per child step, with the parent's time at the end of that step.
+    settings: Vec<(Buffer, BindGroup)>,
     child_target: BindGroup,
     child_source: BindGroup,
     parent_target: BindGroup,
@@ -287,31 +293,34 @@ impl ShallowWaterNest {
             )),
         );
 
-        let settings = [1.0f32, 2.0, 3.0].map(|m| {
-            let uniform = GpuNestSettings {
-                child_cells,
-                parent_cells,
-                offset: descriptor.offset,
-                band: descriptor.band,
-                time_blend: m / NEST_REFINEMENT as f32,
-                parent_dx: descriptor.parent_cell_size,
-                eps_wet: 1e-4 * descriptor.parent_cell_size,
-                _pad: Vec2::ZERO,
-            };
-            let mut bytes = Vec::new();
-            uniform.write_into(&mut Writer::new(&uniform, &mut bytes, 0).unwrap());
-            let buffer = device.create_buffer_with_data(&BufferInitDescriptor {
-                label: Some("shallow_water_nest_settings"),
-                contents: &bytes,
-                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-            });
-            let group = device.create_bind_group(
-                "shallow_water_nest_settings",
-                &settings_layout,
-                &BindGroupEntries::single(buffer.as_entire_buffer_binding()),
-            );
-            (buffer, group)
-        });
+        let steps = descriptor.child_steps.max(1);
+        let settings: Vec<_> = (1..=steps)
+            .map(|m| {
+                let uniform = GpuNestSettings {
+                    child_cells,
+                    parent_cells,
+                    offset: descriptor.offset,
+                    band: descriptor.band,
+                    time_blend: m as f32 / steps as f32,
+                    parent_dx: descriptor.parent_cell_size,
+                    eps_wet: 1e-4 * descriptor.parent_cell_size,
+                    _pad: Vec2::ZERO,
+                };
+                let mut bytes = Vec::new();
+                uniform.write_into(&mut Writer::new(&uniform, &mut bytes, 0).unwrap());
+                let buffer = device.create_buffer_with_data(&BufferInitDescriptor {
+                    label: Some("shallow_water_nest_settings"),
+                    contents: &bytes,
+                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                });
+                let group = device.create_bind_group(
+                    "shallow_water_nest_settings",
+                    &settings_layout,
+                    &BindGroupEntries::single(buffer.as_entire_buffer_binding()),
+                );
+                (buffer, group)
+            })
+            .collect();
 
         Some(Self {
             parent_cells,
@@ -328,14 +337,16 @@ impl ShallowWaterNest {
     }
 
     /// Moves the child to `offset` in the parent. The grids' contents stay as they are.
+    /// The child step count stays the one it was built with.
     pub fn set_offset(&self, queue: &RenderQueue, descriptor: ShallowWaterNestDescriptor) {
+        let steps = self.settings.len();
         for (m, (buffer, _)) in self.settings.iter().enumerate() {
             let uniform = GpuNestSettings {
                 child_cells: self.child_cells,
                 parent_cells: self.parent_cells,
                 offset: descriptor.offset,
                 band: descriptor.band,
-                time_blend: (m + 1) as f32 / NEST_REFINEMENT as f32,
+                time_blend: (m + 1) as f32 / steps as f32,
                 parent_dx: descriptor.parent_cell_size,
                 eps_wet: 1e-4 * descriptor.parent_cell_size,
                 _pad: Vec2::ZERO,
@@ -350,7 +361,8 @@ impl ShallowWaterNest {
         (size + UVec2::ONE).map(|n| n.div_ceil(WORKGROUP))
     }
 
-    /// One parent step and three child steps, coupled both ways. `parent` and `child` must be
+    /// One parent step and [`ShallowWaterNestDescriptor::child_steps`] child steps, coupled both
+    /// ways. `parent` and `child` must be
     /// the solvers the nest was built for.
     pub fn encode_frame(
         &self,
@@ -363,7 +375,7 @@ impl ShallowWaterNest {
 
         let parent_groups = Self::groups(self.parent_cells);
         pass.set_bind_group(0, &self.parent_target, &[]);
-        pass.set_bind_group(1, &self.settings[2].1, &[]);
+        pass.set_bind_group(1, &self.settings[self.settings.len() - 1].1, &[]);
         pass.set_bind_group(2, &self.parent_source, &[]);
         pass.set_pipeline(&self.snapshot);
         pass.dispatch_workgroups(parent_groups.x, parent_groups.y, 1);
@@ -381,7 +393,7 @@ impl ShallowWaterNest {
         }
 
         pass.set_bind_group(0, &self.parent_target, &[]);
-        pass.set_bind_group(1, &self.settings[2].1, &[]);
+        pass.set_bind_group(1, &self.settings[self.settings.len() - 1].1, &[]);
         pass.set_bind_group(2, &self.parent_source, &[]);
         pass.set_pipeline(&self.feedback);
         pass.dispatch_workgroups(parent_groups.x, parent_groups.y, 1);

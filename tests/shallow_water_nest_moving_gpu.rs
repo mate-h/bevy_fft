@@ -121,6 +121,7 @@ fn nest_descriptor(offset: IVec2) -> ShallowWaterNestDescriptor {
         offset,
         band: 1,
         parent_cell_size: 1.0,
+        child_steps: 3,
     }
 }
 
