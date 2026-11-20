@@ -8,6 +8,12 @@
 // foam lane gets the breaking intensity of CMF10 fronts in the patch and of the water a moving hull
 // pushes aside. Both modes fade out along the patch edge over `blend_cells`. The data below comes
 // from a scratch copy made just before this pass.
+//
+// In add mode the patch also modulates the short waves of the data below, as a long wave strains
+// the wind ripples riding on it: their spectral level grows over its crests and falls in its
+// troughs, by `exp(m |k| η)` (see `short_wave_modulation`). The unresolved slope variance in the
+// foam lane's alpha takes that factor, and the resolved slopes shorter than the patch's waves take
+// its square root.
 
 import bevy_fft::water::breaking::{breaking_front, max_abs};
 import bevy_fft::water::lod::{WaterLodSlices, lod_texel_world};
@@ -32,7 +38,8 @@ struct DispersiveLodParams {
     hull_radius: f32,
     /// Hull speed in meters per second, zero while no hull is in the water.
     hull_speed: f32,
-    _pad1: f32,
+    /// Hydrodynamic modulation transfer factor of the short waves on the patch, zero for none.
+    short_wave_modulation: f32,
     _pad2: f32,
 }
 
@@ -108,6 +115,80 @@ fn cell_at(g: vec2<f32>) -> vec4<f32> {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
+/// Bilinear free-surface elevation relative to rest at grid coordinate `g`.
+fn eta_at(g: vec2<f32>) -> f32 {
+    let c = cell_at(g);
+    return c.x + c.y;
+}
+
+/// Exponent the short-wave modulation stays within, so steep patch features such as the hull's
+/// own trough neither blank the ripples out nor blow them up: a factor between 0.22 and 4.5.
+const MODULATION_LIMIT: f32 = 1.5;
+
+/// `|k| η` at grid coordinate `g`: the patch's elevation weighted by its local wavenumber, which
+/// for one long wave of amplitude a is `k a cos θ`, its slope amplitude times the phase, largest at
+/// crests and most negative in troughs. For deep-water waves it is also the time integral of the
+/// convergence of the surface velocity, `-∇·u = |k| ∂η/∂t`, the strain that compresses the short
+/// waves. The local wavenumber comes from the elevation and its first three derivatives: for a
+/// plane wave `(∇²η)² + |∇η||∇∇²η| = a²k⁴` and `|∇η|² + |η||∇²η| = a²k²` at every phase, so
+/// `|k| η = -∇²η / k` needs no wavelength given. `c`, `e`, `w`, `n` and `s` are the elevation at
+/// the centre and one step `h` meters east, west, north and south, `slope` its gradient. Returns
+/// `|k| η` in `.x` and the local wavenumber in rad/m in `.y`, zero where the patch is flat.
+fn wavenumber_elevation(
+    g: vec2<f32>,
+    span: f32,
+    h: f32,
+    c: f32,
+    e: f32,
+    w: f32,
+    n: f32,
+    s: f32,
+    slope: vec2<f32>,
+) -> vec2<f32> {
+    let dx = vec2<f32>(span, 0.0);
+    let dz = vec2<f32>(0.0, span);
+    let ne = eta_at(g + dx + dz);
+    let nw = eta_at(g - dx + dz);
+    let se = eta_at(g + dx - dz);
+    let sw = eta_at(g - dx - dz);
+    let ih2 = 1.0 / (h * h);
+    let lap = (e + w + n + s - 4.0 * c) * ih2;
+    let lap_e = (eta_at(g + 2.0 * dx) + c + ne + se - 4.0 * e) * ih2;
+    let lap_w = (eta_at(g - 2.0 * dx) + c + nw + sw - 4.0 * w) * ih2;
+    let lap_n = (eta_at(g + 2.0 * dz) + c + ne + nw - 4.0 * n) * ih2;
+    let lap_s = (eta_at(g - 2.0 * dz) + c + se + sw - 4.0 * s) * ih2;
+    let grad_lap = vec2<f32>(lap_e - lap_w, lap_n - lap_s) / (2.0 * h);
+    let k4 = lap * lap + length(slope) * length(grad_lap);
+    let k2 = dot(slope, slope) + abs(c * lap);
+    if k4 <= 1e-20 || k2 <= 1e-20 {
+        return vec2<f32>(0.0);
+    }
+    // No shorter than four steps of the stencil, which can't resolve shorter waves, and no longer
+    // than the patch.
+    let k_max = 0.5 * 3.14159265 / h;
+    let k_min = 6.2831853 / (f32(params.cells) * params.cell_size);
+    let k = clamp(sqrt(sqrt(k4 / k2)), k_min, k_max);
+    return vec2<f32>(-lap / k, k);
+}
+
+/// Slopes of `base` in `.rg` at a texel, with the part shorter than about `radius` texels scaled
+/// by `gain`. The 4-tap mean around the texel keeps what is longer, so swell and the patch's
+/// own scale pass unchanged and the ripples on them take the gain.
+fn modulate_short_slopes(texel: vec2<u32>, slice: u32, radius: f32, gain: f32, base: vec4<f32>) -> vec4<f32> {
+    if abs(gain - 1.0) < 1e-4 {
+        return base;
+    }
+    let r = i32(clamp(round(radius), 1.0, 64.0));
+    let hi = vec2<i32>(i32(lod.resolution) - 1);
+    let t = vec2<i32>(texel);
+    let a = textureLoad(base_displacement, clamp(t + vec2(r, 0), vec2(0), hi), slice, 0).rg;
+    let b = textureLoad(base_displacement, clamp(t - vec2(r, 0), vec2(0), hi), slice, 0).rg;
+    let c = textureLoad(base_displacement, clamp(t + vec2(0, r), vec2(0), hi), slice, 0).rg;
+    let d = textureLoad(base_displacement, clamp(t - vec2(0, r), vec2(0), hi), slice, 0).rg;
+    let long = 0.25 * (a + b + c + d);
+    return vec4<f32>(long + (base.rg - long) * gain, base.ba);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn dispersive_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     let res = lod.resolution;
@@ -178,9 +259,23 @@ fn dispersive_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
         let base_d = textureLoad(base_drift, gid.xy, slice, 0).xy;
         textureStore(drift_out, gid.xy, slice, vec4<f32>(mix(base_d, flow.xy, w), 0.0, 0.0));
     } else {
+        // Short-wave modulation by the patch's waves. Under a hull the patch is the hull's own
+        // trough, covered in foam, and drives none.
+        var exponent = 0.0;
+        var radius = 1.0;
+        if params.short_wave_modulation != 0.0 && head <= 0.0 {
+            let ke = wavenumber_elevation(g, span, h, eta, ex.x, ex.y, ez.x, ez.y, slope);
+            exponent = clamp(params.short_wave_modulation * ke.x, -MODULATION_LIMIT, MODULATION_LIMIT) * w;
+            // The resolved slopes shorter than a quarter of the patch's local wavelength count as
+            // the short waves, in this slice's texels.
+            radius = 0.25 * 6.2831853 / max(ke.y, 1e-3) / lod.slices[slice].z;
+        }
+        let level = exp(exponent);
+        let modulated = modulate_short_slopes(gid.xy, slice, radius, sqrt(level), base);
         let deviation = vec4<f32>(slope, params.datum + eta, 0.0) * w;
-        textureStore(displacement_out, gid.xy, slice, base + deviation);
-        textureStore(foam_out, gid.xy, slice, vec4<f32>(max(base_f.r, breaking), base_f.gba));
+        textureStore(displacement_out, gid.xy, slice, modulated + deviation);
+        let variance = base_f.a * level;
+        textureStore(foam_out, gid.xy, slice, vec4<f32>(max(base_f.r, breaking), base_f.gb, variance));
         textureStore(flow_out, gid.xy, slice, base_v + flow * w);
     }
 }

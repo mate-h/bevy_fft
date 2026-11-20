@@ -211,6 +211,9 @@ pub enum DispersiveLodBlend {
     Replace,
 }
 
+/// Default [`DispersivePlacement::short_wave_modulation`].
+pub const DEFAULT_SHORT_WAVE_MODULATION: f32 = 4.5;
+
 /// Where a dispersive patch sits in the world, for writing into the shared
 /// [`WaterLodData`](crate::water::WaterLodData). The cell width is
 /// [`DispersiveController::tile_world`] divided by [`DispersiveController::n`].
@@ -223,6 +226,13 @@ pub struct DispersivePlacement {
     /// Width in cells of the band along the patch edge where it fades out.
     pub blend_cells: f32,
     pub blend: DispersiveLodBlend,
+    /// Hydrodynamic modulation transfer factor of the short waves riding on the patch, in add
+    /// mode. The short-wave spectral level there is scaled by `exp(m |k| η)`, with `|k| η` the
+    /// patch's deviation from rest weighted by its local wavenumber, so the ocean's ripples
+    /// roughen on the patch's crests and smooth in its troughs. Alpers and Hasselmann (1978) derive
+    /// 4.5 from the short waves' action balance; measurements run higher, most of all in light
+    /// wind. Zero turns it off. See `docs/dispersive.md`.
+    pub short_wave_modulation: f32,
 }
 
 impl Default for DispersivePlacement {
@@ -232,6 +242,7 @@ impl Default for DispersivePlacement {
             datum: 0.0,
             blend_cells: 24.0,
             blend: DispersiveLodBlend::Add,
+            short_wave_modulation: DEFAULT_SHORT_WAVE_MODULATION,
         }
     }
 }

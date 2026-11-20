@@ -19,6 +19,8 @@
 //! - `BOAT_TOP=<m>` looks down on the boat and its wake from that height.
 //! - `BOAT_VIEW=wake` starts the chase camera in its wake view, as `C` does.
 //! - `BOAT_WAKE_CELL=<m>` sets the wake patch's cell width (default 0.5).
+//! - `BOAT_MODULATION=<m>` sets how strongly the wake modulates the short waves riding on it
+//!   ([`DispersivePlacement::short_wave_modulation`], default 4.5, 0 for none).
 //! - `BOAT_HELM=<throttle>,<rudder degrees>` holds the helm, for runs without a keyboard.
 //! - `BOAT_LOG=1` prints the boat's height, roll, pitch and forces once a second
 //!   (`BOAT_LOG_EVERY=<s>` to change that), and the readback latency of the forces.
@@ -230,11 +232,14 @@ fn setup(
     spawn_boat(&mut commands, &mut meshes, &mut materials);
 
     // The wake patch: deep-water waves the hull presses into the surface, following the boat.
-    let wake = boat::wake_patch(
+    let mut wake = boat::wake_patch(
         &mut commands,
         &mut images,
         env_f32("BOAT_WAKE_CELL").unwrap_or(boat::WAKE_CELL),
     );
+    if let (Some(m), Some(placement)) = (env_f32("BOAT_MODULATION"), wake.placement.as_mut()) {
+        placement.short_wave_modulation = m;
+    }
     if std::env::var_os("BOAT_LOG").is_some() {
         commands
             .spawn(bevy::render::gpu_readback::Readback::texture(

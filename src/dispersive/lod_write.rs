@@ -33,7 +33,8 @@ pub struct DispersiveLodParams {
     pub hull_radius: f32,
     /// Hull speed in meters per second, zero while the brush is inactive.
     pub hull_speed: f32,
-    pub _pad1: f32,
+    /// [`DispersivePlacement::short_wave_modulation`](super::DispersivePlacement).
+    pub short_wave_modulation: f32,
     pub _pad2: f32,
 }
 
@@ -169,7 +170,7 @@ pub(super) fn prepare_dispersive_lod_write(
         hull_prev: controller.pointer_prev,
         hull_radius: controller.brush_radius,
         hull_speed,
-        _pad1: 0.0,
+        short_wave_modulation: placement.short_wave_modulation,
         _pad2: 0.0,
     });
     state.params.write_buffer(&device, &queue);
