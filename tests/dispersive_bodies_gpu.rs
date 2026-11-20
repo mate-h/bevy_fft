@@ -37,8 +37,18 @@ fn step(app: &mut App) {
     thread::sleep(Duration::from_millis(1));
 }
 
-/// A 128 m patch of 4 m water at the origin in deep mode, with body maps.
+/// A 128 m patch of 4 m water at the origin in deep mode, with body maps, over one LOD slice of
+/// 1 m texels.
 fn patch_app() -> App {
+    patch_app_with(WaterLodSettings {
+        resolution: 256,
+        slice_count: 1,
+        base_texel_size: 1.0,
+    })
+}
+
+/// [`patch_app`] over the LOD slices `lod` describes.
+fn patch_app_with(lod: WaterLodSettings) -> App {
     let mut app = App::new();
     app.add_plugins(
         DefaultPlugins
@@ -53,11 +63,7 @@ fn patch_app() -> App {
     )
     .add_plugins((FftPlugin, FloatingBodyPlugin, DispersivePlugin))
     .insert_resource(WaterLodClear)
-    .insert_resource(WaterLodSettings {
-        resolution: 256,
-        slice_count: 1,
-        base_texel_size: 1.0,
-    })
+    .insert_resource(lod)
     .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f32(
         DT,
     )))
@@ -548,4 +554,117 @@ fn ambient_swell_rests_against_a_hull_instead_of_running_through_it() {
         (mean + 1.0).abs() < 0.15,
         "the surface under the hull sits at {mean} m, the hull's bottom at -1 m"
     );
+}
+
+/// Bilinear surface deviation at grid coordinate `g` in cells, clamped to the patch, as the LOD
+/// writer samples it.
+fn eta_at(eta: &[f32], g: Vec2) -> f32 {
+    let x = g - 0.5;
+    let i0 = x.floor();
+    let f = x - i0;
+    let at = |dx: i32, dy: i32| {
+        let c = (i0.as_ivec2() + IVec2::new(dx, dy)).clamp(IVec2::ZERO, IVec2::splat(N as i32 - 1));
+        eta[(c.y as u32 * N + c.x as u32) as usize]
+    };
+    let a = at(0, 0) + (at(1, 0) - at(0, 0)) * f.x;
+    let b = at(0, 1) + (at(1, 1) - at(0, 1)) * f.x;
+    a + (b - a) * f.y
+}
+
+/// The wake of a towed hull in the water LOD data, against the patch it came from, in every slice
+/// over the patch: from texels four times finer than the patch's cells, as the surface near a
+/// camera reads, to twice as coarse. A wake that the render loses on its way to the pixels would
+/// show here as a slice that holds less of it.
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn a_wake_reaches_every_lod_slice_over_the_patch() {
+    let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
+    // Slices 64, 128, 256 and 512 m wide around the origin.
+    const SLICES: u32 = 4;
+    const RES: u32 = 256;
+    let mut app = patch_app_with(WaterLodSettings {
+        resolution: RES,
+        slice_count: SLICES,
+        base_texel_size: 0.25,
+    });
+    app.init_resource::<Composite>();
+    let mut body = barge();
+    body.estimate_velocity = true;
+    let entity = app
+        .world_mut()
+        .spawn((body, Transform::from_xyz(-40.0, 0.0, 0.0)))
+        .id();
+    for _ in 0..60 {
+        step(&mut app);
+    }
+    // Tow it 40 m along +X at 4 m/s.
+    for _ in 0..600 {
+        let mut transform = app.world_mut().get_mut::<Transform>(entity).unwrap();
+        transform.translation.x += 4.0 * DT;
+        step(&mut app);
+    }
+    // Hold the water still, so the patch and the LOD data are read at the same step.
+    app.world_mut()
+        .resource_mut::<DispersiveController>()
+        .paused = true;
+    settle(&mut app);
+    settle(&mut app);
+    let displacement = app.world().resource::<WaterLodData>().displacement.clone();
+    app.world_mut()
+        .spawn(Readback::texture(displacement))
+        .observe(|event: On<ReadbackComplete>, mut c: ResMut<Composite>| {
+            c.bytes = event.data.clone();
+            c.serial += 1;
+        });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while app.world().resource::<Composite>().serial < 2 {
+        step(&mut app);
+        assert!(Instant::now() < deadline, "LOD readback timed out");
+    }
+    let e = eta(&app);
+    let slices = app.world().resource::<WaterLodData>().slices;
+    let bytes = &app.world().resource::<Composite>().bytes;
+    let layer = bytes.len() / SLICES as usize;
+    let lane = |slice: u32, x: u32, y: u32, k: usize| {
+        let o = slice as usize * layer + (y * RES + x) as usize * 8 + k * 2;
+        half_to_f32(u16::from_le_bytes([bytes[o], bytes[o + 1]]))
+    };
+    for slice in 0..SLICES {
+        let s = slices.slices[slice as usize];
+        // The writer differences heights over at least one cell, or one texel where they are wider.
+        let span = s.z.max(1.0);
+        let (mut height_error, mut slope_error, mut wake, mut count) = (0.0f32, 0.0f32, 0.0, 0);
+        for y in 0..RES {
+            for x in 0..RES {
+                let texel = Vec2::new(x as f32, y as f32) + 0.5 - 0.5 * RES as f32;
+                let g = Vec2::new(s.x, s.y) + texel * s.z + 0.5 * N as f32;
+                // Past the 4-cell fade along the patch edge, with the slope stencil inside too.
+                let edge = g.x.min(g.y).min(N as f32 - g.x).min(N as f32 - g.y);
+                if edge < 4.0 + span {
+                    continue;
+                }
+                let expected = eta_at(&e, g);
+                let slope = (eta_at(&e, g + Vec2::X * span) - eta_at(&e, g - Vec2::X * span))
+                    / (2.0 * span);
+                height_error = height_error.max((lane(slice, x, y, 2) - expected).abs());
+                slope_error = slope_error.max((lane(slice, x, y, 0) - slope).abs());
+                wake += expected * expected;
+                count += 1;
+            }
+        }
+        assert!(
+            count > 100,
+            "slice {slice} overlaps the patch at {count} texels"
+        );
+        let wake = (wake / count as f32).sqrt();
+        assert!(wake > 0.01, "slice {slice} holds a wake of {wake} m rms");
+        assert!(
+            height_error < 0.01,
+            "slice {slice} is up to {height_error} m off the patch, whose wake is {wake} m rms"
+        );
+        assert!(
+            slope_error < 0.005,
+            "slice {slice}'s slope is up to {slope_error} off the patch's"
+        );
+    }
 }
