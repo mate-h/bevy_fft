@@ -29,7 +29,8 @@ struct WaterHeightfieldParams {
     amplitude: f32,
     choppiness: f32,
     cascade_count: u32,
-    /// 0 puts dry cells at `dry_level`, 1 on the bed.
+    /// 0 puts dry cells at `dry_level`, 1 on the bed, 2 at the mean surface of the wet cells
+    /// within two cells along the axes, else at `dry_level`.
     dry_mode: u32,
     /// Meters per unit of the source's bed height and water depth.
     height_scale: f32,
@@ -218,13 +219,40 @@ fn flux_at(g: vec2<f32>) -> vec2<f32> {
     return bed_water_at(g).y * velocity_at(g);
 }
 
-/// Free-surface height used for the mesh. With `dry_mode` 0, dry cells sit at the still-water
-/// level so a triangle onto land does not climb the bed.
+/// Free-surface height used for the mesh. With `dry_mode` 0 or 2, dry cells sit at the
+/// still-water level so a triangle onto land does not climb the bed; `cell_render_eta` handles
+/// mode 2's cells beside water.
 fn render_eta(bw: vec2<f32>) -> f32 {
     if bw.y <= DRY_DEPTH && params.dry_mode == 0u {
         return params.dry_level;
     }
     return bw.x + bw.y;
+}
+
+/// Mesh height of cell `p`. With `dry_mode` 2 a dry cell beside water takes the water's surface,
+/// so a stream above `dry_level` that falls between mesh vertices doesn't sink under its banks:
+/// the surface carries on flat into the banks, which hide it.
+fn cell_render_eta(p: vec2<i32>) -> f32 {
+    let bw = load_bed_water(p);
+    if bw.y > DRY_DEPTH || params.dry_mode != 2u {
+        return render_eta(bw);
+    }
+    var sum = 0.0;
+    var count = 0.0;
+    for (var r = 1; r <= 2; r++) {
+        for (var k = 0; k < 4; k++) {
+            let o = select(vec2(0, r), vec2(r, 0), k < 2) * select(-1, 1, k % 2 == 0);
+            let q = load_bed_water(p + o);
+            if q.y > DRY_DEPTH {
+                sum += q.x + q.y;
+                count += 1.0;
+            }
+        }
+        if count > 0.0 {
+            return sum / count;
+        }
+    }
+    return params.dry_level;
 }
 
 /// Free-surface height at grid coordinate `g`. Each cell is resolved before the bilinear blend.
@@ -234,10 +262,10 @@ fn eta_at(g: vec2<f32>) -> f32 {
     let x = g - 0.5;
     let i0 = vec2<i32>(floor(x));
     let f = x - floor(x);
-    let a = render_eta(load_bed_water(i0));
-    let b = render_eta(load_bed_water(i0 + vec2(1, 0)));
-    let c = render_eta(load_bed_water(i0 + vec2(0, 1)));
-    let d = render_eta(load_bed_water(i0 + vec2(1, 1)));
+    let a = cell_render_eta(i0);
+    let b = cell_render_eta(i0 + vec2(1, 0));
+    let c = cell_render_eta(i0 + vec2(0, 1));
+    let d = cell_render_eta(i0 + vec2(1, 1));
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
@@ -351,7 +379,7 @@ struct FrontParams {
 @group(0) @binding(22) var<uniform> front_params: FrontParams;
 
 fn cell_eta(p: vec2<i32>) -> f32 {
-    return render_eta(load_bed_water(p));
+    return cell_render_eta(p);
 }
 
 @compute @workgroup_size(8, 8, 1)

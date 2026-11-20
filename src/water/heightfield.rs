@@ -42,6 +42,11 @@ pub enum WaterHeightfieldDry {
     /// dropping to one level. Set [`WaterSurfaceUniform::dry_depth`](super::WaterSurfaceUniform)
     /// so the material discards the dry ground.
     Bed,
+    /// Dry cells within two cells of water, along the axes, render at the mean surface of that
+    /// water, and the rest at this still-water level, as [`Self::Level`]. A stream above the
+    /// still level then keeps its surface out into its banks, which hide it, instead of the mesh
+    /// sinking to the still level wherever no vertex falls inside the stream.
+    Extend(f32),
 }
 
 /// A grid of water cells that the water LOD data blends in each frame.
@@ -134,7 +139,8 @@ pub(super) struct WaterHeightfieldParams {
     amplitude: f32,
     choppiness: f32,
     cascade_count: u32,
-    /// 0 for [`WaterHeightfieldDry::Level`], 1 for [`WaterHeightfieldDry::Bed`].
+    /// 0 for [`WaterHeightfieldDry::Level`], 1 for [`WaterHeightfieldDry::Bed`], 2 for
+    /// [`WaterHeightfieldDry::Extend`].
     dry_mode: u32,
     height_scale: f32,
     velocity_scale: f32,
@@ -149,6 +155,7 @@ impl WaterHeightfieldParams {
         let (dry_mode, dry_level) = match heightfield.dry {
             WaterHeightfieldDry::Level(level) => (0, level * heightfield.height_scale),
             WaterHeightfieldDry::Bed => (1, 0.0),
+            WaterHeightfieldDry::Extend(level) => (2, level * heightfield.height_scale),
         };
         Self {
             center: heightfield.center,
