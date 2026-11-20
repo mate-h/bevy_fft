@@ -21,6 +21,7 @@ use bevy::{
         Render, RenderApp, RenderSystems,
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         gpu_readback::{Readback, ReadbackComplete},
+        render_resource::PollType,
         render_resource::*,
         renderer::{RenderContext, RenderDevice, RenderGraph, RenderGraphSystems, RenderQueue},
     },
@@ -69,6 +70,8 @@ struct Setup {
 struct Result {
     bed_water: Vec<Vec2>,
     velocity: Vec<Vec2>,
+    /// Wall time of each frame that stepped the solver, waiting for the GPU, in ms.
+    frame_ms: Vec<f32>,
 }
 
 #[derive(Resource, Clone, ExtractResource)]
@@ -259,8 +262,19 @@ fn run(setup: Setup) -> Result {
     });
 
     let deadline = Instant::now() + Duration::from_secs(60);
+    let mut frame_ms = Vec::new();
     while frames_done.load(Ordering::Relaxed) < FRAMES {
-        step(&mut app);
+        let before = frames_done.load(Ordering::Relaxed);
+        let start = Instant::now();
+        app.update();
+        assert!(app.should_exit().is_none(), "renderer must remain healthy");
+        let _ = app.world().resource::<RenderDevice>().poll(PollType::Wait {
+            submission_index: None,
+            timeout: Some(Duration::from_secs(5)),
+        });
+        if frames_done.load(Ordering::Relaxed) > before {
+            frame_ms.push(start.elapsed().as_secs_f32() * 1000.0);
+        }
         assert!(
             Instant::now() < deadline,
             "solver never finished its frames"
@@ -293,6 +307,7 @@ fn run(setup: Setup) -> Result {
     let vx = texels(&capture.velocity, nx, ny, 0);
     let vz = texels(&capture.velocity, nx, ny, 1);
     Result {
+        frame_ms,
         bed_water: bed
             .iter()
             .zip(&depth)
@@ -561,5 +576,53 @@ fn momentum_conserving_advection_keeps_a_vortex_spinning() {
         "momentum-conserving advection lost {:.1}% of the vortex's energy, MacCormack {:.1}%",
         100.0 * (1.0 - conserving),
         100.0 * (1.0 - maccormack)
+    );
+}
+
+/// Wall time per solver step on a 1024² grid of wet water, momentum-conserving advection against
+/// MacCormack, alternated three times each. The GPU may be shared, so only the ratio of the two
+/// medians is meaningful, and only loosely.
+#[test]
+#[ignore = "requires a graphics adapter; a benchmark"]
+fn momentum_conserving_advection_costs_about_as_much_as_maccormack() {
+    let n = 1024u32;
+    let setup = |momentum_conserving| Setup {
+        cells: UVec2::splat(n),
+        dx: 0.5,
+        bed_water: (0..n * n)
+            .map(|i| {
+                let (x, z) = ((i % n) as f32 - 512.0, (i / n) as f32 - 512.0);
+                [0.0, 1.0 + 0.3 * (-(x * x + z * z) / 400.0).exp()]
+            })
+            .collect(),
+        face_u: Vec::new(),
+        face_w: Vec::new(),
+        manning_n: 0.03,
+        momentum_conserving,
+    };
+    let median = |mut v: Vec<f32>| {
+        // Leave out the first frames, which wait on pipelines and uploads.
+        v.drain(..v.len().min(5));
+        v.sort_by(f32::total_cmp);
+        v[v.len() / 2]
+    };
+    let (mut mac, mut sd) = (Vec::new(), Vec::new());
+    for _ in 0..3 {
+        mac.push(median(run(setup(false)).frame_ms));
+        sd.push(median(run(setup(true)).frame_ms));
+    }
+    let per_step = |v: &[f32]| {
+        let mut v = v.to_vec();
+        v.sort_by(f32::total_cmp);
+        v[1] / STEPS_PER_FRAME as f32
+    };
+    let (mac, sd) = (per_step(&mac), per_step(&sd));
+    println!(
+        "1024² step: MacCormack {mac:.3} ms, momentum-conserving {sd:.3} ms ({:.2}x)",
+        sd / mac
+    );
+    assert!(
+        sd < 1.25 * mac,
+        "momentum-conserving step {sd:.3} ms against {mac:.3} ms"
     );
 }
