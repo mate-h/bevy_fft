@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `FloatingBody::footprint_scale` multiplies the volume a body presses the water down with. A planing hull, carried mostly by dynamic lift, can then press its wake with its whole weight. The `boat` example's wake waves at 15 knots grew from 5 to 17 cm with it.
+- The `boat` example's chase camera has a wake view, toggled with `C` or started with `BOAT_VIEW=wake`: it looks down from above the starboard quarter at the whole boat and its wake.
 - The `boat` example: a motor boat to drive across the FFT ocean with the keyboard.
   - The hull is lofted and voxelized in code, its water forces come from the GPU, and Rapier moves it.
   - A propeller, a rudder and a skeg drive it, as lifting surfaces in the local flow and the propeller wash.

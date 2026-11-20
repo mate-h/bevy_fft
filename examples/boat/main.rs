@@ -17,6 +17,7 @@
 //! - `BOAT_CHASE=<m>` sets the chase distance.
 //! - `BOAT_TOW=<m/s>` holds the boat at that speed straight ahead, for measuring drag.
 //! - `BOAT_TOP=<m>` looks down on the boat and its wake from that height.
+//! - `BOAT_VIEW=wake` starts the chase camera in its wake view, as `C` does.
 //! - `BOAT_WAKE_CELL=<m>` sets the wake patch's cell width (default 0.5).
 //! - `BOAT_HELM=<throttle>,<rudder degrees>` holds the helm, for runs without a keyboard.
 //! - `BOAT_LOG=1` prints the boat's height, roll, pitch and forces once a second
@@ -70,6 +71,12 @@ const CHASE_DISTANCE: f32 = 20.0;
 const CHASE_ELEVATION_DEG: f32 = 28.0;
 /// The chase camera looks at a point this share of its distance behind the boat.
 const CHASE_AIM_BEHIND: f32 = 0.15;
+/// The wake view's aim point behind the boat, and its eye behind, abeam and above the boat, all
+/// as fractions of the chase distance.
+const WAKE_AIM_BEHIND: f32 = 0.5;
+const WAKE_EYE_BEHIND: f32 = 0.6;
+const WAKE_EYE_ABEAM: f32 = 0.7;
+const WAKE_EYE_HEIGHT: f32 = 0.8;
 const CHASE_MIN: f32 = 6.0;
 const CHASE_MAX: f32 = 30.0;
 
@@ -82,6 +89,11 @@ fn main() {
         .insert_resource(Chase {
             distance: env_f32("BOAT_CHASE").unwrap_or(CHASE_DISTANCE),
             free: false,
+            view: if std::env::var("BOAT_VIEW").as_deref() == Ok("wake") {
+                ChaseView::Wake
+            } else {
+                ChaseView::Behind
+            },
         })
         .add_plugins((
             screenshot::default_plugins(),
@@ -132,6 +144,19 @@ struct Chase {
     distance: f32,
     /// The free camera has control.
     free: bool,
+    /// Where the chase camera looks from.
+    view: ChaseView,
+}
+
+/// The chase camera's views, which `C` cycles through.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum ChaseView {
+    /// Behind and above the boat, looking down on it and its foam trail.
+    #[default]
+    Behind,
+    /// Off the starboard quarter and low, looking back across the wake, so the Kelvin wake's
+    /// starboard arm runs across the picture.
+    Wake,
 }
 
 /// Holds screenshot runs, which have no window to wait on, to 60 frames per second, and to the
@@ -354,6 +379,12 @@ fn toggle_camera(
     if keys.just_pressed(KeyCode::KeyF) && !egui_wants.wants_any_keyboard_input() {
         chase.free = !chase.free;
     }
+    if keys.just_pressed(KeyCode::KeyC) && !egui_wants.wants_any_keyboard_input() {
+        chase.view = match chase.view {
+            ChaseView::Behind => ChaseView::Wake,
+            ChaseView::Wake => ChaseView::Behind,
+        };
+    }
     if let Ok(mut camera_state) = state.single_mut() {
         camera_state.enabled = chase.free && !egui_wants.wants_any_input();
     }
@@ -447,12 +478,28 @@ fn chase_camera(
     let forward = (boat.rotation * Vec3::NEG_Z)
         .with_y(0.0)
         .normalize_or(Vec3::NEG_Z);
-    // Aimed a little behind the boat and looking down on it, so the boat sits above the middle
-    // of the picture and its wake runs down the lower half toward the camera.
-    let elevation = CHASE_ELEVATION_DEG.to_radians();
-    let target = boat.translation.with_y(0.0) - forward * CHASE_AIM_BEHIND * chase.distance;
-    let eye = target - forward * chase.distance * elevation.cos()
-        + Vec3::Y * chase.distance * elevation.sin();
+    let d = chase.distance;
+    let (target, eye) = match chase.view {
+        ChaseView::Behind => {
+            // Aimed a little behind the boat and looking down on it, so the boat sits above the
+            // middle of the picture and its wake runs down the lower half toward the camera.
+            let elevation = CHASE_ELEVATION_DEG.to_radians();
+            let target = boat.translation.with_y(0.0) - forward * CHASE_AIM_BEHIND * d;
+            let eye = target - forward * d * elevation.cos() + Vec3::Y * d * elevation.sin();
+            (target, eye)
+        }
+        ChaseView::Wake => {
+            // Above the starboard quarter, looking down at the water behind the boat, so the
+            // whole boat and a long stretch of its wake fill the picture.
+            let starboard = Vec3::new(-forward.z, 0.0, forward.x);
+            let origin = boat.translation.with_y(0.0);
+            let target = origin - forward * WAKE_AIM_BEHIND * d;
+            let eye = origin - forward * WAKE_EYE_BEHIND * d
+                + starboard * WAKE_EYE_ABEAM * d
+                + Vec3::Y * WAKE_EYE_HEIGHT * d;
+            (target, eye)
+        }
+    };
     // A critically damped follow with a time constant of about half a second.
     let blend = 1.0 - (-time.delta_secs() * 4.0).exp();
     camera.translation = camera.translation.lerp(eye, blend);
@@ -606,7 +653,7 @@ fn boat_panel(
         ui.label(if chase.free {
             "F: back to the chase camera"
         } else {
-            "W/S: throttle. A/D: rudder. Space: stop.\nR: set upright. F: free camera. Wheel: distance."
+            "W/S: throttle. A/D: rudder. Space: stop.\nR: set upright. F: free camera. C: wake view. Wheel: distance."
         });
         ui.collapsing("Tuning", |ui| {
             let params = &mut drive.params;
