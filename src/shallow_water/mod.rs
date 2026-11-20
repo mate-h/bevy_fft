@@ -815,7 +815,7 @@ fn sync_shallow_water_heightfield(
         cell_size: placement.cell_size,
         datum: placement.datum,
         blend_cells: placement.blend_cells,
-        dry: WaterHeightfieldDry::Level(sim.fill_level),
+        dry: WaterHeightfieldDry::Extend(sim.fill_level),
         ..WaterHeightfield::new(
             sim.bed_water.clone(),
             sim.velocity.clone(),
