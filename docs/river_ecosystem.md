@@ -35,6 +35,16 @@ Not as written. Three things stand in the way:
 So the first use on the beach is a comparison, not a replacement: route and profile the
 Lumahaʻi with fixed ordering and see how close it comes to the hand `CHANNEL`.
 
+### Result (2026-11-20)
+
+With heights ordered below zero, `examples/route_river` routes the Lumahaʻi over the uncarved
+LiDAR at 2 m cells from where it enters the map, stopping at the first texel below sea level.
+With no hand input it follows the hand `CHANNEL` within 0.7–4 m (one or two cells) across the
+flattened reach from z −829 to −675, then leaves it near the mouth, where it reaches sea level at
+z −649 and the hand line runs on to −620. With a 1.5 m breach depth, its profile ramps steadily
+from 1.28 m to 0.58 m, 0.2–0.3 m below the hand bed, and cuts up to 1.9 m below the plateau.
+The route alone would have found the thalweg the scratch script traced.
+
 ## Where the shared code lives
 
 bevy_erosion depends on bevy_fft. A dependency the other way would close a cycle, so shared code

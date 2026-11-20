@@ -43,6 +43,10 @@ path = "examples/pool/main.rs"
 required-features = ["free_camera"]
 
 [[example]]
+name = "route_river"
+path = "examples/route_river/main.rs"
+
+[[example]]
 name = "river_banks"
 path = "examples/river_banks/main.rs"
 
@@ -72,6 +76,7 @@ path = "examples/dispersive/main.rs"
 required-features = ["free_camera"]
 
 [dev-dependencies]
+river_geometry = { path = "crates/river_geometry", version = "0.1" }
 bevy = { version = "0.20.0", features = ["dds"] }
 bevy_egui = "0.43.1"
 bevy_rapier3d = { version = "0.37", default-features = false, features = ["dim3", "debug-render-3d"] }

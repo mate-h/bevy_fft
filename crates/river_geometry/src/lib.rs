@@ -159,13 +159,12 @@ pub fn route(
     };
     let mut parent = vec![u32::MAX; n];
     let mut seen = vec![false; n];
-    // Lowest first; ties in the order reached, so flats fill outward evenly. Heights are not
-    // negative, so their bits sort like the values.
+    // Lowest first; ties in the order reached, so flats fill outward evenly.
     let mut open = BinaryHeap::new();
     let mut order = 0u32;
     seen[at(start)] = true;
     open.push(Reverse((
-        heights[at(start)].to_bits(),
+        sort_key(heights[at(start)]),
         order,
         start.x,
         start.y,
@@ -197,7 +196,7 @@ pub fn route(
                     parent[at(q)] = at(c) as u32;
                     order += 1;
                     open.push(Reverse((
-                        heights[at(q)].max(0.0).to_bits(),
+                        sort_key(heights[at(q)]),
                         order,
                         q.x,
                         q.y,
@@ -214,6 +213,20 @@ pub fn route(
     }
     cells.reverse();
     cells
+}
+
+/// `h`'s bits rearranged so they sort as the heights do, negative ones included; NaN sorts
+/// above every height, so a route goes around holes in the data.
+fn sort_key(h: f32) -> u32 {
+    if h.is_nan() {
+        return u32::MAX;
+    }
+    let bits = h.to_bits();
+    if bits & 0x8000_0000 != 0 {
+        !bits
+    } else {
+        bits | 0x8000_0000
+    }
 }
 
 /// Texel centres of `cells`, smoothed (twice, over `radius` samples each side, ends kept) and
@@ -642,6 +655,24 @@ mod tests {
         let lake = (32 * SIZE[0] + 40) as usize;
         let cells = route(&h, SIZE, [5.5, 32.5], |i| i == lake);
         assert_eq!(*cells.last().unwrap(), [40, 32]);
+    }
+
+    #[test]
+    fn route_runs_below_sea_level_and_around_holes() {
+        // The valley dropped 1 below zero, with a hole of missing data across it at x = 20.
+        let h = field(|x, y| {
+            if x == 20 && (28..=36).contains(&y) {
+                f32::NAN
+            } else {
+                valley(x, y) - 1.0
+            }
+        });
+        let cells = route(&h, SIZE, [5.5, 32.5], |_| false);
+        assert_eq!(cells.last().unwrap()[0], SIZE[0] - 1);
+        assert!(cells.iter().all(|c| !h[(c[1] * SIZE[0] + c[0]) as usize].is_nan()));
+        let mut keys: Vec<f32> = vec![-2.0, -0.5, -0.0, 0.0, 0.25, 3.0];
+        keys.sort_by_key(|&h| sort_key(h));
+        assert_eq!(keys, [-2.0, -0.5, -0.0, 0.0, 0.25, 3.0]);
     }
 
     #[test]
