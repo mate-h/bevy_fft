@@ -303,15 +303,10 @@ fn a_body_presses_the_nested_grid_down_too() {
         let nested = ShallowWaterNestedGrid::new(&mut images, NESTED);
         app.world_mut()
             .resource_mut::<ShallowWaterController>()
-            .nested = Some(nested);
+            .nested = vec![nested];
         app.init_resource::<NestedCapture>();
     });
-    let image = app
-        .world()
-        .resource::<ShallowWaterController>()
-        .nested
-        .as_ref()
-        .unwrap()
+    let image = app.world().resource::<ShallowWaterController>().nested[0]
         .images
         .bed_water
         .clone();

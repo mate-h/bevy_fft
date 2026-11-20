@@ -70,6 +70,7 @@ pub struct ShallowWaterPipelines {
     pub accumulate_face_volumes_u: CachedComputePipelineId,
     pub accumulate_face_volumes_w: CachedComputePipelineId,
     pub clear_face_volumes: CachedComputePipelineId,
+    pub clear_all_face_volumes: CachedComputePipelineId,
 }
 
 impl FromWorld for ShallowWaterPipelines {
@@ -165,6 +166,7 @@ impl FromWorld for ShallowWaterPipelines {
             accumulate_face_volumes_u: q("shallow_water_volumes_u", "accumulateFaceVolumesU"),
             accumulate_face_volumes_w: q("shallow_water_volumes_w", "accumulateFaceVolumesW"),
             clear_face_volumes: q("shallow_water_clear_volumes", "clearFaceVolumes"),
+            clear_all_face_volumes: q("shallow_water_clear_all_volumes", "clearAllFaceVolumes"),
             layout_buffers,
             layout_settings,
         }
@@ -213,6 +215,7 @@ impl ShallowWaterPipelines {
             accumulate_face_volumes_u: get(self.accumulate_face_volumes_u)?,
             accumulate_face_volumes_w: get(self.accumulate_face_volumes_w)?,
             clear_face_volumes: get(self.clear_face_volumes)?,
+            clear_all_face_volumes: get(self.clear_all_face_volumes)?,
         })
     }
 }
@@ -257,6 +260,7 @@ pub struct ShallowWaterKernels {
     accumulate_face_volumes_u: ComputePipeline,
     accumulate_face_volumes_w: ComputePipeline,
     clear_face_volumes: ComputePipeline,
+    clear_all_face_volumes: ComputePipeline,
 }
 
 /// Views of the grid textures the solver binds for storage. For a grid of `nx × ny` cells,
@@ -809,17 +813,30 @@ impl ShallowWaterSolver {
     }
 
     /// [`Self::encode_step`], adding the volume per unit width that passes each face to the `.z`
-    /// lane of `mac_u_temps` and `mac_w_temps`, positive along +x and +y. A
-    /// [`ShallowWaterNest`](super::ShallowWaterNest) reads them for its reflux.
-    /// [`Self::encode_clear_face_volumes`] zeroes them.
+    /// and `.w` lanes of `mac_u_temps` and `mac_w_temps`, positive along +x and +y. A
+    /// [`ShallowWaterNest`](super::ShallowWaterNest) reads them for its reflux: `.z` on its parent
+    /// and `.w` on its child, so a grid in the middle of a chain of nests keeps the volumes of one
+    /// of its own steps in `.z` and of all its steps in its parent's step in `.w`.
+    /// [`Self::encode_clear_face_volumes`] zeroes `.z`, and
+    /// [`Self::encode_clear_all_face_volumes`] both.
     pub fn encode_step_with_face_volumes(&self, pass: &mut ComputePass) {
         self.encode_step_inner(pass, true);
     }
 
-    /// Zeroes the face volumes [`Self::encode_step_with_face_volumes`] adds up.
+    /// Zeroes the `.z` face volumes [`Self::encode_step_with_face_volumes`] adds up.
     pub fn encode_clear_face_volumes(&self, pass: &mut ComputePass) {
         self.bind(pass);
         self.dispatch(pass, &self.kernels.clear_face_volumes, self.border_groups());
+    }
+
+    /// Zeroes both lanes of face volumes, `.z` and `.w`.
+    pub fn encode_clear_all_face_volumes(&self, pass: &mut ComputePass) {
+        self.bind(pass);
+        self.dispatch(
+            pass,
+            &self.kernels.clear_all_face_volumes,
+            self.border_groups(),
+        );
     }
 
     fn encode_step_inner(&self, pass: &mut ComputePass, face_volumes: bool) {

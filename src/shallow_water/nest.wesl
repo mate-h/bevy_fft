@@ -38,10 +38,12 @@ const RHO = 3;
 @group(2) @binding(3) var srcPrevBedWater : texture_2d<f32>;
 @group(2) @binding(4) var srcPrevFaceU : texture_2d<f32>;
 @group(2) @binding(5) var srcPrevFaceW : texture_2d<f32>;
-/// The source's accumulated face volumes in `.z`.
+/// The source's accumulated face volumes. The feedback reads the child's `.w`, the volume over
+/// all its steps in this parent step even when it is a nest's parent itself.
 @group(2) @binding(6) var srcMacU : texture_2d<f32>;
 @group(2) @binding(7) var srcMacW : texture_2d<f32>;
-/// The target's own accumulated face volumes in `.z`.
+/// The target's own accumulated face volumes. The feedback reads the parent's `.z`, the volume
+/// of this one step even when the parent is a nest's child itself.
 @group(2) @binding(8) var ownMacU : texture_2d<f32>;
 @group(2) @binding(9) var ownMacW : texture_2d<f32>;
 
@@ -198,11 +200,11 @@ fn child_hw(c : vec2i) -> vec2f {
 
 /// Volume per unit width through child u face `(fi, j)` this frame.
 fn child_volume_u(fi : i32, j : i32) -> f32 {
-    return textureLoad(srcMacU, vec2u(vec2i(fi, j)), 0).z;
+    return textureLoad(srcMacU, vec2u(vec2i(fi, j)), 0).w;
 }
 
 fn child_volume_w(i : i32, fj : i32) -> f32 {
-    return textureLoad(srcMacW, vec2u(vec2i(i, fj)), 0).z;
+    return textureLoad(srcMacW, vec2u(vec2i(i, fj)), 0).w;
 }
 
 /// Parent depth change that swaps the parent's volume through its u face `fi` in row `j` for the

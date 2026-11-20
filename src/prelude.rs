@@ -32,9 +32,10 @@ pub use crate::ocean::{
 };
 pub use crate::shallow_water::{
     NEST_REFINEMENT, SHALLOW_WATER_PRESET_BED_SOURCE, ShallowWaterBorder, ShallowWaterController,
-    ShallowWaterMaterialUniform, ShallowWaterNestedGrid, ShallowWaterPlacement, ShallowWaterPlugin,
-    ShallowWaterSurfaceExtension, ShallowWaterSurfaceMaterial, ShallowWaterSurfaceTag,
-    ShallowWaterWorldBedImage, bed_source_image, round_particle_count,
+    ShallowWaterMaterialUniform, ShallowWaterNestLevel, ShallowWaterNestedGrid,
+    ShallowWaterPlacement, ShallowWaterPlugin, ShallowWaterSurfaceExtension,
+    ShallowWaterSurfaceMaterial, ShallowWaterSurfaceTag, ShallowWaterWorldBedImage,
+    bed_source_image, round_particle_count,
 };
 pub use crate::water::{
     FrontLine, FrontPoint, JerlovWaterType, WATER_LOD_DRIFT_FORMAT, WATER_LOD_MAX_SLICES,

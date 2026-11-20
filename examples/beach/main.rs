@@ -21,6 +21,10 @@
 //! 43 instead of 33 ms per frame at 2560x1440 on an M5. A grid with a third of the cell width
 //! follows the camera inside it, nested both ways, and takes its bed from the 1 m data as it
 //! moves. `BEACH_NEST` sets its cells per edge, 288 by default, and 0 turns it off.
+//! `BEACH_STREAM=<cells per edge>` nests a third level inside that one, with a ninth of the main
+//! grid's cell width, 2/9 m with 2 m cells, for streams and wading. Its cell count is a multiple
+//! of 3, 0 by default, which turns it off. It also follows the camera, takes its bed from the 1 m data, advects momentum
+//! conservatively, and takes as many steps per step of its parent as its stability limit needs.
 //!
 //! The Lumahaʻi River runs in over the map's south edge, along its OpenStreetMap centreline, as a
 //! fixed discharge of 4 m³/s, and pours into the bay. `BEACH_RIVER` sets the discharge, and 0
@@ -213,6 +217,18 @@ fn nest_cells() -> u32 {
         .unwrap_or(288);
     (cells / NEST_REFINEMENT * NEST_REFINEMENT).min(grid() * NEST_REFINEMENT / 2)
 }
+/// Cells per edge of the stream level nested in the nested grid, with a ninth of the main grid's
+/// cell width, 0 unless `BEACH_STREAM` sets it, which turns it off. It rounds down to a multiple
+/// of 3 and stays inside the nested grid's band.
+fn stream_cells() -> u32 {
+    let cells = std::env::var("BEACH_STREAM")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    let inside = nest_cells().saturating_sub(2 * NEST_REFINEMENT) * NEST_REFINEMENT;
+    (cells / NEST_REFINEMENT * NEST_REFINEMENT).min(inside)
+}
+
 /// Depth in meters of the solver's zero level below sea level. It sits under the deepest bed in
 /// the data, so solver heights stay positive, and the still sea is at this solver height.
 const SEA_LEVEL: f32 = 30.0;
@@ -301,7 +317,7 @@ fn main() {
         .run();
 }
 
-/// Keeps the nested grid centred under the camera.
+/// Keeps the nested grids centred under the camera.
 fn nest_follows_camera(
     cameras: Query<&GlobalTransform, With<Camera3d>>,
     mut controller: ResMut<ShallowWaterController>,
@@ -309,7 +325,7 @@ fn nest_follows_camera(
     let Ok(camera) = cameras.single() else {
         return;
     };
-    if let Some(nested) = controller.nested.as_mut() {
+    for nested in &mut controller.nested {
         nested.follow = camera.translation().xz();
     }
 }
@@ -491,13 +507,22 @@ fn setup(
                 bed.height(xz) + SEA_LEVEL
             })
             .collect();
-        let mut nested = ShallowWaterNestedGrid::new(&mut images, nest_cells());
-        nested.world_bed = Some(ShallowWaterWorldBedImage {
+        let world_bed = ShallowWaterWorldBedImage {
             image: images.add(bed_source_image(side, side, &world)),
             origin: Vec2::splat(-0.5 * TERRAIN_SIDE),
             texel_size: 1.0,
-        });
-        controller.nested = Some(nested);
+        };
+        let mut nested = ShallowWaterNestedGrid::new(&mut images, nest_cells());
+        nested.world_bed = Some(world_bed.clone());
+        controller.nested.push(nested);
+        // The stream level inside it, with momentum-conserving advection on its fine cells and
+        // its step count from its own stability limit.
+        if stream_cells() > 0 {
+            let mut stream = ShallowWaterNestedGrid::new(&mut images, stream_cells());
+            stream.world_bed = Some(world_bed);
+            stream.steps = None;
+            controller.nested.push(stream);
+        }
     }
     if let Some(path) = settled_path().filter(|path| path.exists()) {
         match ShallowWaterSettled::load(&path) {

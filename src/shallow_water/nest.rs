@@ -370,8 +370,26 @@ impl ShallowWaterNest {
         parent: &ShallowWaterSolver,
         child: &ShallowWaterSolver,
     ) {
+        self.encode_frame_with(pass, parent, child, |pass| {
+            child.encode_step_with_face_volumes(pass);
+        });
+    }
+
+    /// [`Self::encode_frame`] with each child step encoded by `child_step`, which must step
+    /// `child` once with its face volumes. A child that is a nest's parent itself steps through
+    /// that nest's frame here, so nests chain: its own volumes in `.z` count one of its steps for
+    /// its child's reflux, and those in `.w` all of them for this nest's.
+    pub fn encode_frame_with(
+        &self,
+        pass: &mut ComputePass,
+        parent: &ShallowWaterSolver,
+        child: &ShallowWaterSolver,
+        mut child_step: impl FnMut(&mut ComputePass),
+    ) {
+        // Only the parent's `.z`: when it is a nest's child itself, its `.w` counts on over its
+        // parent's step.
         parent.encode_clear_face_volumes(pass);
-        child.encode_clear_face_volumes(pass);
+        child.encode_clear_all_face_volumes(pass);
 
         let parent_groups = Self::groups(self.parent_cells);
         pass.set_bind_group(0, &self.parent_target, &[]);
@@ -384,7 +402,7 @@ impl ShallowWaterNest {
 
         let child_groups = Self::groups(self.child_cells);
         for (_, settings) in &self.settings {
-            child.encode_step_with_face_volumes(pass);
+            child_step(pass);
             pass.set_bind_group(0, &self.child_target, &[]);
             pass.set_bind_group(1, settings, &[]);
             pass.set_bind_group(2, &self.child_source, &[]);

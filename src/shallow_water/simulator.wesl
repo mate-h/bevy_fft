@@ -622,7 +622,7 @@ fn macU_copy(@builtin(global_invocation_id) id: vec3u) {
     let sy = simulationSettings.size.y;
     if (id.x >= sx || id.y >= sy) { return; }
     let u = textureLoad(faceUTexture, id.xy).r;
-    // `.z` holds the face volumes a nest accumulates over the frame.
+    // `.z` and `.w` hold the face volumes a nest accumulates.
     var m = textureLoad(macUTemps, id.xy);
     m = vec4f(u, 0.0, m.z, m.w);
     textureStore(macUTemps, id.xy, m);
@@ -676,7 +676,7 @@ fn macW_copy(@builtin(global_invocation_id) id: vec3u) {
     let sy = simulationSettings.size.y + 1u;
     if (id.x >= sx || id.y >= sy) { return; }
     let w = textureLoad(faceWTexture, id.xy).r;
-    // `.z` holds the face volumes a nest accumulates over the frame.
+    // `.z` and `.w` hold the face volumes a nest accumulates.
     var m = textureLoad(macWTemps, id.xy);
     m = vec4f(w, 0.0, m.z, m.w);
     textureStore(macWTemps, id.xy, m);
@@ -939,26 +939,32 @@ fn limited_flux_y(ic : i32, fj : i32) -> f32 {
     return f * upwind_limit(ic, select(fj, fj - 1, f > 0.0));
 }
 
-/// Adds each vertical face's depth flux times dt to `mac_u_temps.z`, the volume per unit width
-/// through it, for a nest's reflux. Runs after `limitOutflow` and before `integrateHeight`.
+/// Adds each vertical face's depth flux times dt to `mac_u_temps.z` and `.w`, the volume per unit
+/// width through it, for a nest's reflux. `.z` counts since this grid's own nest frame began, for
+/// its reflux as a parent, and `.w` since its parent's did, for its parent's reflux. Runs after
+/// `limitOutflow` and before `integrateHeight`.
 @compute @workgroup_size(16, 16)
 fn accumulateFaceVolumesU(@builtin(global_invocation_id) id: vec3u) {
     if (id.x > simulationSettings.size.x || id.y >= simulationSettings.size.y) { return; }
     var m = textureLoad(macUTemps, id.xy);
-    m.z += limited_flux_x(i32(id.x), i32(id.y)) * simulationSettings.dt;
+    let v = limited_flux_x(i32(id.x), i32(id.y)) * simulationSettings.dt;
+    m.z += v;
+    m.w += v;
     textureStore(macUTemps, id.xy, m);
 }
 
-/// The same for horizontal faces, into `mac_w_temps.z`.
+/// The same for horizontal faces, into `mac_w_temps.z` and `.w`.
 @compute @workgroup_size(16, 16)
 fn accumulateFaceVolumesW(@builtin(global_invocation_id) id: vec3u) {
     if (id.x >= simulationSettings.size.x || id.y > simulationSettings.size.y) { return; }
     var m = textureLoad(macWTemps, id.xy);
-    m.z += limited_flux_y(i32(id.x), i32(id.y)) * simulationSettings.dt;
+    let v = limited_flux_y(i32(id.x), i32(id.y)) * simulationSettings.dt;
+    m.z += v;
+    m.w += v;
     textureStore(macWTemps, id.xy, m);
 }
 
-/// Zeroes the accumulated face volumes.
+/// Zeroes the face volumes in `.z`, which count since this grid's own nest frame began.
 @compute @workgroup_size(16, 16)
 fn clearFaceVolumes(@builtin(global_invocation_id) id: vec3u) {
     let sx = simulationSettings.size.x;
@@ -971,6 +977,25 @@ fn clearFaceVolumes(@builtin(global_invocation_id) id: vec3u) {
     if (id.x < sx && id.y <= sy) {
         var m = textureLoad(macWTemps, id.xy);
         m.z = 0.0;
+        textureStore(macWTemps, id.xy, m);
+    }
+}
+
+/// Zeroes both lanes of face volumes, `.z` and `.w`, as a nest does to its child.
+@compute @workgroup_size(16, 16)
+fn clearAllFaceVolumes(@builtin(global_invocation_id) id: vec3u) {
+    let sx = simulationSettings.size.x;
+    let sy = simulationSettings.size.y;
+    if (id.x <= sx && id.y < sy) {
+        var m = textureLoad(macUTemps, id.xy);
+        m.z = 0.0;
+        m.w = 0.0;
+        textureStore(macUTemps, id.xy, m);
+    }
+    if (id.x < sx && id.y <= sy) {
+        var m = textureLoad(macWTemps, id.xy);
+        m.z = 0.0;
+        m.w = 0.0;
         textureStore(macWTemps, id.xy, m);
     }
 }

@@ -219,16 +219,17 @@ pub struct ShallowWaterController {
     /// World placement. When set and [`WaterPlugin`](crate::water::WaterPlugin) is present, the
     /// surface is blended into the shared water LOD data every frame.
     pub placement: Option<ShallowWaterPlacement>,
-    /// A finer grid nested in this one that follows a point, such as the camera. Needs
-    /// [`Self::placement`]. See [`ShallowWaterNestedGrid`].
-    pub nested: Option<ShallowWaterNestedGrid>,
+    /// Finer grids nested in this one that follow a point, such as the camera, each nested in
+    /// the one before it: the first in this grid, the second in the first, and so on. Needs
+    /// [`Self::placement`]. See [`ShallowWaterNestedGrid`] and [`Self::nest_levels`].
+    pub nested: Vec<ShallowWaterNestedGrid>,
     /// This frame's [`ShallowWaterMover`]s, gathered each frame. The first
     /// [`SHALLOW_WATER_MAX_MOVERS`] stir the water.
     #[reflect(ignore)]
     pub movers: Vec<ShallowWaterMoverSample>,
     /// A settled state to start from. Each reset loads it over the preset when it
-    /// [`fits`](ShallowWaterSettled::fits) the grid, after the ocean seed, and the nested grid
-    /// then fills from it.
+    /// [`fits`](ShallowWaterSettled::fits) the grid, after the ocean seed, and the nested grids
+    /// then fill from it.
     #[reflect(ignore)]
     pub settled: Option<std::sync::Arc<ShallowWaterSettled>>,
     /// Spray thrown off waterfall lips into the water particles. Needs a placement.
@@ -240,7 +241,7 @@ pub const SHALLOW_WATER_MAX_MOVERS: usize = 16;
 
 /// Stirs the shallow water with its entity's motion, only while it moves, as a wading character, a
 /// paddle or a dragged log does. Within `radius` of the entity's position, each face velocity on
-/// the grid and the nested grid is pulled toward the entity's horizontal velocity at `rate` per
+/// every grid, nested or not, is pulled toward the entity's horizontal velocity at `rate` per
 /// second, where the water is slower in that direction. Never slowed, still water stays as it is
 /// around a body at rest, so a mover is no obstacle: the bed and floating bodies' pressure head
 /// block the flow. The stir needs the entity's lowest point, `depth` below its position, under the
@@ -364,24 +365,40 @@ pub struct ShallowWaterWorldBedImage {
     pub texel_size: f32,
 }
 
-/// A grid with a third of the cell width, nested in a placed [`ShallowWaterController`] grid and
-/// coupled to it both ways by a [`ShallowWaterNest`]. It moves by whole parent cells to stay
-/// centred on [`Self::follow`] and takes the bed of the ground it moves over from
-/// [`Self::world_bed`]. It blends into the water LOD data over its parent. The brush and the
-/// border profile act on the parent only. [`ShallowWaterMover`]s stir both, and floating bodies
-/// press on both, the nested grid through [`Self::pressure_head`].
+/// A grid with a third of the cell width, nested in a placed [`ShallowWaterController`] grid or
+/// in the nested grid before it in [`ShallowWaterController::nested`], and coupled to that parent
+/// both ways by a [`ShallowWaterNest`]. It moves by whole parent cells to stay centred on
+/// [`Self::follow`] and takes the bed of the ground it moves over from [`Self::world_bed`]. It
+/// blends into the water LOD data over its parent. The brush and the border profile act on the
+/// controller's grid only. [`ShallowWaterMover`]s stir every grid, and floating bodies press on
+/// every grid, a nested one through [`Self::pressure_head`].
 #[derive(Clone, Debug, Reflect)]
 pub struct ShallowWaterNestedGrid {
     /// Cells per edge, a multiple of 3. The grid covers a third as many parent cells.
     pub cells: u32,
     pub images: ShallowWaterImages,
-    /// World XZ the grid centres on. It stays inside its parent.
+    /// World XZ the grid centres on. It stays inside its parent, and inside its parent's band
+    /// when the parent is nested too.
     pub follow: Vec2,
     /// Width of the band along its edge that takes the parent's state, in parent cells.
     pub band: u32,
-    /// World bed for the cells the grid moves over. Without one it interpolates the parent's
-    /// [`ShallowWaterController::bed_source`].
+    /// World bed for the cells the grid moves over. Without one it interpolates its parent's bed:
+    /// [`ShallowWaterController::bed_source`] for the first nested grid, the bed in the previous
+    /// nested grid's cells for the others.
     pub world_bed: Option<ShallowWaterWorldBedImage>,
+    /// Steps per parent step. `None` takes as many as [`Self::stable_steps`] says its stability
+    /// limit needs. [`Self::new`] sets 3, which refines time as space.
+    pub steps: Option<u32>,
+    /// Fastest flow, in m/s, that [`Self::stable_steps`] plans for.
+    pub max_speed: f32,
+    /// Deepest water, in meters, that [`Self::stable_steps`] plans for.
+    pub max_depth: f32,
+    /// Fastest fall, in m/s, that [`Self::stable_steps`] keeps under the face velocity clamp of
+    /// 0.5 Δx/Δt. Water reaches 7.7 m/s after a 3 m drop.
+    pub fall_speed: f32,
+    /// Advects velocity in momentum-conserving form. `None` turns it on for cells under 0.5 m and
+    /// otherwise takes the parent's setting. See [`ShallowWaterSettings::momentum_conserving`].
+    pub momentum_conserving: Option<bool>,
     /// Width in its own cells of the band where it fades into its parent in the LOD data.
     pub blend_cells: f32,
     /// The grid's own pressure head, one texel per cell, which floating bodies write into as
@@ -402,10 +419,48 @@ impl ShallowWaterNestedGrid {
             follow: Vec2::ZERO,
             band: 1,
             world_bed: None,
+            steps: Some(NEST_REFINEMENT),
+            max_speed: 3.0,
+            max_depth: 1.0,
+            fall_speed: 7.7,
+            momentum_conserving: None,
             blend_cells: 12.0,
             pressure_head: images.add(shallow_r32_image(cells, cells)),
         }
     }
+
+    /// Steps per parent step of `parent_dt` that keep a grid of `cell_size` cells stable: each at
+    /// most 0.5 Δx / (`max_speed` + √(g `max_depth`)), and short enough that `fall_speed` stays
+    /// under the velocity clamp 0.5 Δx / Δt. At least 1.
+    pub fn stable_steps(&self, parent_dt: f32, cell_size: f32, gravity: f32) -> u32 {
+        let wave = self.max_speed + (gravity * self.max_depth).max(0.0).sqrt();
+        let dt =
+            (0.5 * cell_size / wave.max(1e-6)).min(0.5 * cell_size / self.fall_speed.max(1e-6));
+        ((parent_dt / dt).ceil() as u32).max(1)
+    }
+}
+
+/// Where one of [`ShallowWaterController::nested`] sits this frame and how it steps, from
+/// [`ShallowWaterController::nest_levels`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShallowWaterNestLevel {
+    /// Parent cell under the grid's cell (0, 0).
+    pub offset: IVec2,
+    /// The grid's cell (0, 0) counted from the controller grid's corner in the grid's own cells.
+    /// It changes only when the grid moves over the world.
+    pub corner_cells: IVec2,
+    /// World XZ of the grid's corner.
+    pub corner: Vec2,
+    /// World XZ of the grid's centre.
+    pub center: Vec2,
+    pub cell_size: f32,
+    /// Cells per edge.
+    pub cells: u32,
+    /// Steps per parent step.
+    pub steps: u32,
+    /// Time step, the parent's over [`Self::steps`].
+    pub dt: f32,
+    pub momentum_conserving: bool,
 }
 
 impl ShallowWaterController {
@@ -453,7 +508,7 @@ impl ShallowWaterController {
             source: None,
             pressure_head: None,
             border_profile: None,
-            nested: None,
+            nested: Vec::new(),
             movers: Vec::new(),
             settled: None,
             waterfalls: None,
@@ -501,27 +556,80 @@ impl ShallowWaterController {
         }
     }
 
-    /// Parent cell under the nested grid's cell (0, 0): the grid centred on its
-    /// [`ShallowWaterNestedGrid::follow`] point, rounded to whole parent cells and kept inside.
-    pub fn nest_offset(&self) -> Option<IVec2> {
-        let (placement, nested) = (self.placement?, self.nested.as_ref()?);
-        let cells = UVec2::new(self.cells_x, self.cells_y);
-        let covered = (nested.cells / NEST_REFINEMENT) as i32;
-        let at = placement.world_to_cells(nested.follow, cells) - 0.5 * covered as f32;
-        Some(
-            at.round()
-                .as_ivec2()
-                .clamp(IVec2::ZERO, cells.as_ivec2() - covered),
-        )
+    /// Where each of [`Self::nested`] sits this frame and how it steps, in order. Each grid
+    /// centres on its [`ShallowWaterNestedGrid::follow`] point, rounded to whole parent cells and
+    /// kept inside its parent, and inside the parent's band when the parent is nested too. The
+    /// list stops at the first grid that doesn't fit, and is empty without a placement.
+    pub fn nest_levels(&self) -> Vec<ShallowWaterNestLevel> {
+        let mut levels = Vec::new();
+        let Some(placement) = self.placement else {
+            return levels;
+        };
+        let root_cells = UVec2::new(self.cells_x, self.cells_y);
+        let root_corner = placement.center - 0.5 * root_cells.as_vec2() * placement.cell_size;
+        let rho = NEST_REFINEMENT as i32;
+        let mut parent = NestParent {
+            cells: root_cells.as_ivec2(),
+            corner: root_corner,
+            cell_size: placement.cell_size,
+            margin: 0,
+            corner_cells: IVec2::ZERO,
+            dt: self.dt,
+            momentum_conserving: self.momentum_conserving,
+        };
+        for nested in &self.nested {
+            let covered = (nested.cells / NEST_REFINEMENT) as i32;
+            let (lo, hi) = (
+                IVec2::splat(parent.margin),
+                parent.cells - parent.margin - covered,
+            );
+            if covered == 0 || hi.cmplt(lo).any() {
+                break;
+            }
+            let at = (nested.follow - parent.corner) / parent.cell_size - 0.5 * covered as f32;
+            let offset = at.round().as_ivec2().clamp(lo, hi);
+            let cell_size = parent.cell_size / NEST_REFINEMENT as f32;
+            let corner_cells = (parent.corner_cells + offset) * rho;
+            let corner = root_corner + corner_cells.as_vec2() * cell_size;
+            let steps = nested
+                .steps
+                .unwrap_or_else(|| nested.stable_steps(parent.dt, cell_size, self.gravity))
+                .max(1);
+            let level = ShallowWaterNestLevel {
+                offset,
+                corner_cells,
+                corner,
+                center: corner + 0.5 * nested.cells as f32 * cell_size,
+                cell_size,
+                cells: nested.cells,
+                steps,
+                dt: parent.dt / steps as f32,
+                momentum_conserving: nested
+                    .momentum_conserving
+                    .unwrap_or(cell_size < 0.5 || parent.momentum_conserving),
+            };
+            levels.push(level);
+            parent = NestParent {
+                cells: IVec2::splat(nested.cells as i32),
+                corner,
+                cell_size,
+                margin: nested.band as i32 * rho,
+                corner_cells,
+                dt: level.dt,
+                momentum_conserving: level.momentum_conserving,
+            };
+        }
+        levels
     }
 
-    /// World XZ of the nested grid's centre, from [`Self::nest_offset`].
+    /// Parent cell under the first nested grid's cell (0, 0). See [`Self::nest_levels`].
+    pub fn nest_offset(&self) -> Option<IVec2> {
+        self.nest_levels().first().map(|l| l.offset)
+    }
+
+    /// World XZ of the first nested grid's centre. See [`Self::nest_levels`].
     pub fn nest_center(&self) -> Option<Vec2> {
-        let (placement, nested) = (self.placement?, self.nested.as_ref()?);
-        let cells = UVec2::new(self.cells_x, self.cells_y).as_vec2();
-        let covered = (nested.cells / NEST_REFINEMENT) as f32;
-        let corner = self.nest_offset()?.as_vec2() + 0.5 * covered;
-        Some(placement.center + (corner - 0.5 * cells) * placement.cell_size)
+        self.nest_levels().first().map(|l| l.center)
     }
 
     /// Step parameters for the solver at step `timestamp`.
@@ -550,6 +658,19 @@ impl ShallowWaterController {
             timestamp,
         }
     }
+}
+
+/// The grid a nested grid sits in, for [`ShallowWaterController::nest_levels`].
+struct NestParent {
+    cells: IVec2,
+    corner: Vec2,
+    cell_size: f32,
+    /// Cells along each edge a child keeps clear of: the parent's own band.
+    margin: i32,
+    /// The parent's corner from the controller grid's corner, in the parent's cells.
+    corner_cells: IVec2,
+    dt: f32,
+    momentum_conserving: bool,
 }
 
 /// Main-world handles of the grid textures a [`ShallowWaterSolver`] steps. See
@@ -798,7 +919,7 @@ fn sync_shallow_water_heightfield(
         (
             Entity,
             &mut WaterHeightfield,
-            Has<ShallowWaterNestHeightfield>,
+            Option<&ShallowWaterNestHeightfield>,
         ),
         With<ShallowWaterHeightfield>,
     >,
@@ -822,26 +943,30 @@ fn sync_shallow_water_heightfield(
             UVec2::new(sim.cells_x, sim.cells_y),
         )
     };
-    match existing.iter_mut().find(|(_, _, nested)| !nested) {
+    match existing.iter_mut().find(|(_, _, level)| level.is_none()) {
         Some((_, mut current, _)) => *current = heightfield.clone(),
         None => {
             commands.spawn((heightfield.clone(), ShallowWaterHeightfield));
         }
     }
-    let nested = sim
-        .nested
-        .as_ref()
-        .zip(sim.nest_center())
-        .map(|(nested, center)| WaterHeightfield {
-            center,
-            cell_size: placement.cell_size / NEST_REFINEMENT as f32,
+    let levels = sim.nest_levels();
+    for (entity, _, level) in &existing {
+        if level.is_some_and(|l| l.0 >= levels.len()) {
+            commands.entity(entity).despawn();
+        }
+    }
+    for (k, (nested, level)) in sim.nested.iter().zip(&levels).enumerate() {
+        let field = WaterHeightfield {
+            center: level.center,
+            cell_size: level.cell_size,
             blend_cells: nested.blend_cells,
-            // Bodies press on the nested grid wherever they press on the parent.
+            // Bodies press on the nested grids wherever they press on the parent.
             pressure_head: sim
                 .pressure_head
                 .as_ref()
                 .map(|_| nested.pressure_head.clone()),
-            order: heightfield.order + 1,
+            // Each grid blends over its parent.
+            order: heightfield.order + 1 + k as i32,
             dry: heightfield.dry,
             datum: heightfield.datum,
             ..WaterHeightfield::new(
@@ -849,21 +974,27 @@ fn sync_shallow_water_heightfield(
                 nested.images.velocity.clone(),
                 UVec2::splat(nested.cells),
             )
-        });
-    let current = existing.iter_mut().find(|(_, _, nested)| *nested);
-    match (nested, current) {
-        (Some(nested), Some((_, mut current, _))) => *current = nested,
-        (Some(nested), None) => {
-            commands.spawn((nested, ShallowWaterHeightfield, ShallowWaterNestHeightfield));
+        };
+        match existing
+            .iter_mut()
+            .find(|(_, _, level)| level.is_some_and(|l| l.0 == k))
+        {
+            Some((_, mut current, _)) => *current = field,
+            None => {
+                commands.spawn((
+                    field,
+                    ShallowWaterHeightfield,
+                    ShallowWaterNestHeightfield(k),
+                ));
+            }
         }
-        (None, Some((entity, _, _))) => commands.entity(entity).despawn(),
-        (None, None) => {}
     }
 }
 
-/// Marks the [`WaterHeightfield`] of the controller's nested grid.
-#[derive(Component)]
-struct ShallowWaterNestHeightfield;
+/// Marks the [`WaterHeightfield`] of one of the controller's nested grids, by its index in
+/// [`ShallowWaterController::nested`].
+#[derive(Component, Clone, Copy)]
+struct ShallowWaterNestHeightfield(usize);
 
 /// Registers the solver shader and queues [`ShallowWaterPipelines`] in the render world, for
 /// callers that build and step a [`ShallowWaterSolver`] themselves. [`ShallowWaterPlugin`] adds it.

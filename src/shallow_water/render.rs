@@ -17,10 +17,10 @@ use bevy::{
 };
 
 use super::{
-    GpuInteractionUniform, NEST_REFINEMENT, ShallowWaterBorder, ShallowWaterController,
-    ShallowWaterInputs, ShallowWaterNest, ShallowWaterNestDescriptor, ShallowWaterNestPipelines,
-    ShallowWaterPipelines, ShallowWaterShift, ShallowWaterShiftParams, ShallowWaterShiftPipelines,
-    ShallowWaterSolver, ShallowWaterSolverDescriptor, ShallowWaterTextures, ShallowWaterWorldBed,
+    GpuInteractionUniform, ShallowWaterBorder, ShallowWaterController, ShallowWaterInputs,
+    ShallowWaterNest, ShallowWaterNestDescriptor, ShallowWaterNestPipelines, ShallowWaterPipelines,
+    ShallowWaterShift, ShallowWaterShiftParams, ShallowWaterShiftPipelines, ShallowWaterSolver,
+    ShallowWaterSolverDescriptor, ShallowWaterTextures, ShallowWaterWorldBed,
 };
 
 /// Monotonic step counter passed to the simulation shader (wave boundaries, particle RNG).
@@ -43,8 +43,9 @@ pub struct ShallowWaterGpuResources {
     /// Set for this frame when the ocean forcing pass wrote a target height for every cell.
     /// The sim consumes it to seed the wet interior after `loadPreset`.
     pub ocean_seed_written: AtomicBool,
-    /// The controller's nested grid, built after the solver.
-    pub nested: Option<ShallowWaterNestedGpu>,
+    /// The controller's nested grids in order, each in the one before it, built after the
+    /// solver.
+    pub nested: Vec<ShallowWaterNestedGpu>,
     /// [`ShallowWaterController::settled`] on the GPU while it fits the grid.
     settled: Option<SettledGpu>,
 }
@@ -60,19 +61,25 @@ struct SettledGpu {
 /// The render-world side of a [`ShallowWaterNestedGrid`](super::ShallowWaterNestedGrid).
 pub struct ShallowWaterNestedGpu {
     pub child: ShallowWaterSolver,
+    /// Couples the grid to its parent: the controller's grid or the nested grid before it.
     nest: ShallowWaterNest,
     shift: ShallowWaterShift,
     bed: ShallowWaterWorldBed,
-    /// Parent cell under the child's first cell, once the child holds water.
-    applied: Option<IVec2>,
-    /// Whether the child shifts this frame, with the parameters already written.
+    /// The steps per parent step the nest was built with.
+    steps: u32,
+    /// [`ShallowWaterNestLevel::corner_cells`](super::ShallowWaterNestLevel::corner_cells) once
+    /// the grid holds water.
+    corner: Option<IVec2>,
+    /// The parent cell under the grid's first cell that the nest has.
+    offset: IVec2,
+    /// Whether the grid shifts this frame, with the parameters already written.
     shifting: bool,
 }
 
 impl Default for ShallowWaterGpuResources {
     fn default() -> Self {
         Self {
-            nested: None,
+            nested: Vec::new(),
             settled: None,
             solver: None,
             last_applied_serial: AtomicU32::new(0),
@@ -111,7 +118,7 @@ pub fn prepare_shallow_water_gpu(
     ) = (textures, bed, &source, &pressure_head, &border)
     else {
         gpu.solver = None;
-        gpu.nested = None;
+        gpu.nested.clear();
         return;
     };
     let inputs = ShallowWaterInputs {
@@ -126,7 +133,7 @@ pub fn prepare_shallow_water_gpu(
         .as_ref()
         .is_some_and(|s| s.matches(cells, &textures, controller.particle_count))
     {
-        gpu.nested = None;
+        gpu.nested.clear();
         gpu.solver = ShallowWaterSolver::new(
             &render_device,
             &pipelines,
@@ -200,44 +207,57 @@ pub fn prepare_shallow_water_gpu(
 
     let apply_init = controller.sim_apply_serial != gpu.last_applied_serial.load(Ordering::Relaxed);
     let gpu = &mut *gpu;
-    let (Some(nested), Some(offset), Some(placement)) = (
-        controller.nested.as_ref(),
-        controller.nest_offset(),
-        controller.placement,
-    ) else {
-        gpu.nested = None;
+    let levels = controller.nest_levels();
+    let Some(placement) = controller.placement.filter(|_| !levels.is_empty()) else {
+        gpu.nested.clear();
         return;
     };
-    let solver = gpu.solver.as_ref().unwrap();
-    let child_cells = UVec2::splat(nested.cells);
-    let child_textures = ShallowWaterTextures::from_images(&nested.images, &gpu_images);
-    let bed = match &nested.world_bed {
-        Some(bed) => view(&bed.image).map(|view| ShallowWaterWorldBed {
-            view,
-            origin: bed.origin,
-            texel_size: bed.texel_size,
-        }),
-        None => view(&controller.bed_source).map(|view| ShallowWaterWorldBed {
-            view,
-            origin: placement.center - 0.5 * cells.as_vec2() * placement.cell_size,
-            texel_size: placement.cell_size,
-        }),
-    };
-    let (Some(child_textures), Some(bed)) = (child_textures, bed) else {
-        gpu.nested = None;
-        return;
-    };
-    let descriptor = |offset: IVec2| ShallowWaterNestDescriptor {
-        offset,
-        band: nested.band,
-        parent_cell_size: placement.cell_size,
-        child_steps: NEST_REFINEMENT,
-    };
-    let stale = gpu.nested.as_ref().is_none_or(|n| {
-        !n.child.matches(child_cells, &child_textures, 0) || n.bed.view.id() != bed.view.id()
-    });
-    if stale {
-        gpu.nested = None;
+    let root_corner = placement.center - 0.5 * cells.as_vec2() * placement.cell_size;
+    gpu.nested.truncate(levels.len());
+
+    // Build the levels whose images, bed or step count changed, and every level inside one.
+    for (k, (nested, level)) in controller.nested.iter().zip(&levels).enumerate() {
+        let child_cells = UVec2::splat(nested.cells);
+        let child_textures = ShallowWaterTextures::from_images(&nested.images, &gpu_images);
+        // Without a world bed of its own, a grid interpolates its parent's bed.
+        let bed = match (&nested.world_bed, k.checked_sub(1)) {
+            (Some(bed), _) => view(&bed.image).map(|view| ShallowWaterWorldBed {
+                view,
+                origin: bed.origin,
+                texel_size: bed.texel_size,
+            }),
+            (None, None) => view(&controller.bed_source).map(|view| ShallowWaterWorldBed {
+                view,
+                origin: root_corner,
+                texel_size: placement.cell_size,
+            }),
+            (None, Some(p)) => gpu.nested.get(p).map(|parent| ShallowWaterWorldBed {
+                view: parent.child.textures().bed_water.clone(),
+                origin: levels[p].corner,
+                texel_size: levels[p].cell_size,
+            }),
+        };
+        let (Some(child_textures), Some(bed)) = (child_textures, bed) else {
+            gpu.nested.truncate(k);
+            break;
+        };
+        let stale = gpu.nested.get(k).is_none_or(|n| {
+            !n.child.matches(child_cells, &child_textures, 0)
+                || n.bed.view.id() != bed.view.id()
+                || n.steps != level.steps
+        });
+        if !stale {
+            gpu.nested[k].bed = bed;
+            continue;
+        }
+        gpu.nested.truncate(k);
+        let parent = match k.checked_sub(1) {
+            Some(p) => &gpu.nested[p].child,
+            None => gpu.solver.as_ref().unwrap(),
+        };
+        let parent_cell_size = k
+            .checked_sub(1)
+            .map_or(placement.cell_size, |p| levels[p].cell_size);
         let Some(child) = ShallowWaterSolver::new(
             &render_device,
             &pipelines,
@@ -249,15 +269,20 @@ pub fn prepare_shallow_water_gpu(
                 particle_count: 0,
             },
         ) else {
-            return;
+            break;
         };
         let nest = ShallowWaterNest::new(
             &render_device,
             &nest_pipelines,
             &pipeline_cache,
-            solver,
+            parent,
             &child,
-            descriptor(offset),
+            ShallowWaterNestDescriptor {
+                offset: level.offset,
+                band: nested.band,
+                parent_cell_size,
+                child_steps: level.steps,
+            },
         );
         let shift = ShallowWaterShift::new(
             &render_device,
@@ -265,100 +290,140 @@ pub fn prepare_shallow_water_gpu(
             &pipeline_cache,
             &child,
             &bed,
-            Some(solver),
+            Some(parent),
         );
         let (Some(nest), Some(shift)) = (nest, shift) else {
-            return;
+            break;
         };
-        gpu.nested = Some(ShallowWaterNestedGpu {
+        gpu.nested.push(ShallowWaterNestedGpu {
             child,
             nest,
             shift,
             bed,
-            applied: None,
+            steps: level.steps,
+            corner: None,
+            offset: level.offset,
             shifting: false,
         });
     }
-    let n = gpu.nested.as_mut().unwrap();
-    // The child reads its own pressure head while the parent has one.
-    let child_inputs = ShallowWaterInputs {
-        pressure_head: controller
-            .pressure_head
-            .as_ref()
-            .and_then(|_| view(&nested.pressure_head)),
-        ..default()
-    };
-    if !n.child.inputs_match(&child_inputs) {
-        n.child.set_inputs(&render_device, child_inputs);
-    }
-    let rho = NEST_REFINEMENT as f32;
-    let child_placement = controller
-        .nest_center()
-        .map(|center| super::ShallowWaterPlacement {
-            center,
-            cell_size: placement.cell_size / rho,
-            ..placement
-        });
-    let (mover_count, movers) =
-        super::pack_movers(&controller.movers, child_placement.as_ref(), child_cells);
-    n.child.write_interaction(
-        &render_queue,
-        &GpuInteractionUniform {
-            dt: controller.dt,
-            mover_count,
-            movers,
+
+    // Write each level's inputs, settings and stirs, and move it to where it sits this frame.
+    for (k, n) in gpu.nested.iter_mut().enumerate() {
+        let (nested, level) = (&controller.nested[k], &levels[k]);
+        let child_cells = UVec2::splat(nested.cells);
+        let parent_cell_size = k
+            .checked_sub(1)
+            .map_or(placement.cell_size, |p| levels[p].cell_size);
+        // The grid reads its own pressure head while the controller's grid has one.
+        let child_inputs = ShallowWaterInputs {
+            pressure_head: controller
+                .pressure_head
+                .as_ref()
+                .and_then(|_| view(&nested.pressure_head)),
             ..default()
-        },
-    );
-    n.child.write_settings(
-        &render_queue,
-        &super::ShallowWaterSettings {
-            dt: settings.dt / rho,
-            cell_size: settings.cell_size / rho,
-            left_border: ShallowWaterBorder::Wall,
-            right_border: ShallowWaterBorder::Wall,
-            bottom_border: ShallowWaterBorder::Wall,
-            top_border: ShallowWaterBorder::Wall,
-            pml_width: 0,
-            ocean_band_cells: 0.0,
-            ocean_forcing: false,
-            ..settings
-        },
-    );
-    // A reset or the first frame refills the whole child from the parent. A move shifts what it
-    // holds by three child cells per parent cell.
-    let covered = (nested.cells / NEST_REFINEMENT) as i32;
-    let shift = match n.applied {
-        Some(old) if !apply_init => {
-            let delta = offset - old;
-            (delta != IVec2::ZERO).then(|| {
-                if delta.abs().max_element() >= covered {
-                    IVec2::splat(nested.cells as i32)
-                } else {
-                    delta * NEST_REFINEMENT as i32
-                }
-            })
+        };
+        if !n.child.inputs_match(&child_inputs) {
+            n.child.set_inputs(&render_device, child_inputs);
         }
-        _ => Some(IVec2::splat(nested.cells as i32)),
-    };
-    n.shifting = shift.is_some();
-    if let Some(shift) = shift {
-        let corner = placement.center - 0.5 * cells.as_vec2() * placement.cell_size;
-        n.shift.write_params(
+        let level_placement = super::ShallowWaterPlacement {
+            center: level.center,
+            cell_size: level.cell_size,
+            ..placement
+        };
+        let (mover_count, movers) =
+            super::pack_movers(&controller.movers, Some(&level_placement), child_cells);
+        n.child.write_interaction(
             &render_queue,
-            &n.bed,
-            &ShallowWaterShiftParams {
-                shift,
-                origin: corner + offset.as_vec2() * placement.cell_size,
-                cell_size: placement.cell_size / rho,
-                subsamples: 1,
-                fill_level: controller.fill_level,
-                parent_offset: Some(offset),
+            &GpuInteractionUniform {
+                dt: controller.dt,
+                mover_count,
+                movers,
+                ..default()
             },
         );
-        n.nest.set_offset(&render_queue, descriptor(offset));
-        n.applied = Some(offset);
+        n.child.write_settings(
+            &render_queue,
+            &super::ShallowWaterSettings {
+                dt: level.dt,
+                cell_size: level.cell_size,
+                left_border: ShallowWaterBorder::Wall,
+                right_border: ShallowWaterBorder::Wall,
+                bottom_border: ShallowWaterBorder::Wall,
+                top_border: ShallowWaterBorder::Wall,
+                pml_width: 0,
+                ocean_band_cells: 0.0,
+                ocean_forcing: false,
+                momentum_conserving: level.momentum_conserving,
+                ..settings
+            },
+        );
+        // A reset or the first frame refills the whole grid from its parent. A move over the
+        // world shifts what it holds by three cells per parent cell, after its parent moved.
+        let full = IVec2::splat(nested.cells as i32);
+        let shift = match n.corner {
+            Some(old) if !apply_init => {
+                let delta = level.corner_cells - old;
+                (delta != IVec2::ZERO).then(|| {
+                    if delta.abs().max_element() >= nested.cells as i32 {
+                        full
+                    } else {
+                        delta
+                    }
+                })
+            }
+            _ => Some(full),
+        };
+        n.shifting = shift.is_some();
+        if let Some(shift) = shift {
+            n.shift.write_params(
+                &render_queue,
+                &n.bed,
+                &ShallowWaterShiftParams {
+                    shift,
+                    origin: level.corner,
+                    cell_size: level.cell_size,
+                    subsamples: 1,
+                    fill_level: controller.fill_level,
+                    parent_offset: Some(level.offset),
+                },
+            );
+            n.corner = Some(level.corner_cells);
+        }
+        // A grid in a nested parent sits at a new offset whenever its parent moves, even when it
+        // stays put over the world.
+        if n.shifting || n.offset != level.offset {
+            n.nest.set_offset(
+                &render_queue,
+                ShallowWaterNestDescriptor {
+                    offset: level.offset,
+                    band: nested.band,
+                    parent_cell_size,
+                    child_steps: level.steps,
+                },
+            );
+            n.offset = level.offset;
+        }
     }
+}
+
+/// Encodes one frame of `parent` and the chain of nested grids in it: each grid steps through
+/// its own nest's frame with the next grid in, the last with plain steps.
+fn encode_nested_frame(
+    pass: &mut ComputePass,
+    parent: &ShallowWaterSolver,
+    levels: &[ShallowWaterNestedGpu],
+) {
+    let Some((n, inner)) = levels.split_first() else {
+        parent.encode_step(pass);
+        return;
+    };
+    n.nest.encode_frame_with(pass, parent, &n.child, |pass| {
+        if inner.is_empty() {
+            n.child.encode_step_with_face_volumes(pass);
+        } else {
+            encode_nested_frame(pass, &n.child, inner);
+        }
+    });
 }
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, Hash)]
@@ -420,24 +485,25 @@ pub fn run_shallow_water_sim(
             );
         }
     }
-    // The nested grid moves or refills after the parent's reset, so it reads the parent's
-    // fresh surface.
-    let nested = gpu_res.nested.as_ref();
-    if let Some(n) = nested.filter(|n| n.shifting && !defer_init) {
-        n.shift.encode(enc);
+    // The nested grids move or refill after the parent's reset, each after its own parent, so
+    // they read their parent's fresh surface.
+    let nested = &gpu_res.nested;
+    if !defer_init {
+        for n in nested.iter().filter(|n| n.shifting) {
+            n.shift.encode(enc);
+        }
     }
     if !controller.paused && !defer_init {
         let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
             label: Some("shallow_water_step"),
             timestamp_writes: None,
         });
-        match nested {
-            Some(n) => {
-                n.child.encode_interact(&mut pass);
-                n.nest.encode_frame(&mut pass, solver, &n.child);
-                n.child.encode_reconstruct_velocity(&mut pass);
-            }
-            None => solver.encode_step(&mut pass),
+        for n in nested {
+            n.child.encode_interact(&mut pass);
+        }
+        encode_nested_frame(&mut pass, solver, nested);
+        for n in nested {
+            n.child.encode_reconstruct_velocity(&mut pass);
         }
         solver.encode_reconstruct_velocity(&mut pass);
         solver.encode_particles(&mut pass);
