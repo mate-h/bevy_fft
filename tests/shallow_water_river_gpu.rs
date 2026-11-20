@@ -415,9 +415,18 @@ fn a_river_starts_settled_from_its_cache() {
     cache.write(&mut bytes).unwrap();
     let cache = ShallowWaterSettled::read(bytes.as_slice()).unwrap();
     let cached_depth: Vec<f32> = cache.bed_water.chunks(4).map(|c| c[1]).collect();
-    assert_eq!(
-        cached_depth, settled_depth,
-        "the cache holds the settled depth"
+    // The two readbacks can be a frame apart, so they agree only to within the river's
+    // frame-to-frame change, far under a percent of its depth.
+    assert_eq!(cached_depth.len(), settled_depth.len());
+    let largest_change = cached_depth
+        .iter()
+        .zip(&settled_depth)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    println!("cache against the settled readback: largest change {largest_change:.2e} m");
+    assert!(
+        largest_change < 0.01 * normal_depth,
+        "the cache holds the settled depth, off by up to {largest_change} m"
     );
     drop(app);
 
