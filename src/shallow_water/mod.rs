@@ -152,6 +152,9 @@ pub struct ShallowWaterController {
     pub brush_force: f32,
     /// Manning roughness n on top of [`Self::friction`]. Zero turns it off.
     pub manning_n: f32,
+    /// Bed grain size D84 in meters for Ferguson's (2007) friction, which replaces Manning's
+    /// where it is above zero. See [`ShallowWaterSettings::grain_d84`].
+    pub grain_d84: f32,
     /// Advects velocity in momentum-conserving form, after Stelling and Duinmeijer (2003), so
     /// bores and flood fronts move at the right speed. See
     /// [`ShallowWaterSettings::momentum_conserving`].
@@ -161,6 +164,9 @@ pub struct ShallowWaterController {
     /// Optional `Rgba32Float` source texture, one texel per cell. `.x` adds depth per second and
     /// `.y` is a sink weight per step. See [`ShallowWaterInputs::source`].
     pub source: Option<Handle<Image>>,
+    /// Optional `R32Float` bed grain size D84 per cell, in meters, for Ferguson's friction.
+    /// Texels at zero fall back to [`Self::grain_d84`]. See [`ShallowWaterInputs::grain`].
+    pub grain: Option<Handle<Image>>,
     /// Optional `R32Float` pressure head per cell, such as [`shallow_r32_image`] makes. Floating
     /// bodies press the water down through it: [`FloatingBodyPlugin`](crate::bodies::FloatingBodyPlugin)
     /// writes their footprints into it, and the solver drives the flow with the gradient of the
@@ -503,9 +509,11 @@ impl ShallowWaterController {
             brush_radius: 16.0,
             brush_force: 0.75,
             manning_n: 0.0,
+            grain_d84: 0.0,
             momentum_conserving: false,
             evaporation: 0.0,
             source: None,
+            grain: None,
             pressure_head: None,
             border_profile: None,
             nested: Vec::new(),
@@ -640,6 +648,7 @@ impl ShallowWaterController {
             gravity: self.gravity,
             friction: self.friction,
             manning_n: self.manning_n,
+            grain_d84: self.grain_d84,
             evaporation: self.evaporation,
             left_border: self.left_border,
             right_border: self.right_border,
@@ -798,7 +807,8 @@ pub struct GpuSimulationUniform {
     pub border_mask: u32,
     pub pml_width: u32,
     /// Bit 0 enables overshoot reduction. Bit 1 reads the target surface from the ocean target
-    /// texture instead of `pml_eta_rest`. Bit 2 applies the source texture.
+    /// texture instead of `pml_eta_rest`. Bit 2 applies the source texture. Bit 6 reads the grain
+    /// texture.
     pub flags: u32,
     pub pml_eta_rest: f32,
     pub vel_clamp_alpha: f32,
@@ -818,6 +828,9 @@ pub struct GpuSimulationUniform {
     pub evaporation: f32,
     /// Unit wind direction on XZ. The reset seed points column velocity along it.
     pub wind_dir: Vec2,
+    /// Grain size D84 for Ferguson's friction where the grain texture sets none. Zero leaves
+    /// Manning's.
+    pub grain_d84: f32,
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]

@@ -109,13 +109,15 @@ pub fn prepare_shallow_water_gpu(
     let source = controller.source.as_ref().map(view);
     let pressure_head = controller.pressure_head.as_ref().map(view);
     let border = controller.border_profile.as_ref().map(view);
+    let grain = controller.grain.as_ref().map(view);
     let (
         Some(textures),
         Some(bed),
         None | Some(Some(_)),
         None | Some(Some(_)),
         None | Some(Some(_)),
-    ) = (textures, bed, &source, &pressure_head, &border)
+        None | Some(Some(_)),
+    ) = (textures, bed, &source, &pressure_head, &border, &grain)
     else {
         gpu.solver = None;
         gpu.nested.clear();
@@ -126,6 +128,7 @@ pub fn prepare_shallow_water_gpu(
         source: source.flatten(),
         pressure_head: pressure_head.flatten(),
         border: border.flatten(),
+        grain: grain.flatten(),
     };
 
     if !gpu

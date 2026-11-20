@@ -43,6 +43,9 @@ struct SimulationSettings {
     evaporation : f32,
     /// Unit direction of the wind on the grid, X and then the row axis (world Z when placed).
     wind_dir : vec2f,
+    /// Grain size D84 for Ferguson's friction where the grain texture doesn't set one. Zero leaves
+    /// Manning's.
+    grain_d84 : f32,
 }
 
 struct Particle {
@@ -131,6 +134,9 @@ fn perlinNoise(point : vec2f, gridSize : f32, seed : u32) -> f32 {
 /// kind (`FACE_*`), `.y` an inflow's discharge per unit width into the grid, `.z` an outflow's
 /// bed slope.
 @group(1) @binding(5) var borderProfile : texture_2d<f32>;
+/// Bed grain size D84 per cell when flag bit 6 is set, in the solver's height unit. Zero falls
+/// back to `grain_d84`.
+@group(1) @binding(6) var grainTexture : texture_2d<f32>;
 
 /// The edge's own border type applies.
 const FACE_EDGE = 0u;
@@ -1173,16 +1179,41 @@ fn applyWetDryReflectW(@builtin(global_invocation_id) id: vec3u) {
     }
 }
 
-/// Linear drag, then implicit Manning friction `v / (1 + g dt n² |v| / h^(4/3))` with `h_face` the
-/// mean depth of the two cells beside the face.
-fn apply_friction(v : f32, h_face : f32) -> f32 {
-    var out = v * simulationSettings.friction_factor;
-    let n2 = simulationSettings.manning_n2;
-    if (n2 > 0.0) {
-        let h = max(h_face, simulationSettings.eps_wet);
-        let k = simulationSettings.gravity * simulationSettings.dt * n2 * abs(out) / pow(h, 4.0 / 3.0);
-        out /= 1.0 + k;
+/// D84 at cell `(ic, jc)`: the grain texture's where it is set, else `grain_d84`.
+fn grain_at(ic : i32, jc : i32) -> f32 {
+    if ((simulationSettings.flags & 64u) != 0u) {
+        let last = vec2i(textureDimensions(grainTexture)) - 1;
+        let d = textureLoad(grainTexture, clamp(vec2i(ic, jc), vec2i(0), last), 0).r;
+        if (d > 0.0) { return d; }
     }
+    return simulationSettings.grain_d84;
+}
+
+/// Ferguson's (2007) variable-power resistance `U/u* = a1 a2 r / √(a1² + a2² r^(5/3))` for
+/// relative depth `r = h / D84`, with his D84 fit a1 = 6.5, a2 = 2.5. Deep flow tends to
+/// Manning-Strickler `U/u* = a1 r^(1/6)`, shallow flow over cobbles to `U/u* = a2 r`, where
+/// Manning's n underestimates drag. Returns the drag coefficient `Cf = (u*/U)²`.
+fn ferguson_cf(h : f32, d84 : f32) -> f32 {
+    let a1 = 6.5;
+    let a2 = 2.5;
+    let r = h / d84;
+    let ratio = a1 * a2 * r / sqrt(a1 * a1 + a2 * a2 * pow(r, 5.0 / 3.0));
+    return 1.0 / max(ratio * ratio, 1e-6);
+}
+
+/// Linear drag, then implicit bed friction `v / (1 + dt Cf |v| / h)` with `h_face` the mean depth
+/// of the two cells beside the face. `Cf` is Ferguson's where the face has a grain size `d84`,
+/// else Manning's `g n² / h^(1/3)`.
+fn apply_friction(v : f32, h_face : f32, d84 : f32) -> f32 {
+    var out = v * simulationSettings.friction_factor;
+    let h = max(h_face, simulationSettings.eps_wet);
+    var cf = 0.0;
+    if (d84 > 0.0) {
+        cf = ferguson_cf(h, d84);
+    } else if (simulationSettings.manning_n2 > 0.0) {
+        cf = simulationSettings.gravity * simulationSettings.manning_n2 / pow(h, 1.0 / 3.0);
+    }
+    out /= 1.0 + simulationSettings.dt * cf * abs(out) / h;
     return out;
 }
 
@@ -1194,7 +1225,8 @@ fn applyFrictionU(@builtin(global_invocation_id) id: vec3u) {
     let fi = i32(id.x);
     let jc = i32(id.y);
     let h_face = 0.5 * (h_at(fi - 1, jc) + h_at(fi, jc));
-    let u = apply_friction(textureLoad(faceUTexture, id.xy).r, h_face);
+    let d84 = 0.5 * (grain_at(fi - 1, jc) + grain_at(fi, jc));
+    let u = apply_friction(textureLoad(faceUTexture, id.xy).r, h_face, d84);
     textureStore(faceUTexture, id.xy, vec4f(u, 0.0, 0.0, 0.0));
 }
 
@@ -1206,7 +1238,8 @@ fn applyFrictionW(@builtin(global_invocation_id) id: vec3u) {
     let ic = i32(id.x);
     let fj = i32(id.y);
     let h_face = 0.5 * (h_at(ic, fj - 1) + h_at(ic, fj));
-    let wv = apply_friction(textureLoad(faceWTexture, id.xy).r, h_face);
+    let d84 = 0.5 * (grain_at(ic, fj - 1) + grain_at(ic, fj));
+    let wv = apply_friction(textureLoad(faceWTexture, id.xy).r, h_face, d84);
     textureStore(faceWTexture, id.xy, vec4f(wv, 0.0, 0.0, 0.0));
 }
 

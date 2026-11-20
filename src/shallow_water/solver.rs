@@ -108,6 +108,7 @@ impl FromWorld for ShallowWaterPipelines {
                     texture_2d(TextureSampleType::Float { filterable: false }),
                     texture_2d(TextureSampleType::Float { filterable: false }),
                     texture_2d(TextureSampleType::Float { filterable: false }),
+                    texture_2d(TextureSampleType::Float { filterable: false }),
                 ),
             ),
         );
@@ -374,15 +375,19 @@ pub struct ShallowWaterInputs {
     /// documents the layout. Faces it leaves at zero keep their edge's
     /// [`ShallowWaterBorder`](super::ShallowWaterBorder).
     pub border: Option<TextureView>,
+    /// Bed grain size D84 per cell, `R32Float`, for Ferguson's friction. Texels at zero fall back
+    /// to [`ShallowWaterSettings::grain_d84`].
+    pub grain: Option<TextureView>,
 }
 
 impl ShallowWaterInputs {
-    fn ids(&self) -> [Option<TextureViewId>; 4] {
+    fn ids(&self) -> [Option<TextureViewId>; 5] {
         [
             self.bed.as_ref().map(|v| v.id()),
             self.source.as_ref().map(|v| v.id()),
             self.pressure_head.as_ref().map(|v| v.id()),
             self.border.as_ref().map(|v| v.id()),
+            self.grain.as_ref().map(|v| v.id()),
         ]
     }
 }
@@ -400,6 +405,12 @@ pub struct ShallowWaterSettings {
     /// Manning roughness n. Zero turns Manning friction off. Faces are slowed implicitly by
     /// `u / (1 + g dt n² |u| / h^(4/3))` with h the mean depth of the two cells.
     pub manning_n: f32,
+    /// Bed grain size D84 for Ferguson's (2007) variable-power friction, in the cell size's unit.
+    /// Above zero it replaces Manning's: `Cf = (u*/U)²` with
+    /// `U/u* = 6.5 · 2.5 r / √(6.5² + 2.5² r^(5/3))` for `r = h / D84`, so drag rises as the
+    /// water gets shallow over cobbles, where Manning's n underestimates it.
+    /// [`ShallowWaterInputs::grain`] sets it per cell.
+    pub grain_d84: f32,
     /// Fraction of the water depth that evaporates per second.
     pub evaporation: f32,
     pub left_border: ShallowWaterBorder,
@@ -443,6 +454,7 @@ impl Default for ShallowWaterSettings {
             gravity: 10.0,
             friction: 0.0,
             manning_n: 0.0,
+            grain_d84: 0.0,
             evaporation: 0.0,
             left_border: ShallowWaterBorder::Wall,
             right_border: ShallowWaterBorder::Wall,
@@ -477,6 +489,7 @@ impl ShallowWaterSettings {
         has_source: bool,
         has_pressure: bool,
         has_border: bool,
+        has_grain: bool,
     ) -> GpuSimulationUniform {
         let dx = self.cell_size;
         let friction_factor = (1.0 - self.friction.clamp(0.0, 1.0)).powf(self.dt);
@@ -485,7 +498,8 @@ impl ShallowWaterSettings {
             | (u32::from(has_source) << 2)
             | (u32::from(self.second_order_depth) << 3)
             | (u32::from(has_pressure) << 4)
-            | (u32::from(has_border) << 5);
+            | (u32::from(has_border) << 5)
+            | (u32::from(has_grain) << 6);
         GpuSimulationUniform {
             size: cells,
             dt: self.dt,
@@ -511,6 +525,7 @@ impl ShallowWaterSettings {
             manning_n2: self.manning_n * self.manning_n,
             evaporation: self.evaporation.max(0.0),
             wind_dir: self.wind_dir,
+            grain_d84: self.grain_d84.max(0.0),
         }
     }
 }
@@ -663,6 +678,7 @@ impl ShallowWaterSolver {
                     .border
                     .as_ref()
                     .unwrap_or(&fallback_source),
+                descriptor.inputs.grain.as_ref().unwrap_or(&fallback_bed),
             )),
         );
 
@@ -705,7 +721,7 @@ impl ShallowWaterSolver {
         self.particle_count
     }
 
-    /// Rebinds the bed, source, pressure head and border profile textures.
+    /// Rebinds the bed, source, pressure head, border profile and grain textures.
     pub fn set_inputs(&mut self, device: &RenderDevice, inputs: ShallowWaterInputs) {
         self.settings_group = device.create_bind_group(
             "shallow_water_settings",
@@ -717,6 +733,7 @@ impl ShallowWaterSolver {
                 inputs.source.as_ref().unwrap_or(&self.fallback_source),
                 inputs.pressure_head.as_ref().unwrap_or(&self.fallback_bed),
                 inputs.border.as_ref().unwrap_or(&self.fallback_source),
+                inputs.grain.as_ref().unwrap_or(&self.fallback_bed),
             )),
         );
         self.inputs = inputs;
@@ -729,6 +746,7 @@ impl ShallowWaterSolver {
             self.inputs.source.is_some(),
             self.inputs.pressure_head.is_some(),
             self.inputs.border.is_some(),
+            self.inputs.grain.is_some(),
         );
         write_uniform(queue, &self.simulation, &uniform);
         self.momentum_conserving.store(

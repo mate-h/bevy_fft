@@ -63,6 +63,8 @@ struct Setup {
     face_u: Vec<f32>,
     face_w: Vec<f32>,
     manning_n: f32,
+    /// Ferguson's grain size, zero for Manning's friction.
+    grain_d84: f32,
     momentum_conserving: bool,
 }
 
@@ -81,6 +83,7 @@ struct Grid {
     cells: UVec2,
     dx: f32,
     manning_n: f32,
+    grain_d84: f32,
     momentum_conserving: bool,
     frames_done: Arc<AtomicU32>,
 }
@@ -136,6 +139,7 @@ fn prepare_driver(
             cell_size: grid.dx,
             gravity: G,
             manning_n: grid.manning_n,
+            grain_d84: grid.grain_d84,
             overshoot_limiter: false,
             momentum_conserving: grid.momentum_conserving,
             ..default()
@@ -257,6 +261,7 @@ fn run(setup: Setup) -> Result {
         cells: setup.cells,
         dx: setup.dx,
         manning_n: setup.manning_n,
+        grain_d84: setup.grain_d84,
         momentum_conserving: setup.momentum_conserving,
         frames_done: frames_done.clone(),
     });
@@ -335,6 +340,7 @@ fn dam_break(h_right: f32, manning_n: f32, momentum_conserving: bool) -> Setup {
         face_u: Vec::new(),
         face_w: Vec::new(),
         manning_n,
+        grain_d84: 0.0,
         momentum_conserving,
     }
 }
@@ -538,6 +544,7 @@ fn vortex(momentum_conserving: bool) -> (Setup, f32) {
         face_u,
         face_w,
         manning_n: 0.0,
+        grain_d84: 0.0,
         momentum_conserving,
     };
     (setup, energy)
@@ -598,6 +605,7 @@ fn momentum_conserving_advection_costs_about_as_much_as_maccormack() {
         face_u: Vec::new(),
         face_w: Vec::new(),
         manning_n: 0.03,
+        grain_d84: 0.0,
         momentum_conserving,
     };
     let median = |mut v: Vec<f32>| {
@@ -625,4 +633,59 @@ fn momentum_conserving_advection_costs_about_as_much_as_maccormack() {
         sd < 1.25 * mac,
         "momentum-conserving step {sd:.3} ms against {mac:.3} ms"
     );
+}
+
+/// Ferguson's (2007) `U/u*` for relative depth `r = h / D84`, his D84 fit.
+fn ferguson_ratio(r: f32) -> f32 {
+    let (a1, a2) = (6.5f32, 2.5f32);
+    a1 * a2 * r / (a1 * a1 + a2 * a2 * r.powf(5.0 / 3.0)).sqrt()
+}
+
+/// Speed left after 6 s in a 120 m channel of still-level water `h` deep that starts moving at
+/// 1 m/s everywhere, over grains `d84`. The walls send waves in from the ends, which reach no
+/// further than 10 m in that time, so the middle only feels bed friction.
+fn coasting_speed(h: f32, d84: f32) -> f32 {
+    let u0 = 1.0;
+    let mut face_u = vec![u0; ((NX + 1) * NY) as usize];
+    for row in face_u.chunks_mut((NX + 1) as usize) {
+        row[0] = 0.0;
+        row[NX as usize] = 0.0;
+    }
+    let setup = Setup {
+        cells: UVec2::new(NX, NY),
+        dx: DX,
+        bed_water: vec![[0.0, h]; (NX * NY) as usize],
+        face_u,
+        face_w: Vec::new(),
+        manning_n: 0.0,
+        grain_d84: d84,
+        momentum_conserving: true,
+    };
+    let result = run(setup);
+    let middle = (NY / 2 * NX + NX / 2) as usize;
+    result.velocity[middle].x
+}
+
+/// Water coasting over a cobble bed slows as `du/dt = -Cf u² / h`, so `u = u0 / (1 + Cf u0 t / h)`
+/// with Ferguson's `Cf = (u*/U)²`. Checked where the water is as deep as the grains, where
+/// Manning's n would be far off, and ten times deeper.
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn ferguson_friction_slows_coasting_water_as_his_resistance_law_says() {
+    let h = 0.2;
+    for d84 in [0.2f32, 0.02] {
+        let cf = ferguson_ratio(h / d84).powi(-2);
+        let expected = 1.0 / (1.0 + cf * elapsed() / h);
+        let got = coasting_speed(h, d84);
+        println!(
+            "h/D84 {:.0}: Cf {cf:.4}, speed after {:.0} s {got:.3} m/s, expected {expected:.3}",
+            h / d84,
+            elapsed()
+        );
+        assert!(
+            (got - expected).abs() < 0.03 * expected + 0.005,
+            "h/D84 {}: water coasted at {got:.3} m/s, Ferguson says {expected:.3}",
+            h / d84
+        );
+    }
 }

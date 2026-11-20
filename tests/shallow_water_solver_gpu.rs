@@ -170,6 +170,7 @@ fn prepare_driver(
                     source: Some(source.create_view(&TextureViewDescriptor::default())),
                     pressure_head: None,
                     border: None,
+                    grain: None,
                 },
                 particle_count: 0,
             },
