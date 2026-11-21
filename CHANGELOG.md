@@ -70,7 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `WaterQuadtree`'s GPU selection drops tiles with no water under them when its material sets `dry_depth`. Each frame a small pass reduces every LOD slice's water depth to its maximum over 8x8 texel blocks, and refinement skips a node whose blocks, widened by `horizontal_margin`, are all shallower than `dry_depth`, since the surface would discard all of its pixels. Tiles beyond the LOD slices stay, as open water. A shallow water map with a river no longer draws, and pays for, the water surface over its dry land.
+- `WaterQuadtree::dry_culling` (off by default) drops tiles with no water under them in GPU selection when the material sets `dry_depth`. Each frame a small pass reduces every LOD slice's water depth to a max pyramid over 8x8 texel blocks, and refinement skips a node whose cells, widened by `horizontal_margin`, are all shallower than `dry_depth`, since the surface would discard all of its pixels. Tiles beyond the LOD slices stay, as open water. On an RTX 5090 over bevy_erosion's mostly dry map it cut the water pass from 0.067 to 0.044 ms but added 0.035 ms to selection; it pays where water pixels cost more.
 
 - `OceanClipmap` and `WaterQuadtree` require `NotShadowCaster`, so the water surface no longer draws itself into the sun's shadow cascades. Water lets most direct sunlight through; the surface still receives shadows. On an RTX 5090 the boat's `per_view_shadow_pass` fell from 0.164 to 0.065 ms with no visible change.
 

@@ -45,6 +45,12 @@ struct Params {
 /// LOD texels per side of one block of the wet mask. Matches `WET_BLOCK` in `quadtree.wesl`.
 const WET_BLOCK: u32 = 8;
 
+/// Cells in one slice's wet mask pyramid with `blocks` blocks per side, down to one cell.
+fn wet_pyramid_cells(blocks: u32) -> u32 {
+    let blocks = blocks.max(1);
+    (0..=blocks.ilog2()).map(|l| (blocks >> l).pow(2)).sum()
+}
+
 #[derive(Clone)]
 pub(super) struct FrameEntry {
     params: Params,
@@ -196,7 +202,7 @@ pub(super) fn prepare_quadtrees(
         state.0.clear();
         return;
     };
-    let wet_blocks = UVec2::new(lod.slices.resolution / WET_BLOCK, lod.slices.count);
+    let wet_blocks = UVec2::new((lod.slices.resolution / WET_BLOCK).max(1), lod.slices.count);
     for entry in &frame.0 {
         let Some(tiles) = buffers.get(&entry.tiles) else {
             state.0.remove(&entry.mesh);
@@ -216,7 +222,7 @@ pub(super) fn prepare_quadtrees(
         // Deepest water per block of each LOD slice, which `wet_mask` fills each frame.
         let wet = device.create_buffer(&BufferDescriptor {
             label: Some("water_quadtree_wet"),
-            size: (u64::from(wet_blocks.x * wet_blocks.x * wet_blocks.y) * 4).max(4),
+            size: (u64::from(wet_pyramid_cells(wet_blocks.x) * wet_blocks.y) * 4).max(4),
             usage: BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
@@ -277,19 +283,20 @@ pub(super) fn select_quadtrees(
             });
         pass.set_bind_group(0, &tree.group, &[]);
         // The wet mask is only read when the material sets a dry depth.
-        let blocks = if tree.params.get().heights.z > 0.0 {
-            tree.wet_blocks.x.div_ceil(8)
+        // One `wet_mask` workgroup per slice.
+        let slices = if tree.params.get().heights.z > 0.0 {
+            tree.wet_blocks.y
         } else {
             0
         };
         let dispatches = [
-            UVec3::new(blocks, blocks, tree.wet_blocks.y),
+            UVec3::new(1, 1, slices),
             UVec3::ONE,
             UVec3::new(9, 1, 1),
             UVec3::ONE,
         ];
         for (pipeline, groups) in pipelines.iter().zip(dispatches) {
-            if groups.x == 0 {
+            if groups.z == 0 {
                 continue;
             }
             pass.set_pipeline(pipeline);

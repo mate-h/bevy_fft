@@ -338,6 +338,7 @@ fn gpu_selection_drops_tiles_with_no_water_under_them() {
         .add(material(0.05));
     let quadtree = WaterQuadtree {
         frustum_cull: false,
+        dry_culling: true,
         ..default()
     };
     let tree = app
@@ -366,12 +367,12 @@ fn gpu_selection_drops_tiles_with_no_water_under_them() {
     let lod = app.world().resource::<WaterLodData>().slices;
     let outer = lod.slices[lod.count as usize - 1];
     let outer_half = 0.5 * outer.w;
-    // Blocks are 8 texels, and a node is tested where it spans at most four blocks, so a kept
-    // tile can sit up to a quarter of its size plus the margin from the water.
+    // A node widened by the margin on each side is tested on cells less than its widened width,
+    // so a kept tile can sit up to that width plus the margin from the water.
     let wet_half = 0.5 * WET_CELLS as f32;
     for tile in &kept {
         let (lo, size) = (tile.truncate(), tile.z);
-        let reach = quadtree.horizontal_margin + 0.25 * size + 1.0;
+        let reach = 3.0 * quadtree.horizontal_margin + size + 1.0;
         let near_water = lo.cmple(Vec2::splat(wet_half + reach)).all()
             && (lo + size).cmpge(Vec2::splat(-wet_half - reach)).all();
         // Widened by the margin as the selection widens it; past the outermost slice the surface
@@ -392,7 +393,7 @@ fn gpu_selection_drops_tiles_with_no_water_under_them() {
         .collect();
     assert!(!near.is_empty(), "the tiles over the water must stay");
     assert!(
-        kept.len() * 2 < all.len(),
+        kept.len() * 5 < all.len() * 3,
         "dry culling kept {} of {} tiles",
         kept.len(),
         all.len()

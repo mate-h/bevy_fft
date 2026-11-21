@@ -71,6 +71,12 @@ pub struct WaterQuadtree {
     pub horizontal_margin: f32,
     /// Drops tiles outside the viewer's frustum.
     pub frustum_cull: bool,
+    /// With GPU selection and a material `dry_depth`, drops tiles with no water at least that
+    /// deep under them, widened by `horizontal_margin`. Off by default: on an RTX 5090 over
+    /// bevy_erosion's mostly dry map at 2560x1440 it cut the water pass from 0.067 to 0.044 ms but
+    /// added 0.035 ms to selection, whose nine threads walk the tree serially. It pays where the
+    /// water's pixels cost more, as on Apple GPUs.
+    pub dry_culling: bool,
 }
 
 impl Default for WaterQuadtree {
@@ -86,6 +92,7 @@ impl Default for WaterQuadtree {
             height_bounds: Vec2::new(-24.0, 24.0),
             horizontal_margin: 12.0,
             frustum_cull: true,
+            dry_culling: false,
         }
     }
 }
@@ -372,6 +379,7 @@ pub(super) fn select_water_quadtrees(
     for (quadtree, buffer, mesh, mut stats, material) in &mut quadtrees {
         if quadtree.gpu_selection {
             let dry_depth = material
+                .filter(|_| quadtree.dry_culling)
                 .and_then(|m| materials.get(&m.0))
                 .map_or(0.0, |m| m.extension.settings.dry_depth);
             frame.0.push(super::quadtree_gpu::FrameEntry::new(
