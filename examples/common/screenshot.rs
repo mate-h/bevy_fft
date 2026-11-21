@@ -3,6 +3,7 @@
 //! Set `BEVY_FFT_SCREENSHOT=path/to/frame.png` to save one frame after a warm-up and then exit.
 //! `BEVY_FFT_SCREENSHOT_FRAMES` sets the warm-up length in frames (default 600), and
 //! `BEVY_FFT_SCREENSHOT_SIZE` sets the image size as `WIDTHxHEIGHT` (default 2560x1440).
+//! `BEVY_FFT_LOG_DIAGNOSTICS=1` logs Bevy's per-pass render diagnostics once a second.
 //! `BEVY_FFT_SCREENSHOT_COUNT` saves that many frames in a row, named `stem_0.ext`, `stem_1.ext`,
 //! and so on. `BEVY_FFT_SCREENSHOT_DT=<seconds>` steps time by that much every frame instead of
 //! by the wall clock. Frames still differ between runs where GPU readbacks feed back into the
@@ -87,6 +88,15 @@ struct ScreenshotRequest {
 
 impl Plugin for ScreenshotOnEnvPlugin {
     fn build(&self, app: &mut App) {
+        // Per-pass GPU and CPU times from Bevy's render diagnostics, logged once a second. On
+        // Vulkan they come from timestamps inside the passes; Metal reports only whole passes.
+        if std::env::var_os("BEVY_FFT_LOG_DIAGNOSTICS").is_some() {
+            // Bevy adds the render diagnostics itself only with `tracing-tracy`.
+            if !app.is_plugin_added::<bevy::render::diagnostic::RenderDiagnosticsPlugin>() {
+                app.add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin);
+            }
+            app.add_plugins(bevy::diagnostic::LogDiagnosticsPlugin::default());
+        }
         let Ok(path) = std::env::var("BEVY_FFT_SCREENSHOT") else {
             return;
         };
