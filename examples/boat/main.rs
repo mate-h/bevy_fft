@@ -75,11 +75,14 @@ const CHASE_ELEVATION_DEG: f32 = 28.0;
 /// The chase camera looks at a point this share of its distance behind the boat.
 const CHASE_AIM_BEHIND: f32 = 0.15;
 /// The wake view's aim point behind the boat, and its eye behind, abeam and above the boat, all
-/// as fractions of the chase distance.
+/// as fractions of the chase distance. The eye sits low, about 20 degrees above the water it looks
+/// at: the wake's slopes are small next to the ripples of the sea, and they show where the water
+/// reflects the bright, fast-changing sky near the horizon, as they do to someone in a following
+/// boat. From high above the water reflects a nearly uniform sky and the arms vanish.
 const WAKE_AIM_BEHIND: f32 = 0.5;
 const WAKE_EYE_BEHIND: f32 = 0.6;
 const WAKE_EYE_ABEAM: f32 = 0.7;
-const WAKE_EYE_HEIGHT: f32 = 0.8;
+const WAKE_EYE_HEIGHT: f32 = 0.25;
 /// Distance of the glint view's eye from the water it looks at, in chase distances.
 const GLINT_DISTANCE: f32 = 2.0;
 const CHASE_MIN: f32 = 6.0;
@@ -503,8 +506,8 @@ fn chase_camera(
             (target, eye)
         }
         ChaseView::Wake => {
-            // Above the starboard quarter, looking down at the water behind the boat, so the
-            // whole boat and a long stretch of its wake fill the picture.
+            // Low off the starboard quarter, looking back across the water behind the boat, so
+            // the whole boat and a long stretch of its wake fill the picture.
             let starboard = Vec3::new(-forward.z, 0.0, forward.x);
             let origin = boat.translation.with_y(0.0);
             let target = origin - forward * WAKE_AIM_BEHIND * d;
