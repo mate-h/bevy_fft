@@ -240,8 +240,8 @@ impl ExtractComponent<RenderApp> for OceanFoamPhase {
 #[derive(Component)]
 pub struct OceanFoamBindGroups {
     pub group: BindGroup,
-    /// One bind group per mip level of the Jacobian statistics after the first, with that
-    /// level's size.
+    /// Bind groups that each write the next five mip levels of the Jacobian statistics, with the
+    /// size of the first level they write.
     pub mips: Vec<(BindGroup, u32)>,
 }
 
@@ -281,6 +281,10 @@ impl FromWorld for OceanFoamPipelines {
             ShaderStages::COMPUTE,
             (
                 texture_2d(TextureSampleType::Float { filterable: true }),
+                texture_storage_2d(OCEAN_JACOBIAN_FORMAT, StorageTextureAccess::WriteOnly),
+                texture_storage_2d(OCEAN_JACOBIAN_FORMAT, StorageTextureAccess::WriteOnly),
+                texture_storage_2d(OCEAN_JACOBIAN_FORMAT, StorageTextureAccess::WriteOnly),
+                texture_storage_2d(OCEAN_JACOBIAN_FORMAT, StorageTextureAccess::WriteOnly),
                 texture_storage_2d(OCEAN_JACOBIAN_FORMAT, StorageTextureAccess::WriteOnly),
             ),
         );
@@ -633,9 +637,15 @@ pub(super) struct OceanFoamBindGroupCache {
     groups: HashMap<(Entity, bool), (FoamGroupKey, BindGroup)>,
 }
 
-/// The Jacobian texture the mip groups were built on, the groups with their sizes, and the full
-/// resolution view the foam pass writes.
-type JacobianMips = (TextureId, Vec<(BindGroup, u32)>, TextureView);
+/// The Jacobian texture the mip groups were built on, the groups with their sizes, the full
+/// resolution view the foam pass writes, and the scratch texture that takes outputs past the last
+/// level.
+type JacobianMips = (TextureId, Vec<(BindGroup, u32)>, TextureView, Texture);
+
+/// Levels one downsample dispatch writes. Matches `ocean_jacobian_mips.wesl`.
+const JACOBIAN_LEVELS_PER_DISPATCH: u32 = 5;
+/// Texels per side one downsample workgroup writes in its first level.
+const JACOBIAN_DOWNSAMPLE_GROUP: u32 = 16;
 
 /// What the foam bind group binds: the uniform buffer and offset, and the texture views.
 type FoamGroupKey = (Option<BufferId>, u32, [TextureViewId; 5], TextureId);
@@ -703,28 +713,62 @@ pub(super) fn prepare_ocean_foam_bind_groups(
             .get(&entity)
             .filter(|(id, ..)| *id == jacobian_id);
         if mip_entry.is_none() {
-            let level = |mip: u32| {
-                jacobian.texture.create_view(&TextureViewDescriptor {
+            let view = |texture: &Texture, mip: u32| {
+                texture.create_view(&TextureViewDescriptor {
                     base_mip_level: mip,
                     mip_level_count: Some(1),
                     ..default()
                 })
             };
+            let level = |mip: u32| view(&jacobian.texture, mip);
+            // One level per output, so outputs past the last level never alias each other.
+            let scratch = render_device.create_texture(&TextureDescriptor {
+                label: Some("ocean_jacobian_mip_scratch"),
+                size: Extent3d {
+                    width: 1 << (JACOBIAN_LEVELS_PER_DISPATCH - 1),
+                    height: 1 << (JACOBIAN_LEVELS_PER_DISPATCH - 1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: JACOBIAN_LEVELS_PER_DISPATCH,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: OCEAN_JACOBIAN_FORMAT,
+                usage: TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            });
             let levels = jacobian.texture.mip_level_count();
             let size = jacobian.texture.width();
-            let mips = (1..levels)
-                .map(|mip| {
+            let mips = (0..levels.saturating_sub(1))
+                .step_by(JACOBIAN_LEVELS_PER_DISPATCH as usize)
+                .map(|from| {
+                    let out = |k: u32| {
+                        let mip = from + 1 + k;
+                        if mip < levels {
+                            level(mip)
+                        } else {
+                            view(&scratch, k)
+                        }
+                    };
                     let group = render_device.create_bind_group(
                         "ocean_jacobian_mip_bind_group",
                         &mip_layout,
-                        &BindGroupEntries::sequential((&level(mip - 1), &level(mip))),
+                        &BindGroupEntries::sequential((
+                            &level(from),
+                            &out(0),
+                            &out(1),
+                            &out(2),
+                            &out(3),
+                            &out(4),
+                        )),
                     );
-                    (group, (size >> mip).max(1))
+                    (group, (size >> (from + 1)).max(1))
                 })
                 .collect();
-            cache.mips.insert(entity, (jacobian_id, mips, level(0)));
+            cache
+                .mips
+                .insert(entity, (jacobian_id, mips, level(0), scratch));
         }
-        let (_, mips, jacobian_out) = &cache.mips[&entity];
+        let (_, mips, jacobian_out, _) = &cache.mips[&entity];
         let mips = mips.clone();
 
         let key: FoamGroupKey = (
@@ -853,22 +897,31 @@ pub fn run_ocean_foam(
     let enc = ctx.command_encoder();
     let time_span = diagnostics.time_span(enc, "ocean_foam");
 
+    // Stage by stage across the cascades, so their independent dispatches share each barrier.
+    let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
+        label: Some("ocean_jacobian_foam_pass"),
+        timestamp_writes: None,
+    });
+    pass.set_pipeline(foam_pl);
     for (foam_bg, settings) in &query {
-        let nx = settings.size.x.div_ceil(wg);
-        let ny = settings.size.y.div_ceil(wg);
-
-        let mut pass = enc.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("ocean_jacobian_foam_pass"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(foam_pl);
         pass.set_bind_group(0, &foam_bg.group, &[]);
-        pass.dispatch_workgroups(nx, ny, 1);
-        pass.set_pipeline(mip_pl);
-        for (group, size) in &foam_bg.mips {
-            pass.set_bind_group(0, group, &[]);
-            pass.dispatch_workgroups(size.div_ceil(wg), size.div_ceil(wg), 1);
+        pass.dispatch_workgroups(
+            settings.size.x.div_ceil(wg),
+            settings.size.y.div_ceil(wg),
+            1,
+        );
+    }
+    pass.set_pipeline(mip_pl);
+    let stages = query.iter().map(|(b, _)| b.mips.len()).max().unwrap_or(0);
+    for stage in 0..stages {
+        for (foam_bg, _) in &query {
+            if let Some((group, size)) = foam_bg.mips.get(stage) {
+                let groups = size.div_ceil(JACOBIAN_DOWNSAMPLE_GROUP);
+                pass.set_bind_group(0, group, &[]);
+                pass.dispatch_workgroups(groups, groups, 1);
+            }
         }
     }
+    drop(pass);
     time_span.end(enc);
 }

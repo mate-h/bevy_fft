@@ -70,6 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The ocean builds each cascade's Jacobian mip chain five levels per dispatch, averaging in workgroup memory, and runs the foam and mip stages of all cascades side by side. On an RTX 5090 the boat's `ocean_foam` fell from 0.139 to 0.060 ms; far whitecap coverage is unchanged to three figures.
+
 - The ocean's foam pass stores each cascade's change of displacement X, Z and height since the previous frame in the foam texture's R, B and A lanes, keeping the raw values in two new ping-pong textures, `OceanFoamMask::carry_a` and `carry_b`. The LOD writer reads its flow from those lanes and no longer keeps a copy of every cascade's output. On an RTX 5090 at 2560x1440 the boat's `ocean_lod_write` fell from 0.090 to 0.057 ms, and the flow is unchanged (new GPU test `ocean_flow_gpu`).
 
 - White water looks softer and less like decals. The surface treats its air as bubbles of 4 mm Sauter radius instead of 2 mm, so a few percent of air leaves the water green-white and translucent and only dense white water hides the bed. The surface spreads each texel's air into packets and streaks from the foam texture, read through the foam's advected texture coordinates and averaged along the drift, so the pattern moves with the water. Air that leaves the column surfaces as residual foam, `WaterAerationSettings::foam_yield` per meter of air, which trails downstream after the air is gone. The underside of aerated water takes the look of foam, and the underwater medium pass clouds the view where the eye looks through air. The medium pass binds `foam_state` at binding 8.
