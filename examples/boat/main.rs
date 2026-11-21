@@ -17,7 +17,8 @@
 //! - `BOAT_CHASE=<m>` sets the chase distance.
 //! - `BOAT_TOW=<m/s>` holds the boat at that speed straight ahead, for measuring drag.
 //! - `BOAT_TOP=<m>` looks down on the boat and its wake from that height.
-//! - `BOAT_VIEW=wake` starts the chase camera in its wake view, as `C` does.
+//! - `BOAT_VIEW=wake` starts the chase camera in its wake view, as `C` does, and `BOAT_VIEW=glint`
+//!   in its glint view, which looks at the wake across the sun's glitter (`C` again).
 //! - `BOAT_WAKE_CELL=<m>` sets the wake patch's cell width (default 0.5).
 //! - `BOAT_MODULATION=<m>` sets how strongly the wake modulates the short waves riding on it
 //!   ([`DispersivePlacement::short_wave_modulation`], default 4.5, 0 for none).
@@ -79,6 +80,8 @@ const WAKE_AIM_BEHIND: f32 = 0.5;
 const WAKE_EYE_BEHIND: f32 = 0.6;
 const WAKE_EYE_ABEAM: f32 = 0.7;
 const WAKE_EYE_HEIGHT: f32 = 0.8;
+/// Distance of the glint view's eye from the water it looks at, in chase distances.
+const GLINT_DISTANCE: f32 = 2.0;
 const CHASE_MIN: f32 = 6.0;
 const CHASE_MAX: f32 = 30.0;
 
@@ -91,10 +94,10 @@ fn main() {
         .insert_resource(Chase {
             distance: env_f32("BOAT_CHASE").unwrap_or(CHASE_DISTANCE),
             free: false,
-            view: if std::env::var("BOAT_VIEW").as_deref() == Ok("wake") {
-                ChaseView::Wake
-            } else {
-                ChaseView::Behind
+            view: match std::env::var("BOAT_VIEW").as_deref() {
+                Ok("wake") => ChaseView::Wake,
+                Ok("glint") => ChaseView::Glint,
+                _ => ChaseView::Behind,
             },
         })
         .add_plugins((
@@ -159,6 +162,9 @@ enum ChaseView {
     /// Off the starboard quarter and low, looking back across the wake, so the Kelvin wake's
     /// starboard arm runs across the picture.
     Wake,
+    /// Across the wake from the sun at the sun's elevation, so the sun's glitter lies on the water
+    /// behind the boat, where small slopes show most.
+    Glint,
 }
 
 /// Holds screenshot runs, which have no window to wait on, to 60 frames per second, and to the
@@ -387,7 +393,8 @@ fn toggle_camera(
     if keys.just_pressed(KeyCode::KeyC) && !egui_wants.wants_any_keyboard_input() {
         chase.view = match chase.view {
             ChaseView::Behind => ChaseView::Wake,
-            ChaseView::Wake => ChaseView::Behind,
+            ChaseView::Wake => ChaseView::Glint,
+            ChaseView::Glint => ChaseView::Behind,
         };
     }
     if let Ok(mut camera_state) = state.single_mut() {
@@ -450,6 +457,7 @@ fn freeze_sky_lighting(
 
 /// Keeps the camera behind and above the boat, on a spring, levelled against the boat's roll and
 /// pitch. The mouse wheel sets the distance.
+#[allow(clippy::type_complexity)]
 fn chase_camera(
     time: Res<Time>,
     scroll: Res<AccumulatedMouseScroll>,
@@ -457,6 +465,7 @@ fn chase_camera(
     mut chase: ResMut<Chase>,
     boat: Query<&Transform, (With<Boat>, Without<Camera3d>)>,
     mut camera: Query<&mut Transform, With<Camera3d>>,
+    sun: Query<&Transform, (With<DirectionalLight>, Without<Camera3d>, Without<Boat>)>,
 ) {
     if chase.free {
         return;
@@ -502,6 +511,20 @@ fn chase_camera(
             let eye = origin - forward * WAKE_EYE_BEHIND * d
                 + starboard * WAKE_EYE_ABEAM * d
                 + Vec3::Y * WAKE_EYE_HEIGHT * d;
+            (target, eye)
+        }
+        ChaseView::Glint => {
+            // The sun's mirror image in level water sits at the sun's elevation on the far side,
+            // so an eye at that elevation across the target sees the glitter there.
+            let to_sun = sun
+                .iter()
+                .next()
+                .map_or(Vec3::new(0.3, 0.35, -1.0), |t| -*t.forward());
+            let elevation = to_sun.y.clamp(0.05, 0.95).asin();
+            let away = (-to_sun).with_y(0.0).normalize_or(Vec3::Z);
+            let target = boat.translation.with_y(0.0) - forward * WAKE_AIM_BEHIND * d;
+            let reach = GLINT_DISTANCE * d;
+            let eye = target + away * reach * elevation.cos() + Vec3::Y * reach * elevation.sin();
             (target, eye)
         }
     };
@@ -658,7 +681,7 @@ fn boat_panel(
         ui.label(if chase.free {
             "F: back to the chase camera"
         } else {
-            "W/S: throttle. A/D: rudder. Space: stop.\nR: set upright. F: free camera. C: wake view. Wheel: distance."
+            "W/S: throttle. A/D: rudder. Space: stop.\nR: set upright. F: free camera. C: wake and glint views. Wheel: distance."
         });
         ui.collapsing("Tuning", |ui| {
             let params = &mut drive.params;
