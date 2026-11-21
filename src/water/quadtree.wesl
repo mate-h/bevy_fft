@@ -13,6 +13,8 @@ struct Params {
     shape: vec4<f32>,
     limits: vec4<u32>,
     heights: vec4<f32>,
+    /// Min X, min Z, max X, max Z of the area the water can be in; empty when max is below min.
+    extent: vec4<f32>,
     planes: array<vec4<f32>, 6>,
 }
 struct Tile { bounds: vec4<f32>, morph: vec4<f32> }
@@ -96,6 +98,13 @@ fn wet_mask(
     }
 }
 
+/// Whether the node, widened by the horizontal margin, meets the extent, if there is one.
+fn in_extent(minimum: vec2<f32>, size: f32) -> bool {
+    let e = params.extent;
+    if any(e.zw < e.xy) { return true; }
+    return all(minimum - params.shape.w < e.zw) && all(minimum + size + params.shape.w > e.xy);
+}
+
 /// Whether any water at least `params.heights.z` deep lies under the node, widened by the
 /// horizontal margin. Tested on the finest slice that holds the widened node, at the pyramid
 /// level whose cells are at least half its width, so at most 3x3 cells.
@@ -165,7 +174,7 @@ fn refine(@builtin(global_invocation_id) id: vec3<u32>) {
         let minimum = node.xy;
         let size = node.z;
         let level = u32(node.w);
-        if !visible(minimum, size) || !has_water(minimum, size) { continue; }
+        if !visible(minimum, size) || !in_extent(minimum, size) || !has_water(minimum, size) { continue; }
         let nearest = clamp(params.eye.xz, minimum, minimum + size);
         let distance = length(vec3<f32>(nearest.x, 0.0, nearest.y) - params.eye.xyz);
         let end = size * params.shape.y;

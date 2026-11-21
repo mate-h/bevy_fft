@@ -77,6 +77,10 @@ pub struct WaterQuadtree {
     /// added 0.035 ms to selection, whose nine threads walk the tree serially. It pays where the
     /// water's pixels cost more, as on Apple GPUs.
     pub dry_culling: bool,
+    /// World XZ rectangle the water can be in, such as a heightfield's map. Tiles that miss it,
+    /// widened by `horizontal_margin`, are dropped. Without it the mesh reaches as far as the
+    /// root tiles, and the surface draws open water past the LOD slices.
+    pub extent: Option<Rect>,
 }
 
 impl Default for WaterQuadtree {
@@ -93,6 +97,7 @@ impl Default for WaterQuadtree {
             horizontal_margin: 12.0,
             frustum_cull: true,
             dry_culling: false,
+            extent: None,
         }
     }
 }
@@ -187,7 +192,7 @@ impl WaterQuadtree {
         dropped: &mut u32,
     ) {
         let size = self.tile_size(level);
-        if !visible(&self.cull_box(min, size)) {
+        if !visible(&self.cull_box(min, size)) || !self.in_extent(min, size) {
             return;
         }
         if level > 0 && flat_distance(eye, min, size) < self.range(level - 1) {
@@ -209,6 +214,14 @@ impl WaterQuadtree {
             return;
         }
         tiles.push(WaterQuadtreeTile { min, size, level });
+    }
+
+    /// Whether the tile, widened by the horizontal margin, meets [`Self::extent`].
+    fn in_extent(&self, min: Vec2, size: f32) -> bool {
+        self.extent.is_none_or(|e| {
+            let m = self.horizontal_margin.max(0.0);
+            (min - m).cmplt(e.max).all() && (min + size + m).cmpgt(e.min).all()
+        })
     }
 
     fn cull_box(&self, min: Vec2, size: f32) -> Aabb {

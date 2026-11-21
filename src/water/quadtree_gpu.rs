@@ -39,6 +39,8 @@ struct Params {
     shape: Vec4,
     limits: UVec4,
     heights: Vec4,
+    /// `WaterQuadtree::extent` as min X, min Z, max X, max Z; empty (max below min) for none.
+    extent: Vec4,
     planes: [Vec4; 6],
 }
 
@@ -84,6 +86,9 @@ impl FrameEntry {
                 ),
                 // The material's dry depth in `z`, below which tiles with no water are dropped.
                 heights: q.height_bounds.extend(dry_depth.max(0.0)).extend(0.0),
+                extent: q.extent.map_or(Vec4::new(0.0, 0.0, -1.0, -1.0), |e| {
+                    Vec4::new(e.min.x, e.min.y, e.max.x, e.max.y)
+                }),
                 planes: frustum.map_or([Vec4::ZERO; 6], |f| f.half_spaces.map(|p| p.normal_d())),
             },
             tiles,

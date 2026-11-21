@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `WaterQuadtree::extent` limits the quadtree to a world XZ rectangle, such as a heightfield's map, in both the GPU and the CPU selector. Without it, a heightfield-only scene draws open water past its LOD slices out to the horizon.
+
 - The `carve_rivers` example carves rivers into a bevy_terrain height tile set with `river_geometry`: it routes each river in a JSON file over the uncarved tiles, cuts its long profile through recorded water surfaces, carves a channel sized for its bankfull discharge, and writes the change into every LOD. The beach's `CHANNEL` and `tools/carve_terrain_tiles.py` are gone; run it once on the Kauai tiles with `examples/beach/rivers.json`.
 - `river_geometry`, a workspace crate shared with bevy_erosion: river routing by priority flood, path smoothing, breached long profiles, the bankfull channel model and the bed raster with step-pools, riffle-pools and point bars, moved unchanged from bevy_erosion's river brush. See `docs/river_ecosystem.md`.
 - Ferguson's (2007) variable-power bed friction from a grain size D84, set for the whole grid (`ShallowWaterController::grain_d84`) or per cell (`ShallowWaterController::grain`). It replaces Manning's where set, so shallow water over cobbles drags as hard as measured.

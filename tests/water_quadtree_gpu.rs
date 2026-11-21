@@ -84,11 +84,17 @@ fn gpu_tiles_match_cpu_selection() {
             captured.0 = event.data.clone();
         },
     );
-    for (i, (eye, cull, capacity)) in [
-        (Vec3::new(3.0, 2.0, -5.0), false, 1024),
-        (Vec3::new(-129.0, 7.0, 41.0), true, 1024),
-        (Vec3::new(153.0, 500.0, -87.0), true, 1024),
-        (Vec3::new(-513.0, 1.5, -257.0), false, 7),
+    for (i, (eye, cull, capacity, extent)) in [
+        (Vec3::new(3.0, 2.0, -5.0), false, 1024, None),
+        (Vec3::new(-129.0, 7.0, 41.0), true, 1024, None),
+        (Vec3::new(153.0, 500.0, -87.0), true, 1024, None),
+        (Vec3::new(-513.0, 1.5, -257.0), false, 7, None),
+        (
+            Vec3::new(40.0, 3.0, 20.0),
+            false,
+            1024,
+            Some(Rect::new(-50.0, -30.0, 120.0, 60.0)),
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -97,6 +103,7 @@ fn gpu_tiles_match_cpu_selection() {
             frustum_cull: cull,
             max_tiles: capacity,
             levels: 9 + i as u32,
+            extent,
             ..default()
         };
         app.world_mut().entity_mut(tree).insert(q);
@@ -357,11 +364,28 @@ fn gpu_selection_drops_tiles_with_no_water_under_them() {
             captured.0 = event.data.clone();
         },
     );
-    // Let the heightfield reach the LOD slices.
-    for _ in 0..30 {
-        app.update();
+    // Wait until the heightfield has reached the LOD slices: until tiles over the water are kept,
+    // moving the eye a little each try so the readback that answers is a new one.
+    let wet_half = 0.5 * WET_CELLS as f32;
+    let mut eye = eye;
+    let mut kept = Vec::new();
+    for _ in 0..20 {
+        for _ in 0..10 {
+            app.update();
+        }
+        eye.x += 0.25;
+        app.world_mut()
+            .get_mut::<Transform>(camera)
+            .unwrap()
+            .translation = eye;
+        kept = selected_tiles(&mut app, eye);
+        if kept
+            .iter()
+            .any(|t| t.x.abs() < wet_half && t.y.abs() < wet_half)
+        {
+            break;
+        }
     }
-    let kept = selected_tiles(&mut app, eye);
 
     let (all, _) = quadtree.select(eye, |_| true);
     let lod = app.world().resource::<WaterLodData>().slices;
@@ -369,7 +393,6 @@ fn gpu_selection_drops_tiles_with_no_water_under_them() {
     let outer_half = 0.5 * outer.w;
     // A node widened by the margin on each side is tested on cells less than its widened width,
     // so a kept tile can sit up to that width plus the margin from the water.
-    let wet_half = 0.5 * WET_CELLS as f32;
     for tile in &kept {
         let (lo, size) = (tile.truncate(), tile.z);
         let reach = 3.0 * quadtree.horizontal_margin + size + 1.0;
