@@ -690,12 +690,14 @@ fn fragment(in: FragVertexOutput, @builtin(front_facing) is_front: bool) -> Frag
     let xz = water_flat_xz(in);
     let pick = lod_pick(water_lod, xz, 0.0);
     let lod_surface = water_lod_surface(pick);
-    let foam = water_foam_surface(xz, pick, lod_surface.foam);
-    let footprint = sqrt(max(length(dpdx(xz)) * length(dpdy(xz)), 1e-12));
-    let air = water_air_texture(xz, pick, lod_surface.air, footprint);
+    // Before the foam and air texture work, so dry pixels skip it. A discarded invocation keeps
+    // running as a helper, so the derivatives below stay defined for its quad.
     if water_is_dry(lod_surface.depth) {
         discard;
     }
+    let foam = water_foam_surface(xz, pick, lod_surface.foam);
+    let footprint = sqrt(max(length(dpdx(xz)) * length(dpdy(xz)), 1e-12));
+    let air = water_air_texture(xz, pick, lod_surface.air, footprint);
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     pbr_input.material.base_color = alpha_discard(
         pbr_input.material.flags,
