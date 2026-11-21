@@ -7,7 +7,7 @@
     "sea_level": 0.0,
     "smooth": 7.0,
     "detail": 1.0,
-    "bank_width": 4.0,
+    "bank_width": 10.0,
     "seed": 1
   }
 ]
