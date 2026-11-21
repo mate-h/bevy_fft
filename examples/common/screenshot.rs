@@ -9,6 +9,7 @@
 //! scene, such as buoys. Without the first variable the plugin does nothing.
 //!
 //! Screenshot runs open no window, so they work in the background without anything popping up.
+//! On Linux they also run without winit, so they need no display server.
 //! Use [`default_plugins`] in place of `DefaultPlugins` for that. Cameras that would draw to the
 //! primary window draw to an offscreen image instead, the capture reads that image, and the app
 //! updates continuously. Black captures are discarded and retried a few times before the app gives
@@ -41,11 +42,21 @@ pub fn default_plugins() -> PluginGroupBuilder {
     if !screenshot_requested() {
         return plugins;
     }
-    plugins.set(WindowPlugin {
+    let plugins = plugins.set(WindowPlugin {
         primary_window: None,
         exit_condition: ExitCondition::DontExit,
         ..default()
-    })
+    });
+    // On Linux, winit's event loop with no window waits for window events that never come, so
+    // the app stops updating after startup (seen on X11 under Xvfb on a headless NVIDIA box).
+    // There a plain loop drives the frames instead.
+    #[cfg(target_os = "linux")]
+    let plugins = plugins
+        .disable::<bevy::winit::WinitPlugin>()
+        .add(bevy::app::ScheduleRunnerPlugin::run_loop(
+            std::time::Duration::ZERO,
+        ));
+    plugins
 }
 
 fn screenshot_size() -> UVec2 {
