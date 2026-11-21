@@ -70,7 +70,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `WaterLodData::foam_state` and `foam_flow` hold two frames, and the foam sim reads last frame's half while it writes this frame's, instead of copying both arrays every frame. `WaterLodSlices::foam_half` (formerly padding) says which half is this frame's: its slices start at layer `foam_half * count` of `foam_state` and `foam_half * count * WATER_FOAM_FLOW_LAYERS_PER_SLICE` of `foam_flow`. Alpha of `foam_state` holds the sim's time when it wrote the texel, so readbacks can tell the newer half. On an RTX 5090 the copies were half of the boat's `water_foam`, 0.088 of 0.178 ms.
+- `OceanClipmap` and `WaterQuadtree` require `NotShadowCaster`, so the water surface no longer draws itself into the sun's shadow cascades. Water lets most direct sunlight through; the surface still receives shadows. On an RTX 5090 the boat's `per_view_shadow_pass` fell from 0.164 to 0.065 ms with no visible change.
+
+- `WaterLodData::foam_state` and `foam_flow` hold two frames, and the foam sim reads last frame's half while it writes this frame's, instead of copying both arrays every frame (the boat's `water_foam` fell from 0.178 to 0.073 ms on an RTX 5090). `WaterLodSlices::foam_half` (formerly padding) says which half is this frame's: its slices start at layer `foam_half * count` of `foam_state` and `foam_half * count * WATER_FOAM_FLOW_LAYERS_PER_SLICE` of `foam_flow`. Alpha of `foam_state` holds the sim's time when it wrote the texel, so readbacks can tell the newer half.
 
 - The ocean builds each cascade's Jacobian mip chain five levels per dispatch, averaging in workgroup memory, and runs the foam and mip stages of all cascades side by side. On an RTX 5090 the boat's `ocean_foam` fell from 0.139 to 0.060 ms; far whitecap coverage is unchanged to three figures.
 

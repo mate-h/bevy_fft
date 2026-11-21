@@ -34,10 +34,15 @@ use super::{WaterSurfaceMaterial, WaterSurfaceTag, WaterViewer};
 /// Quadtree water mesh settings. Add it with a
 /// [`WaterSurfaceMaterial`](super::WaterSurfaceMaterial). The plugin builds the tile pool
 /// [`Mesh3d`], tags the entity with [`WaterSurfaceTag`], and refreshes the tile list each frame.
+///
+/// The surface requires `NotShadowCaster`: water lets most direct sunlight through, and drawing the
+/// displaced surface into every shadow cascade cost 0.1 ms of a 1.6 ms frame on an RTX 5090 with
+/// no visible change. It still receives shadows.
 #[derive(Component, Clone, Copy, Debug, Reflect)]
 #[require(
     Transform,
     Visibility,
+    bevy::light::NotShadowCaster,
     NoFrustumCulling,
     NoAutomaticBatching,
     WaterQuadtreeStats

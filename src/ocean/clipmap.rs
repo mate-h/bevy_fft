@@ -26,8 +26,12 @@ use crate::water::{WaterSurfaceMaterial, WaterSurfaceTag, WaterViewer};
 /// Camera-following LOD mesh settings. Add it with a
 /// [`WaterSurfaceMaterial`](crate::water::WaterSurfaceMaterial). The plugin builds the [`Mesh3d`],
 /// tags it with [`WaterSurfaceTag`], and moves the entity each frame.
+///
+/// The surface requires `NotShadowCaster`: water lets most direct sunlight through, and drawing the
+/// displaced surface into every shadow cascade cost 0.1 ms of a 1.6 ms frame on an RTX 5090 with
+/// no visible change. It still receives shadows.
 #[derive(Component, Clone, Copy, Debug, Reflect)]
-#[require(Transform, Visibility)]
+#[require(Transform, Visibility, bevy::light::NotShadowCaster)]
 pub struct OceanClipmap {
     /// Vertex spacing of the innermost level in meters.
     pub base_spacing: f32,
