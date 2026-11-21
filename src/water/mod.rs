@@ -235,8 +235,10 @@ impl Plugin for WaterPlugin {
                 )
                 .add_systems(
                     RenderGraph,
+                    // After the LOD writers, since dry culling reads the depth they wrote.
                     quadtree_gpu::select_quadtrees
                         .in_set(RenderGraphSystems::Render)
+                        .after(WaterLodGraphSystems::Read)
                         .before(bevy::core_pipeline::schedule::camera_driver),
                 );
             quadtree_gpu::configure_draws(render_app);

@@ -27,10 +27,11 @@ use bevy::{
         render_resource::{binding_types::*, *},
         renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery},
         storage::{GpuShaderBuffer, ShaderBuffer},
+        texture::GpuImage,
     },
 };
 
-use super::WaterQuadtree;
+use super::{WaterLodData, WaterLodGpu, WaterLodSlices, WaterQuadtree};
 
 #[derive(Clone, ShaderType)]
 struct Params {
@@ -40,6 +41,9 @@ struct Params {
     heights: Vec4,
     planes: [Vec4; 6],
 }
+
+/// LOD texels per side of one block of the wet mask. Matches `WET_BLOCK` in `quadtree.wesl`.
+const WET_BLOCK: u32 = 8;
 
 #[derive(Clone)]
 pub(super) struct FrameEntry {
@@ -53,6 +57,7 @@ impl FrameEntry {
         q: WaterQuadtree,
         eye: Vec3,
         frustum: Option<&Frustum>,
+        dry_depth: f32,
         tiles: Handle<ShaderBuffer>,
         mesh: AssetId<Mesh>,
     ) -> Self {
@@ -71,7 +76,8 @@ impl FrameEntry {
                     q.cells(),
                     u32::from(q.frustum_cull && frustum.is_some()),
                 ),
-                heights: q.height_bounds.extend(0.0).extend(0.0),
+                // The material's dry depth in `z`, below which tiles with no water are dropped.
+                heights: q.height_bounds.extend(dry_depth.max(0.0)).extend(0.0),
                 planes: frustum.map_or([Vec4::ZERO; 6], |f| f.half_spaces.map(|p| p.normal_d())),
             },
             tiles,
@@ -88,7 +94,7 @@ pub(super) struct WaterQuadtreeFrame(pub Vec<FrameEntry>);
 pub(super) struct QuadtreePipeline {
     selection_layout: BindGroupLayoutDescriptor,
     draw_layout: BindGroupLayoutDescriptor,
-    selection: [CachedComputePipelineId; 3],
+    selection: [CachedComputePipelineId; 4],
     draws: CachedComputePipelineId,
 }
 
@@ -105,6 +111,9 @@ impl FromWorld for QuadtreePipeline {
                 (
                     uniform_buffer::<Params>(false),
                     storage_buffer_sized(false, None),
+                    uniform_buffer::<WaterLodSlices>(false),
+                    texture_2d_array(TextureSampleType::Float { filterable: false }),
+                    storage_buffer_sized(false, None),
                 ),
             ),
         );
@@ -118,7 +127,7 @@ impl FromWorld for QuadtreePipeline {
                 ),
             ),
         );
-        let selection = ["reset", "refine", "finish"].map(|entry| {
+        let selection = ["wet_mask", "reset", "refine", "finish"].map(|entry| {
             cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some(format!("water_quadtree_{entry}").into()),
                 layout: vec![selection_layout.clone()],
@@ -145,7 +154,11 @@ impl FromWorld for QuadtreePipeline {
 
 struct PreparedQuadtree {
     params: UniformBuffer<Params>,
-    tiles: Buffer,
+    /// What the selection group binds besides the params and its own wet mask: tiles, LOD
+    /// slices, LOD foam.
+    key: (BufferId, BufferId, TextureViewId),
+    /// Blocks per side and slices of the group's wet mask, for the `wet_mask` dispatch.
+    wet_blocks: UVec2,
     group: BindGroup,
     draws: HashMap<TypeId, PreparedDraw>,
 }
@@ -159,6 +172,7 @@ struct PreparedDraw {
 #[derive(Resource, Default)]
 pub(super) struct GpuQuadtrees(HashMap<AssetId<Mesh>, PreparedQuadtree>);
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_quadtrees(
     frame: Res<WaterQuadtreeFrame>,
     buffers: Res<RenderAssets<GpuShaderBuffer>>,
@@ -166,18 +180,32 @@ pub(super) fn prepare_quadtrees(
     cache: Res<PipelineCache>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
+    lod: Option<Res<WaterLodData>>,
+    lod_gpu: Res<WaterLodGpu>,
+    images: Res<RenderAssets<GpuImage>>,
     mut state: ResMut<GpuQuadtrees>,
 ) {
     state
         .0
         .retain(|mesh, _| frame.0.iter().any(|entry| entry.mesh == *mesh));
+    let (Some(lod), Some(slices)) = (lod, lod_gpu.slices.buffer()) else {
+        state.0.clear();
+        return;
+    };
+    let Some(foam) = images.get(&lod.foam) else {
+        state.0.clear();
+        return;
+    };
+    let wet_blocks = UVec2::new(lod.slices.resolution / WET_BLOCK, lod.slices.count);
     for entry in &frame.0 {
         let Some(tiles) = buffers.get(&entry.tiles) else {
             state.0.remove(&entry.mesh);
             continue;
         };
+        let key = (tiles.buffer.id(), slices.id(), foam.texture_view.id());
         if let Some(tree) = state.0.get_mut(&entry.mesh)
-            && tree.tiles.id() == tiles.buffer.id()
+            && tree.key == key
+            && tree.wet_blocks == wet_blocks
         {
             tree.params.set(entry.params.clone());
             tree.params.write_buffer(&device, &queue);
@@ -185,12 +213,22 @@ pub(super) fn prepare_quadtrees(
         }
         let mut params = UniformBuffer::from(entry.params.clone());
         params.write_buffer(&device, &queue);
+        // Deepest water per block of each LOD slice, which `wet_mask` fills each frame.
+        let wet = device.create_buffer(&BufferDescriptor {
+            label: Some("water_quadtree_wet"),
+            size: (u64::from(wet_blocks.x * wet_blocks.x * wet_blocks.y) * 4).max(4),
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
         let group = device.create_bind_group(
             "water_quadtree_selection",
             &cache.get_bind_group_layout(&pipeline.selection_layout),
             &BindGroupEntries::sequential((
                 params.binding().unwrap(),
                 tiles.buffer.as_entire_binding(),
+                slices.as_entire_binding(),
+                &foam.texture_view,
+                wet.as_entire_binding(),
             )),
         );
         let draws = state
@@ -201,7 +239,8 @@ pub(super) fn prepare_quadtrees(
             entry.mesh,
             PreparedQuadtree {
                 params,
-                tiles: tiles.buffer.clone(),
+                key,
+                wet_blocks,
                 group,
                 draws,
             },
@@ -237,9 +276,24 @@ pub(super) fn select_quadtrees(
                 timestamp_writes: None,
             });
         pass.set_bind_group(0, &tree.group, &[]);
-        for (pipeline, groups) in pipelines.iter().zip([1, 9, 1]) {
+        // The wet mask is only read when the material sets a dry depth.
+        let blocks = if tree.params.get().heights.z > 0.0 {
+            tree.wet_blocks.x.div_ceil(8)
+        } else {
+            0
+        };
+        let dispatches = [
+            UVec3::new(blocks, blocks, tree.wet_blocks.y),
+            UVec3::ONE,
+            UVec3::new(9, 1, 1),
+            UVec3::ONE,
+        ];
+        for (pipeline, groups) in pipelines.iter().zip(dispatches) {
+            if groups.x == 0 {
+                continue;
+            }
             pass.set_pipeline(pipeline);
-            pass.dispatch_workgroups(groups, 1, 1);
+            pass.dispatch_workgroups(groups.x, groups.y, groups.z);
         }
     }
     span.end(ctx.command_encoder());

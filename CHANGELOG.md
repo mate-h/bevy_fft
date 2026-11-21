@@ -70,6 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `WaterQuadtree`'s GPU selection drops tiles with no water under them when its material sets `dry_depth`. Each frame a small pass reduces every LOD slice's water depth to its maximum over 8x8 texel blocks, and refinement skips a node whose blocks, widened by `horizontal_margin`, are all shallower than `dry_depth`, since the surface would discard all of its pixels. Tiles beyond the LOD slices stay, as open water. A shallow water map with a river no longer draws, and pays for, the water surface over its dry land.
+
 - `OceanClipmap` and `WaterQuadtree` require `NotShadowCaster`, so the water surface no longer draws itself into the sun's shadow cascades. Water lets most direct sunlight through; the surface still receives shadows. On an RTX 5090 the boat's `per_view_shadow_pass` fell from 0.164 to 0.065 ms with no visible change.
 
 - `WaterLodData::foam_state` and `foam_flow` hold two frames, and the foam sim reads last frame's half while it writes this frame's, instead of copying both arrays every frame (the boat's `water_foam` fell from 0.178 to 0.073 ms on an RTX 5090). `WaterLodSlices::foam_half` (formerly padding) says which half is this frame's: its slices start at layer `foam_half * count` of `foam_state` and `foam_half * count * WATER_FOAM_FLOW_LAYERS_PER_SLICE` of `foam_flow`. Alpha of `foam_state` holds the sim's time when it wrote the texel, so readbacks can tell the newer half.

@@ -231,3 +231,189 @@ fn read_u32(data: &[u8], offset: usize) -> u32 {
 fn read_f32(data: &[u8], offset: usize) -> f32 {
     f32::from_bits(read_u32(data, offset))
 }
+
+/// Cells per side of the test's water heightfield, one meter each, centred on the origin.
+const WET_CELLS: u32 = 64;
+
+fn float_image(texels: impl Iterator<Item = Vec4>) -> Image {
+    let data = texels
+        .flat_map(|v| v.to_array())
+        .flat_map(f32::to_le_bytes)
+        .collect::<Vec<_>>();
+    Image::new(
+        bevy::render::render_resource::Extent3d {
+            width: WET_CELLS,
+            height: WET_CELLS,
+            depth_or_array_layers: 1,
+        },
+        bevy::render::render_resource::TextureDimension::D2,
+        data,
+        TextureFormat::Rgba32Float,
+        bevy::asset::RenderAssetUsages::default(),
+    )
+}
+
+/// Tiles of a GPU selection readback taken with the eye at `eye`, as min X, min Z and size.
+fn selected_tiles(app: &mut App, eye: Vec3) -> Vec<Vec3> {
+    app.world_mut().resource_mut::<Captured>().0.clear();
+    let start = Instant::now();
+    loop {
+        app.update();
+        let data = &app.world().resource::<Captured>().0;
+        if data.len() >= 32 && read_f32(data, 0) == eye.x && read_f32(data, 8) == eye.z {
+            let count = read_u32(data, 16) as usize;
+            return (0..count)
+                .map(|i| {
+                    let at = |j: usize| read_f32(data, 32 + i * 32 + j * 4);
+                    Vec3::new(at(0), at(1), at(2))
+                })
+                .collect();
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "GPU readback timed out"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+#[ignore = "requires a graphics adapter"]
+fn gpu_selection_drops_tiles_with_no_water_under_them() {
+    use bevy_fft::water::{
+        WaterHeightfield, WaterHeightfieldDry, WaterLodClear, WaterLodData, WaterSurfaceExtension,
+        WaterSurfaceUniform,
+    };
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins
+            .build()
+            .disable::<WinitPlugin>()
+            .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>()
+            .set(WindowPlugin {
+                primary_window: None,
+                exit_condition: ExitCondition::DontExit,
+                ..default()
+            }),
+    )
+    .add_plugins(WaterPlugin)
+    .insert_resource(WaterLodClear)
+    .insert_resource(bevy::render::error_handler::RenderErrorHandler(
+        |error, _, _| panic!("GPU validation failed: {error:?}"),
+    ))
+    .init_resource::<Captured>();
+    while app.plugins_state() == PluginsState::Adding {
+        bevy::tasks::tick_global_task_pools_on_main_thread();
+        thread::sleep(Duration::from_millis(1));
+    }
+    app.finish();
+    app.cleanup();
+    // A square of water one meter deep at the origin; everything else is dry.
+    let n = (WET_CELLS * WET_CELLS) as usize;
+    let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+    let bed_water = images.add(float_image((0..n).map(|_| Vec4::new(0.0, 1.0, 0.0, 0.0))));
+    let velocity = images.add(float_image((0..n).map(|_| Vec4::ZERO)));
+    app.world_mut().spawn(WaterHeightfield {
+        dry: WaterHeightfieldDry::Level(0.0),
+        ..WaterHeightfield::new(bed_water, velocity, UVec2::splat(WET_CELLS))
+    });
+    let eye = Vec3::new(10.0, 30.0, 10.0);
+    let camera = app
+        .world_mut()
+        .spawn((Camera3d::default(), Transform::from_translation(eye)))
+        .id();
+    let material = |dry_depth: f32| WaterSurfaceMaterial {
+        base: default(),
+        extension: WaterSurfaceExtension {
+            settings: WaterSurfaceUniform {
+                dry_depth,
+                ..WaterSurfaceExtension::default().settings
+            },
+            ..default()
+        },
+    };
+    let culled = app
+        .world_mut()
+        .resource_mut::<Assets<WaterSurfaceMaterial>>()
+        .add(material(0.05));
+    let quadtree = WaterQuadtree {
+        frustum_cull: false,
+        ..default()
+    };
+    let tree = app
+        .world_mut()
+        .spawn((quadtree, MeshMaterial3d(culled.clone())))
+        .id();
+    app.update();
+    let handle = app
+        .world()
+        .get::<WaterQuadtreeBuffer>(tree)
+        .unwrap()
+        .0
+        .clone();
+    app.world_mut().spawn(Readback::buffer(handle)).observe(
+        |event: On<ReadbackComplete>, mut captured: ResMut<Captured>| {
+            captured.0 = event.data.clone();
+        },
+    );
+    // Let the heightfield reach the LOD slices.
+    for _ in 0..30 {
+        app.update();
+    }
+    let kept = selected_tiles(&mut app, eye);
+
+    let (all, _) = quadtree.select(eye, |_| true);
+    let lod = app.world().resource::<WaterLodData>().slices;
+    let outer = lod.slices[lod.count as usize - 1];
+    let outer_half = 0.5 * outer.w;
+    // Blocks are 8 texels, and a node is tested where it spans at most four blocks, so a kept
+    // tile can sit up to a quarter of its size plus the margin from the water.
+    let wet_half = 0.5 * WET_CELLS as f32;
+    for tile in &kept {
+        let (lo, size) = (tile.truncate(), tile.z);
+        let reach = quadtree.horizontal_margin + 0.25 * size + 1.0;
+        let near_water = lo.cmple(Vec2::splat(wet_half + reach)).all()
+            && (lo + size).cmpge(Vec2::splat(-wet_half - reach)).all();
+        // Widened by the margin as the selection widens it; past the outermost slice the surface
+        // draws open water, so those tiles stay.
+        let m = quadtree.horizontal_margin;
+        let past_slices = (lo - m - outer.xy()).cmplt(Vec2::splat(-outer_half)).any()
+            || (lo + size + m - outer.xy())
+                .cmpgt(Vec2::splat(outer_half))
+                .any();
+        assert!(
+            near_water || past_slices,
+            "kept tile at {lo} of size {size} has no water near it"
+        );
+    }
+    let near: Vec<_> = kept
+        .iter()
+        .filter(|t| t.x.abs() < wet_half && t.y.abs() < wet_half)
+        .collect();
+    assert!(!near.is_empty(), "the tiles over the water must stay");
+    assert!(
+        kept.len() * 2 < all.len(),
+        "dry culling kept {} of {} tiles",
+        kept.len(),
+        all.len()
+    );
+    eprintln!("dry culling kept {} of {} tiles", kept.len(), all.len());
+
+    // Without a dry depth nothing is culled.
+    let open = app
+        .world_mut()
+        .resource_mut::<Assets<WaterSurfaceMaterial>>()
+        .add(material(0.0));
+    app.world_mut()
+        .entity_mut(tree)
+        .insert(MeshMaterial3d(open));
+    // A new eye, so the readback that answers is from after the change.
+    let eye = eye + Vec3::X;
+    app.world_mut()
+        .get_mut::<Transform>(camera)
+        .unwrap()
+        .translation = eye;
+    let unculled = selected_tiles(&mut app, eye);
+    let (expected, _) = quadtree.select(eye, |_| true);
+    assert_eq!(unculled.len(), expected.len(), "dry depth 0 must not cull");
+}

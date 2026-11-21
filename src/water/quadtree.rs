@@ -358,7 +358,9 @@ pub(super) fn select_water_quadtrees(
         &WaterQuadtreeBuffer,
         &Mesh3d,
         &mut WaterQuadtreeStats,
+        Option<&MeshMaterial3d<WaterSurfaceMaterial>>,
     )>,
+    materials: Res<Assets<WaterSurfaceMaterial>>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut frame: ResMut<super::quadtree_gpu::WaterQuadtreeFrame>,
 ) {
@@ -367,12 +369,16 @@ pub(super) fn select_water_quadtrees(
         return;
     };
     let eye = camera.translation();
-    for (quadtree, buffer, mesh, mut stats) in &mut quadtrees {
+    for (quadtree, buffer, mesh, mut stats, material) in &mut quadtrees {
         if quadtree.gpu_selection {
+            let dry_depth = material
+                .and_then(|m| materials.get(&m.0))
+                .map_or(0.0, |m| m.extension.settings.dry_depth);
             frame.0.push(super::quadtree_gpu::FrameEntry::new(
                 *quadtree,
                 eye,
                 frustum,
+                dry_depth,
                 buffer.0.clone(),
                 mesh.0.id(),
             ));

@@ -1,4 +1,12 @@
 // GPU CDLOD selection and draw counts. The tile header matches `surface.wesl`.
+//
+// With a dry depth set, selection also drops tiles with no water under them. `wet_mask` first
+// reduces each LOD slice's water depth, the green lane of the LOD foam array, to its maximum over
+// blocks of `WET_BLOCK` texels. `refine` then skips a node when every block under it, widened by
+// the horizontal margin, is shallower than the dry depth, so the surface would discard all of its
+// pixels anyway. Nodes outside every slice count as wet, as the surface draws open water there.
+import bevy_fft::water::lod::WaterLodSlices;
+
 struct Params {
     eye: vec4<f32>,
     shape: vec4<f32>,
@@ -17,6 +25,64 @@ struct Tiles {
 }
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read_write> output: Tiles;
+@group(0) @binding(2) var<uniform> lod: WaterLodSlices;
+/// LOD foam array, whose green lane holds the water depth in meters.
+@group(0) @binding(3) var lod_foam: texture_2d_array<f32>;
+/// Deepest water per block of `WET_BLOCK` texels, slice by slice, row by row.
+@group(0) @binding(4) var<storage, read_write> wet: array<f32>;
+
+/// LOD texels per side of one `wet` block.
+const WET_BLOCK: u32 = 8u;
+/// Most blocks per side a node may cover in the slice it is tested on.
+const WET_BLOCKS_PER_NODE: f32 = 4.0;
+
+@compute @workgroup_size(8, 8, 1)
+fn wet_mask(@builtin(global_invocation_id) id: vec3<u32>) {
+    let blocks = lod.resolution / WET_BLOCK;
+    if id.x >= blocks || id.y >= blocks || id.z >= lod.count { return; }
+    var deepest = 0.0;
+    for (var y = 0u; y < WET_BLOCK; y++) {
+        for (var x = 0u; x < WET_BLOCK; x++) {
+            let texel = vec2<i32>(id.xy * WET_BLOCK + vec2(x, y));
+            deepest = max(deepest, textureLoad(lod_foam, texel, id.z, 0).g);
+        }
+    }
+    wet[(id.z * blocks + id.y) * blocks + id.x] = deepest;
+}
+
+/// Whether any water at least `params.heights.z` deep lies under the node, widened by the
+/// horizontal margin. Tested on the finest slice that holds the node with blocks no smaller than a
+/// `WET_BLOCKS_PER_NODE`th of it, or else on the coarsest slice that holds it.
+fn has_water(minimum: vec2<f32>, size: f32) -> bool {
+    let dry = params.heights.z;
+    if dry <= 0.0 { return true; }
+    let blocks = lod.resolution / WET_BLOCK;
+    if blocks == 0u { return true; }
+    let lo = minimum - params.shape.w;
+    let hi = minimum + size + params.shape.w;
+    var pick = -1;
+    for (var i = 0u; i < lod.count; i++) {
+        let s = lod.slices[i];
+        let corner = s.xy - 0.5 * s.w;
+        if any(lo < corner) || any(hi > corner + s.w) { continue; }
+        pick = i32(i);
+        if s.z * f32(WET_BLOCK) * WET_BLOCKS_PER_NODE >= hi.x - lo.x { break; }
+    }
+    if pick < 0 { return true; }
+    let i = u32(pick);
+    let s = lod.slices[i];
+    let block = s.z * f32(WET_BLOCK);
+    let corner = s.xy - 0.5 * s.w;
+    let last = vec2<i32>(i32(blocks) - 1);
+    let b0 = clamp(vec2<i32>(floor((lo - corner) / block)), vec2(0), last);
+    let b1 = clamp(vec2<i32>(floor((hi - corner) / block)), vec2(0), last);
+    for (var y = b0.y; y <= b1.y; y++) {
+        for (var x = b0.x; x <= b1.x; x++) {
+            if wet[(i * blocks + u32(y)) * blocks + u32(x)] >= dry { return true; }
+        }
+    }
+    return false;
+}
 
 @compute @workgroup_size(1)
 fn reset() {
@@ -55,7 +121,7 @@ fn refine(@builtin(global_invocation_id) id: vec3<u32>) {
         let minimum = node.xy;
         let size = node.z;
         let level = u32(node.w);
-        if !visible(minimum, size) { continue; }
+        if !visible(minimum, size) || !has_water(minimum, size) { continue; }
         let nearest = clamp(params.eye.xz, minimum, minimum + size);
         let distance = length(vec3<f32>(nearest.x, 0.0, nearest.y) - params.eye.xyz);
         let end = size * params.shape.y;
