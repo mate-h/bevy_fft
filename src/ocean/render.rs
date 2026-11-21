@@ -613,8 +613,27 @@ type PrepareOceanFoamBgQuery<'w, 's> = Query<
     With<FftBindGroups>,
 >;
 
+/// Foam bind groups per ocean entity, kept until one of the resources they bind changes. Built
+/// fresh every frame they cost a dozen bind groups and two dozen texture views per cascade.
+#[derive(Default)]
+pub(super) struct OceanFoamBindGroupCache {
+    /// Per entity: the Jacobian texture the mip groups were built on, and the groups.
+    mips: HashMap<Entity, JacobianMips>,
+    /// Per entity and foam ping-pong parity: what the foam group binds, and the group.
+    groups: HashMap<(Entity, bool), (FoamGroupKey, BindGroup)>,
+}
+
+/// The Jacobian texture the mip groups were built on, the groups with their sizes, and the full
+/// resolution view the foam pass writes.
+type JacobianMips = (TextureId, Vec<(BindGroup, u32)>, TextureView);
+
+/// What the foam bind group binds: the uniform buffer and offset, and the texture views.
+type FoamGroupKey = (Option<BufferId>, u32, [TextureViewId; 4], TextureId);
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_ocean_foam_bind_groups(
     mut commands: Commands,
+    mut cache: Local<OceanFoamBindGroupCache>,
     render_device: Res<RenderDevice>,
     pipeline_cache: Res<PipelineCache>,
     foam_pipelines: Res<OceanFoamPipelines>,
@@ -625,6 +644,9 @@ pub(super) fn prepare_ocean_foam_bind_groups(
     let layout = pipeline_cache.get_bind_group_layout(&foam_pipelines.layout);
     let mip_layout = pipeline_cache.get_bind_group_layout(&foam_pipelines.mip_layout);
 
+    // Forget oceans that are gone.
+    cache.mips.retain(|entity, _| query.contains(*entity));
+    cache.groups.retain(|(entity, _), _| query.contains(*entity));
     for (entity, textures, foam_mask, phase, foam_index) in &query {
         let Some(foam_binding) = component_uniform_binding(&foam_uniforms, foam_index) else {
             continue;
@@ -660,39 +682,59 @@ pub(super) fn prepare_ocean_foam_bind_groups(
         let Some(jacobian) = gpu_images.get(&foam_mask.jacobian) else {
             continue;
         };
-        let level = |mip: u32| {
-            jacobian.texture.create_view(&TextureViewDescriptor {
-                base_mip_level: mip,
-                mip_level_count: Some(1),
-                ..default()
-            })
-        };
-        let levels = jacobian.texture.mip_level_count();
-        let size = jacobian.texture.width();
-        let mips = (1..levels)
-            .map(|mip| {
-                let group = render_device.create_bind_group(
-                    "ocean_jacobian_mip_bind_group",
-                    &mip_layout,
-                    &BindGroupEntries::sequential((&level(mip - 1), &level(mip))),
-                );
-                (group, (size >> mip).max(1))
-            })
-            .collect();
-        let jacobian_out = level(0);
+        let jacobian_id = jacobian.texture.id();
+        let mip_entry = cache.mips.get(&entity).filter(|(id, ..)| *id == jacobian_id);
+        if mip_entry.is_none() {
+            let level = |mip: u32| {
+                jacobian.texture.create_view(&TextureViewDescriptor {
+                    base_mip_level: mip,
+                    mip_level_count: Some(1),
+                    ..default()
+                })
+            };
+            let levels = jacobian.texture.mip_level_count();
+            let size = jacobian.texture.width();
+            let mips = (1..levels)
+                .map(|mip| {
+                    let group = render_device.create_bind_group(
+                        "ocean_jacobian_mip_bind_group",
+                        &mip_layout,
+                        &BindGroupEntries::sequential((&level(mip - 1), &level(mip))),
+                    );
+                    (group, (size >> mip).max(1))
+                })
+                .collect();
+            cache.mips.insert(entity, (jacobian_id, mips, level(0)));
+        }
+        let (_, mips, jacobian_out) = &cache.mips[&entity];
+        let mips = mips.clone();
 
-        let group = render_device.create_bind_group(
-            "ocean_foam_bind_group",
-            &layout,
-            &BindGroupEntries::sequential((
-                foam_binding,
-                spatial,
-                spatial_im,
-                foam_read,
-                foam_write,
-                &jacobian_out,
-            )),
+        let key: FoamGroupKey = (
+            foam_uniforms.uniforms().buffer().map(|b| b.id()),
+            foam_index.index(),
+            [spatial.id(), spatial_im.id(), foam_read.id(), foam_write.id()],
+            jacobian_id,
         );
+        let parity = phase.0 % 2 == 0;
+        let group = match cache.groups.get(&(entity, parity)) {
+            Some((cached, group)) if *cached == key => group.clone(),
+            _ => {
+                let group = render_device.create_bind_group(
+                    "ocean_foam_bind_group",
+                    &layout,
+                    &BindGroupEntries::sequential((
+                        foam_binding,
+                        spatial,
+                        spatial_im,
+                        foam_read,
+                        foam_write,
+                        jacobian_out,
+                    )),
+                );
+                cache.groups.insert((entity, parity), (key, group.clone()));
+                group
+            }
+        };
 
         commands
             .entity(entity)
