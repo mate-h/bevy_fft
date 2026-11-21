@@ -7,6 +7,216 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/mate-h/bevy_fft/compare/bevy_fft-v0.2.0...bevy_fft-v0.3.0) - 2026-11-21
+
+### Other
+
+- Lower the boat's wake view so the Kelvin arms show
+- Break the dispersive patch's crests at deep-water steepness
+- Give the ocean LOD writer a half-float copy of each cascade's displacement
+- Store the ocean's cascade foam textures as half floats
+- Wait for ten pipeline-free frames before a dispersive bodies test measures
+- Put the sky pass aside while the water viewer is under water
+- Say how to size a WaterQuadtree over a heightfield
+- Add WaterQuadtree::extent to keep the mesh within a map
+- Make quadtree dry culling opt-in and test it on a max pyramid
+- Drop quadtree water tiles with no water under them
+- Add a glint view to the boat example
+- Keep the water surface out of the sun's shadow cascades
+- Keep two frames in the foam state and flow arrays instead of copying them
+- Build the ocean's Jacobian mips five levels per dispatch
+- Write the ocean's per-frame displacement change in the foam pass
+- Format the Linux headless plugin setup
+- Discard dry water pixels before the foam and air textures
+- Keep the ocean foam bind groups across frames
+- Log per-pass render diagnostics in example runs with BEVY_FFT_LOG_DIAGNOSTICS
+- Run headless screenshot runs without winit on Linux
+- Grade the beach river's banks over 10 m
+- Carve rivers into terrain tiles with river_geometry
+- Route the beach river with river_geometry and compare it with the hand channel
+- Add the river_geometry crate, moved from bevy_erosion's river brush
+- Plan shared river geometry with bevy_erosion
+- Add a tool that carves the beach river's channel into the baked terrain tiles
+- Carve the beach river through the reach where the LiDAR holds its water surface
+- Merge branch 'worktree-agent-a95f4e83f9410ede5'
+- Modulate the short waves on a dispersive patch by its waves' strain
+- Add Ferguson's variable-power bed friction from a D84 grain size
+- Merge branch 'worktree-agent-a2cd5b164d26dd9a6'
+- Give a moving hull's wake the height of a pressure patch of its weight
+- Apply slope-variance roughness and flow detail in the deferred water path
+- Test that a dispersive wake reaches every LOD slice over its patch
+- Soften and texture white water
+- Add an aeration field for white water
+- Clear the root shallow water grid's face volumes for its parent each frame
+- Nest shallow water grids more than one level deep
+- Let a nested shallow water grid take any number of steps per parent step
+- Decide on 2D grids for narrow streams
+- Draw placed shallow water grids' dry cells beside water at its surface
+- Carve step-pools and riffle-pools into baked river beds
+- Add a dry mode that keeps a raised stream's surface out into its banks
+- Time momentum-conserving advection against MacCormack
+- Flag waterfall lips whose free fall outruns the velocity clamp
+- Add momentum-conserving advection to the shallow water solver
+- Test dam-break bores and dry fronts against Stoker and Ritter
+- Add a wake view to the boat example's chase camera
+- Wait for every pipeline to compile before the dispersive body tests start
+- Keep the shallow water overshoot limiter from wetting dry cells
+- Add the river solver, river meshing and river realism research spikes
+- Test the GPU FFT against a CPU DFT and its own inverse
+- Run every FFT stage of a line in workgroup memory
+- Read each point of the dispersive LOD write's stencil once
+- Stop refiltering the boat example's sky lighting once it settles
+- Share one LOD footprint between the reads of a water lookup
+- Wrap dispersive grid indices without an integer division
+- Press the boat's wake with its whole weight on the plane
+- Speed the boat up to 15 knots and raise the chase camera over its wake
+- Test the boat's speed, course keeping and turning on the GPU
+- Share the boat's physics between the example and its tests
+- Trail foam behind the boat and spray from its hull; document the boat example
+- Show the boat's speed, helm and heading, with a tuning panel
+- Drive the boat with a propeller, a rudder and a skeg
+- Trail a wake patch behind the boat
+- Add a tow knob to the boat example for measuring hull drag
+- Add the boat example: a floating hull with a chase camera
+- Add a procedural boat hull for the boat demo
+- Plan a driveable boat demo
+- Draw the breaker curl as the lip of the wave, in water colours
+- Take turns in the dispersive GPU tests, and drop a flaky one
+- Stop the shared LOD helpers spilling registers
+- Stop the foam kernels spilling registers
+- Throw mist at the foot of waterfalls
+- Record the nested grid's cost in the beach
+- Let floating bodies press on the nested shallow water grid
+- Add underwater repro knobs to the ocean example
+- Add the breaker curl along breaking fronts
+- Steady the breaking front ids
+- Add the unresolved slope variance lane and widen far glitter
+- Add advected flow detail normals
+- Spray water particles off waterfall lips
+- Start rivers from a settled cache
+- Format the particle imports
+- Stir shallow water with moving objects
+- Draw only live water particles
+- Cost out Water Surface Wavelets for long-lived wakes
+- Let free floating bodies settle on shallow water
+- Pad baked terrain tiles at the map's edge
+- Feed the Lumahai River into the beach
+- Test that ambient swell rests against a hull on the wake patch
+- Document the water particles
+- Budget the water particles
+- Make the water particles look like spray
+- Splash floating bodies into the water particles
+- Emit spray from breaking crests on the GPU
+- Land water particles on the surface and deposit foam
+- Add a GPU pool of water particles
+- Show bodies in shallow water in a pool example
+- Keep the ocean's short waves and whitecaps on shallow water grids
+- Skip LOD texture reads that never reach the output
+- Stop scaling inflow by the edge cell's outflow limit
+- Check a settled river's banks
+- Nest a camera-following grid in the plugin and the beach
+- Move a nested shallow water grid over world bathymetry
+- Nest a fine shallow water grid inside a coarse one
+- Let a river run through a shallow water grid
+- Keep short waves alive in deep mode, and check the Kelvin angle
+- Let a dispersive patch follow a moving point by whole cells
+- Stop a still hull radiating waves on a deep-mode patch
+- Put the dispersive hybrid's fluxes on the faces the merge reads
+- Let floating bodies obstruct and press a dispersive patch
+- Run the wake in deep mode with a hull-like brush
+- Add an Airy-only deep mode to the dispersive patch
+- Trim the dispersive patch's edges
+- Couple floating bodies into shallow water
+- Float bodies on the ocean with Rapier
+- Evaluate water forces on floating bodies on the GPU
+- Voxelize floating bodies on the CPU
+- Trace breaking fronts into tracked lines
+- Restructure the README
+- Add a TopoBathy terrain bake tool
+- Build the docs without warnings
+- Describe the water work in the changelog and the beach switches in the README
+- Let BEACH_CAMERA place the beach camera
+- Pass fmt and clippy on every target
+- Run the beach grid with 2 m cells by default
+- Make the water traces' march step count a setting
+- Pass the water optics only the surface fields they read
+- Let the beach grid run with coarser cells
+- Pick the LOD slices once per water pixel
+- Light the water surface without Bevy's full PBR lighting
+- Add beads issue tracking for Claude
+- Dispatch the shallow water forcing over its edge bands only
+- Stage each cell's movable depth once per shallow water step
+- Skip the foam pattern where a pixel quad has no foam
+- Let any solver's heightfield blend into the water LOD data
+- Carry depth with an optional second-order flux, and limit each cell's outflow
+- Take out shallow water changes that were committed by mistake
+- Measure light under water from the mesh plane in both the underside and the medium pass
+- Darken a meniscus line where the near plane cuts the water
+- Draw foam seen from below as a diffusing layer that passes the sky it does not reflect
+- Draw the sun through Snell's window with Walter's rough refraction
+- Trace caustics onto several receiver depths and blend the two around each point
+- Split the shallow water solver into a core other crates can step
+- Dim sunlight along its refracted beam on the way down to beds seen from either side
+- Take Jerlov absorption and scattering from Solonenko and Mobley's tables
+- Break near-range waves on the Jacobian determinant like the far range
+- Keep ocean query results paired when the GPU runs dozens of frames behind
+- Light beds seen from above water with the caustic map
+- Advect foam texture coordinates per texel with Neyret's deformation-weighted layers
+- Draw light shafts under focusing waves from the caustic map
+- Light scene points under water with the caustic map
+- Add a caustic map that refracts sun rays through the surface onto a receiver
+- Add shadowed single scattering of the refracted sun under water
+- Fill the view from under water with Monzon et al.'s multiple-scattering medium
+- Draw the water surface from below with Snell's window and total internal reflection
+- Add a waterline mask and eye height for the water viewer
+- Add far-range whitecaps from Dupuy and Bruneton's erf coverage
+- Keep foam off where the sim has none
+- Carry the foam texture with the drift in two flow phases
+- Render foam per pixel by thresholding a procedural foam texture
+- Break ocean waves on the summed cascade Jacobian and calibrate whitecaps against Monahan and Woolf
+- Use field init shorthand for the hull speed
+- Feed the foam sim with breaking rates from every solver
+- Carry foam between frames on the water LOD slices
+- Add a drift array to the water LOD data
+- Give the ocean cascades full 2D horizontal displacement
+- Take water extinction from Jerlov water types
+- Fade ocean whitecaps with a half-life in seconds and start them from the smaller Jacobian eigenvalue
+- Light the beach ground in bevy_terrain's deferred lighting pass
+- Mesh the beach ground with coarser terrain tiles
+- Filter the beach sky light once and keep it
+- Share wrapped bilinear taps across each ocean cascade's textures
+- Estimate the replaced water reflection from one environment map sample
+- Shorten the water's screen-space traces to 12 march and 5 bisection steps
+- Format the beach example imports
+- Drop screen-space reflections from the beach camera
+- Update bevy_terrain for the faster terrain shadow map
+- Drop the unused height-mask discard so Apple GPUs keep hidden surface removal on the coast
+- March water rays in clip space and light the surface once
+- Skip near-zero triplanar projections in the coastal ground material
+- Mark steep shallow water fronts with depth-limited breaking foam
+- Warp coastal class lookups so label edges render as irregular outlines
+- Render coastal water over opaque terrain with depth-aware transmission
+- Shade the Kauai coast with classified PBR materials and persistent sand wetness
+- Select water quadtree tiles on the GPU and draw them indirectly
+- Enable beach SSR and terrain self shadows
+- Stabilize water LOD rendering and seed shallow water from ocean waves
+- Keep the water visible when switching between clipmap and quadtree
+- Take example screenshots without opening a window
+- Make water surface LOD reads about 5x cheaper
+- Cut beach GPU time: edge-only ocean forcing and fewer water fetches
+- Capture example screenshots from an offscreen image
+- Simulate the whole Kauai map and fade water past the LOD data
+- Put the beach example on Kauai LiDAR terrain drawn by bevy_terrain
+- Force the shallow water deep edge from the FFT ocean's long waves
+- Add a quadtree water mesh with distance LOD and frustum culling
+- Add a flow channel to the water LOD data and move the surface material
+- Write shallow water and dispersive patches into the water LOD data
+- Add shared water LOD data and render the ocean through it
+- Add camera-following ocean clipmap and fix query height lane
+- Add GPU ocean height queries with async readback
+- Support several FFT sources and add ocean cascades
+- Add finite-depth dispersion, TMA and swell to the ocean spectrum
+
 ### Added
 
 - `WaterQuadtree::extent` limits the quadtree to a world XZ rectangle, such as a heightfield's map, in both the GPU and the CPU selector. Without it, a heightfield-only scene draws open water past its LOD slices out to the horizon.
