@@ -5,8 +5,10 @@
 // water depth lane. Flow follows the same mode, with velocity from the solver's flux and the
 // vertical lane from mass conservation. Drift takes the solver's velocity in replace mode. In add
 // mode the patch carries only waves on top of the water below, so drift stays as it was. The
-// foam lane gets the breaking intensity of CMF10 fronts in the patch and of the water a moving hull
-// pushes aside. Both modes fade out along the patch edge over `blend_cells`. The data below comes
+// foam lane gets the breaking intensity of the patch's crests, by the CMF10 test with the slope
+// band of a breaking deep-water wave, and of the water a moving hull pushes aside. With the bore
+// band of the shallow solvers, the diverging waves of a boat's wake broke along their whole
+// length and covered the Kelvin wedge in foam. Both modes fade out along the patch edge over `blend_cells`. The data below comes
 // from a scratch copy made just before this pass.
 //
 // In add mode the patch also modulates the short waves of the data below, as a long wave strains
@@ -15,7 +17,7 @@
 // foam lane's alpha takes that factor, and the resolved slopes shorter than the patch's waves take
 // its square root.
 
-import bevy_fft::water::breaking::{breaking_front, max_abs};
+import bevy_fft::water::breaking::{breaking_crest, max_abs};
 import bevy_fft::water::lod::{WaterLodSlices, lod_texel_world};
 
 const BLEND_REPLACE: u32 = 1u;
@@ -244,7 +246,7 @@ fn dispersive_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     let h = span * params.cell_size;
     let steepest = length(vec2<f32>(max_abs(ex.x - eta, eta - ex.y), max_abs(ez.x - eta, eta - ez.y))) / h;
     let curvature = (ex.x + ex.y + ez.x + ez.y - 4.0 * eta) / (h * h);
-    let breaking = max(breaking_front(steepest, rise, curvature), hull_foam(g)) * w;
+    let breaking = max(breaking_crest(steepest, rise, curvature), hull_foam(g)) * w;
     if params.blend == BLEND_REPLACE {
         let surface = vec4<f32>(slope, params.datum + eta, 0.0);
         textureStore(displacement_out, gid.xy, slice, mix(base, surface, w));

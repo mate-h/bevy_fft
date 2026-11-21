@@ -32,6 +32,21 @@ fn breaking_front(slope: f32, rise: f32, curvature: f32) -> f32 {
     return steep * rising * crest;
 }
 
+/// Surface slope across which a deep-water crest breaks. The steepest Stokes wave has a 120 degree
+/// crest, a slope of tan 30 = 0.58 on either side of it, and crests start to spill a little before
+/// that. The bore band above starts at slopes the waves of a boat's wake reach without breaking.
+const DEEP_STEEP_START: f32 = 0.35;
+const DEEP_STEEP_END: f32 = 0.55;
+
+/// Breaking on a deep-water crest: the CMF10 test with the steepness band of a breaking Stokes
+/// wave instead of a bore's.
+fn breaking_crest(slope: f32, rise: f32, curvature: f32) -> f32 {
+    let steep = smoothstep(DEEP_STEEP_START, DEEP_STEEP_END, slope);
+    let rising = smoothstep(RISE_START, RISE_END, rise);
+    let crest = 1.0 - smoothstep(CREST_CURVATURE, 0.0, curvature);
+    return steep * rising * crest;
+}
+
 /// Foam where a bore runs into thin water on the beach. `depth` is the water column in meters.
 fn breaking_swash(rise: f32, depth: f32) -> f32 {
     return smoothstep(RISE_START, RISE_END, rise) * (1.0 - smoothstep(SWASH_DEPTH_START, SWASH_DEPTH_END, depth));
