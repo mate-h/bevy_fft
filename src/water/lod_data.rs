@@ -65,7 +65,9 @@ pub struct WaterLodSlices {
     /// Wind direction in radians on XZ. The base writer sets it, which for the FFT ocean is the
     /// wind its spectrum was built for.
     pub wind_direction: f32,
-    pub _pad1: u32,
+    /// Which half of [`WaterLodData::foam_state`] and [`WaterLodData::foam_flow`] the foam sim
+    /// writes this frame, 0 or 1. It flips every frame.
+    pub foam_half: u32,
 }
 
 /// Camera-centred LOD texture arrays and where each slice currently sits.
@@ -95,9 +97,15 @@ pub struct WaterLodSlices {
 ///
 /// `foam_state` is not written by solvers. The foam sim in [`super::WaterFoamSettings`] keeps it,
 /// with active foam in its red channel, residual foam in green and the air fraction of the water
-/// column in blue, carried over from frame to frame. It uses [`super::WATER_FOAM_STATE_FORMAT`]. The foam sim also keeps `foam_flow`, the
+/// column in blue, carried over from frame to frame. Alpha holds the sim's time when it wrote the
+/// texel. It uses [`super::WATER_FOAM_STATE_FORMAT`]. The foam sim also keeps `foam_flow`, the
 /// advected texture coordinates of the foam pattern, with [`WATER_FOAM_FLOW_LAYERS_PER_SLICE`]
 /// layers per slice in [`WATER_FOAM_FLOW_FORMAT`]. `foam_flow.wesl` describes its layout.
+///
+/// Both hold two frames, so the sim reads one while it writes the other without a copy: this
+/// frame's slices start at layer `slices.foam_half * count` of `foam_state` and at layer
+/// `slices.foam_half * count * WATER_FOAM_FLOW_LAYERS_PER_SLICE` of `foam_flow`, where `count` is
+/// `slices.count`. Readers add that offset.
 #[derive(Resource, Clone, ExtractResource)]
 #[extract_app(RenderApp)]
 pub struct WaterLodData {
@@ -223,11 +231,16 @@ pub(super) fn create_water_lod_data(
         flow: images.add(lod_array_image(&settings, TextureFormat::Rgba32Float)),
         drift: images.add(lod_array_image(&settings, WATER_LOD_DRIFT_FORMAT)),
         aeration: images.add(lod_array_image(&settings, WATER_LOD_AERATION_FORMAT)),
-        foam_state: images.add(lod_array_image(&settings, super::WATER_FOAM_STATE_FORMAT)),
+        // Two frames each; see `foam_half`.
+        foam_state: images.add(lod_layers_image(
+            &settings,
+            super::WATER_FOAM_STATE_FORMAT,
+            2,
+        )),
         foam_flow: images.add(lod_layers_image(
             &settings,
             WATER_FOAM_FLOW_FORMAT,
-            WATER_FOAM_FLOW_LAYERS_PER_SLICE,
+            2 * WATER_FOAM_FLOW_LAYERS_PER_SLICE,
         )),
         slices,
     });
@@ -256,6 +269,7 @@ pub(super) fn update_water_lod_slices(
     }
     slices.count = count;
     slices.resolution = settings.resolution;
+    slices.foam_half ^= 1;
     data.slices = slices;
 }
 

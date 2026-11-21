@@ -14,7 +14,10 @@ struct WaterLodSlices {
     resolution: u32,
     /// Wind direction in radians on XZ, set by the base writer.
     wind_direction: f32,
-    _pad1: u32,
+    /// Which half of the foam state and foam flow arrays holds this frame. Both hold two frames,
+    /// and the foam sim writes one while it reads the other, so this frame's slices start at
+    /// layer `foam_half * count * layers_per_slice`.
+    foam_half: u32,
 }
 
 /// Placement of slice `i`, with a constant index in each branch. The helpers here take the slices

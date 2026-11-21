@@ -207,7 +207,8 @@ fn foam_correct(@builtin(global_invocation_id) gid: vec3<u32>) {
     let residual = foam.y * params.residual_decay + foam.x * params.residual_gain
         + breaking * params.source_residual + surfaced * params.air_foam;
     let result = saturate(vec3<f32>(fresh, residual, air));
-    textureStore(foam_out, gid.xy, slice, vec4<f32>(result, 0.0));
+    // The time stamps which half of the two-frame state array is newer.
+    textureStore(foam_out, gid.xy, slice, vec4<f32>(result, params.time));
 }
 
 /// The three flow layers of one slice at a lookup, bilinearly blended, or nothing found.

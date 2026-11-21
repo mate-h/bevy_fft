@@ -291,19 +291,53 @@ impl FromWorld for WaterFoamPipeline {
 }
 
 struct FoamArray {
-    texture: Texture,
     view: TextureView,
 }
 
-/// Render-world working arrays and bind groups. `forward` holds the semi-Lagrangian step and
-/// `corrected` the finished foam, which is copied into [`WaterLodData::foam_state`] at the end.
-/// `flow` holds the advected texture coordinates, copied into [`WaterLodData::foam_flow`].
+/// Views of one half of a [`WaterLodData`] array that holds two frames, for reading last frame's
+/// half and writing this frame's.
+struct HalfViews {
+    texture: TextureId,
+    /// Per half, the slices of that half as a 2D array.
+    halves: [TextureView; 2],
+}
+
+impl HalfViews {
+    fn new(texture: &Texture) -> Self {
+        let half = texture.depth_or_array_layers() / 2;
+        let view = |i: u32| {
+            texture.create_view(&TextureViewDescriptor {
+                dimension: Some(TextureViewDimension::D2Array),
+                base_array_layer: i * half,
+                array_layer_count: Some(half),
+                ..default()
+            })
+        };
+        Self {
+            texture: texture.id(),
+            halves: [view(0), view(1)],
+        }
+    }
+
+    fn refresh(slot: &mut Option<Self>, texture: &Texture) -> bool {
+        if slot.as_ref().is_some_and(|v| v.texture == texture.id()) {
+            return false;
+        }
+        *slot = Some(Self::new(texture));
+        true
+    }
+}
+
+/// Render-world working array and bind groups. `forward` holds the semi-Lagrangian step. The
+/// corrected foam and the advected texture coordinates go straight into this frame's half of
+/// [`WaterLodData::foam_state`] and [`WaterLodData::foam_flow`], which hold two frames each, and
+/// the sim reads last frame's half.
 #[derive(Resource, Default)]
 pub struct WaterFoamSim {
-    arrays: Option<[FoamArray; 2]>,
-    flow: Option<FoamArray>,
+    forward: Option<FoamArray>,
+    state_halves: Option<HalfViews>,
+    flow_halves: Option<HalfViews>,
     size: Extent3d,
-    flow_size: Extent3d,
     /// Whether the flow pass has run on the current flow array.
     flow_seeded: bool,
     params: UniformBuffer<WaterFoamParams>,
@@ -346,7 +380,7 @@ fn foam_array(
         dimension: Some(TextureViewDimension::D2Array),
         ..default()
     });
-    FoamArray { texture, view }
+    FoamArray { view }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -375,28 +409,22 @@ pub(super) fn prepare_water_foam(
     ) else {
         return;
     };
-    let size = state.texture_descriptor.size;
-    if sim.arrays.is_none() || sim.size != size {
-        sim.arrays = Some([
-            foam_array(&device, size, WATER_FOAM_STATE_FORMAT, "water_foam_forward"),
-            foam_array(
-                &device,
-                size,
-                WATER_FOAM_STATE_FORMAT,
-                "water_foam_corrected",
-            ),
-        ]);
+    // One half of the state array: this frame's slices.
+    let size = Extent3d {
+        depth_or_array_layers: state.texture_descriptor.size.depth_or_array_layers / 2,
+        ..state.texture_descriptor.size
+    };
+    if sim.forward.is_none() || sim.size != size {
+        sim.forward = Some(foam_array(
+            &device,
+            size,
+            WATER_FOAM_STATE_FORMAT,
+            "water_foam_forward",
+        ));
         sim.size = size;
     }
-    let flow_size = flow.texture_descriptor.size;
-    if sim.flow.is_none() || sim.flow_size != flow_size {
-        sim.flow = Some(foam_array(
-            &device,
-            flow_size,
-            WATER_FOAM_FLOW_FORMAT,
-            "water_foam_flow",
-        ));
-        sim.flow_size = flow_size;
+    HalfViews::refresh(&mut sim.state_halves, &state.texture);
+    if HalfViews::refresh(&mut sim.flow_halves, &flow.texture) {
         sim.flow_seeded = false;
     }
     let deposit_len =
@@ -425,14 +453,21 @@ pub(super) fn prepare_water_foam(
     let Some(params) = sim.params.binding() else {
         return;
     };
-    let (Some([forward, corrected]), Some(flow_out), Some(deposit)) =
-        (&sim.arrays, &sim.flow, &sim.deposit.buffer)
-    else {
+    let (Some(forward), Some(state_halves), Some(flow_halves), Some(deposit)) = (
+        &sim.forward,
+        &sim.state_halves,
+        &sim.flow_halves,
+        &sim.deposit.buffer,
+    ) else {
         return;
     };
+    // This frame writes half `now` and reads last frame's, the other one.
+    let now = lod.slices.foam_half as usize & 1;
+    let (state_in, state_out) = (&state_halves.halves[1 - now], &state_halves.halves[now]);
+    let (flow_in, flow_out) = (&flow_halves.halves[1 - now], &flow_halves.halves[now]);
     let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
-    // The forward pass never reads `forward_foam`, so it binds the corrected array there to keep
-    // the layout shared.
+    // The forward pass never reads `forward_foam`, so it binds this frame's state half there to
+    // keep the layout shared; the forward pass doesn't write it.
     let group = |forward_in: &TextureView, out: &TextureView| {
         device.create_bind_group(
             "water_foam_bind_group",
@@ -440,21 +475,21 @@ pub(super) fn prepare_water_foam(
             &BindGroupEntries::sequential((
                 params.clone(),
                 slices.clone(),
-                &state.texture_view,
+                state_in,
                 forward_in,
                 &source.texture_view,
                 &drift.texture_view,
                 out,
-                &flow.texture_view,
-                &flow_out.view,
+                flow_in,
+                flow_out,
                 deposit.as_entire_buffer_binding(),
                 &aeration.texture_view,
             )),
         )
     };
     let groups = [
-        group(&corrected.view, &forward.view),
-        group(&forward.view, &corrected.view),
+        group(state_out, &forward.view),
+        group(&forward.view, state_out),
     ];
     sim.groups = Some(groups);
     let res = lod.slices.resolution;
@@ -466,12 +501,8 @@ pub(super) fn run_water_foam(
     pipeline: Res<WaterFoamPipeline>,
     cache: Res<PipelineCache>,
     sim: Res<WaterFoamSim>,
-    lod: Option<Res<WaterLodData>>,
-    images: Res<RenderAssets<GpuImage>>,
 ) {
-    let (Some(groups), Some(arrays), Some(flow_array), Some(lod)) =
-        (&sim.groups, &sim.arrays, &sim.flow, lod)
-    else {
+    let Some(groups) = &sim.groups else {
         return;
     };
     let (Some(forward), Some(correct), Some(flow)) = (
@@ -479,10 +510,6 @@ pub(super) fn run_water_foam(
         cache.get_compute_pipeline(pipeline.correct),
         cache.get_compute_pipeline(pipeline.flow),
     ) else {
-        return;
-    };
-    let (Some(state), Some(flow_state)) = (images.get(&lod.foam_state), images.get(&lod.foam_flow))
-    else {
         return;
     };
     let diagnostics = ctx.diagnostic_recorder();
@@ -504,16 +531,6 @@ pub(super) fn run_water_foam(
         pass.set_pipeline(flow);
         pass.dispatch_workgroups(d.x, d.y, d.z);
     }
-    encoder.copy_texture_to_texture(
-        arrays[1].texture.as_image_copy(),
-        state.texture.as_image_copy(),
-        sim.size,
-    );
-    encoder.copy_texture_to_texture(
-        flow_array.texture.as_image_copy(),
-        flow_state.texture.as_image_copy(),
-        sim.flow_size,
-    );
     if let Some(deposit) = &sim.deposit.buffer {
         encoder.clear_buffer(deposit, 0, None);
     }

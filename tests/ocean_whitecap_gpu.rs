@@ -120,8 +120,16 @@ fn ocean_app(wind_speed: f32, surface: OceanSurfaceSettings) -> App {
     app
 }
 
+/// The newer of the two frames the foam state array holds, by the sim time stamped in alpha.
+fn newest_half(bytes: &[u8]) -> &[u8] {
+    let (a, b) = bytes.split_at(bytes.len() / 2);
+    let stamp = |half: &[u8]| f32::from_le_bytes(half[12..16].try_into().unwrap());
+    if stamp(b) > stamp(a) { b } else { a }
+}
+
 /// Mean active foam and mean total foam over slice `slice` of a foam state readback.
 fn slice_mean(bytes: &[u8], slice: usize) -> Vec2 {
+    let bytes = newest_half(bytes);
     let layer = bytes.len() / SLICES;
     let texels = &bytes[slice * layer..(slice + 1) * layer];
     let lane = |o: usize| f32::from_le_bytes(texels[o..o + 4].try_into().unwrap());

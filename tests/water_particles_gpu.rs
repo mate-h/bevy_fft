@@ -261,7 +261,7 @@ fn a_particle_lands_on_still_water_and_foams_its_texel() {
         p.position
     );
 
-    let bytes = &app.world().resource::<FoamCapture>().bytes;
+    let bytes = newest_half(&app.world().resource::<FoamCapture>().bytes);
     let row = bytes.len() / RES as usize;
     let active = |x: u32, y: u32| {
         let o = y as usize * row + x as usize * 16;
@@ -425,4 +425,11 @@ fn the_counters_read_back_only_when_asked() {
     }
     let stats = *app.world().resource::<WaterParticleStats>();
     assert_eq!((stats.spawned, stats.died, stats.alive), (10, 0, 10));
+}
+
+/// The newer of the two frames the foam state array holds, by the sim time stamped in alpha.
+fn newest_half(bytes: &[u8]) -> &[u8] {
+    let (a, b) = bytes.split_at(bytes.len() / 2);
+    let stamp = |half: &[u8]| f32::from_le_bytes(half[12..16].try_into().unwrap());
+    if stamp(b) > stamp(a) { b } else { a }
 }

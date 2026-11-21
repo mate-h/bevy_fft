@@ -45,9 +45,10 @@ fn next_capture(app: &mut App) -> Vec<u8> {
     app.world().resource::<Capture>().bytes.clone()
 }
 
-/// The four lanes of flow layer `layer` at texel `(x, y)`.
+/// The four lanes of flow layer `layer` at texel `(x, y)`. The flow array holds two frames; this
+/// reads the first, which is enough since every check compares lanes of one frame.
 fn texel(bytes: &[u8], layer: usize, x: usize, y: usize) -> Vec4 {
-    let row = bytes.len() / (RES * LAYERS);
+    let row = bytes.len() / (2 * RES * LAYERS);
     let o = (layer * RES + y) * row + x * 16;
     let lane = |i: usize| f32::from_le_bytes(bytes[o + i..o + i + 4].try_into().unwrap());
     Vec4::new(lane(0), lane(4), lane(8), lane(12))

@@ -260,7 +260,7 @@ struct WaterLodSurface {
 /// coarsest slice.
 fn water_lod_surface(pick: LodPick) -> WaterLodSurface {
     let f = sample_pick_filtered(lod_foam, lod_sampler, pick);
-    let state = sample_pick(lod_foam_state, pick, 1u, 0u);
+    let state = sample_pick(lod_foam_state, pick, 1u, water_lod.foam_half * water_lod.count);
     let c = pick.coverage;
     return WaterLodSurface(
         state.rg * c,
@@ -351,7 +351,8 @@ struct WaterFoamFlow {
 
 /// One flow array layer of the slice pair `sample_lod` would pick at `xz`.
 fn water_foam_flow_layer(pick: LodPick, layer: u32) -> vec4<f32> {
-    return sample_pick(lod_foam_flow, pick, FOAM_FLOW_LAYERS_PER_SLICE, layer);
+    let half = water_lod.foam_half * water_lod.count * FOAM_FLOW_LAYERS_PER_SLICE;
+    return sample_pick(lod_foam_flow, pick, FOAM_FLOW_LAYERS_PER_SLICE, half + layer);
 }
 
 fn water_foam_flow(pick: LodPick) -> WaterFoamFlow {

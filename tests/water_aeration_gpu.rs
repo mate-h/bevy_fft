@@ -176,7 +176,7 @@ fn state_profile(app: &mut App, seconds: f32) -> Vec<Vec3> {
         step(app);
         assert!(Instant::now() < deadline, "foam state readback timed out");
     }
-    let bytes = &app.world().resource::<Capture>().bytes;
+    let bytes = newest_half(&app.world().resource::<Capture>().bytes);
     let res = CELLS as usize;
     let row = bytes.len() / res;
     let y = res / 2;
@@ -194,6 +194,13 @@ fn state_profile(app: &mut App, seconds: f32) -> Vec<Vec3> {
 /// Texel index of world X on the one 1 m slice centred on the origin.
 fn texel(x: f32) -> usize {
     (x + CELLS as f32 / 2.0).floor() as usize
+}
+
+/// The newer of the two frames the foam state array holds, by the sim time stamped in alpha.
+fn newest_half(bytes: &[u8]) -> &[u8] {
+    let (a, b) = bytes.split_at(bytes.len() / 2);
+    let stamp = |half: &[u8]| f32::from_le_bytes(half[12..16].try_into().unwrap());
+    if stamp(b) > stamp(a) { b } else { a }
 }
 
 /// Checks a jump at inflow Froude number `froude` peaks at its face with an air fraction in

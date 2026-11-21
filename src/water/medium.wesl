@@ -11,7 +11,10 @@
 import bevy_core_pipeline::fullscreen_vertex_shader::FullscreenVertexOutput;
 import bevy_pbr::render::mesh_view_bindings::{view, lights};
 import bevy_pbr::render::view_transformations::position_ndc_to_world;
-import bevy_fft::water::lod::{WaterLodSlices, displaced_height, lod_coverage, sample_lod, sample_lod_filtered};
+import bevy_fft::water::lod::{
+    WaterLodSlices, displaced_height, lod_coverage, lod_pick, sample_lod_filtered,
+    sample_pick,
+};
 import bevy_fft::water::aeration::aerated_scattering;
 import bevy_render::maths::PI;
 import bevy_fft::water::underside::{
@@ -95,7 +98,9 @@ fn water_column(xz: vec2<f32>) -> f32 {
 
 /// Air fraction of the water column under `xz`, from the foam sim.
 fn water_air(xz: vec2<f32>) -> f32 {
-    return max(sample_lod(lod_foam_state, lod, xz, 0.0).b, 0.0) * lod_coverage(lod, xz);
+    let pick = lod_pick(lod, xz, 0.0);
+    let state = sample_pick(lod_foam_state, pick, 1u, lod.foam_half * lod.count);
+    return max(state.b, 0.0) * lod_coverage(lod, xz);
 }
 
 /// Light scattered around inside the bubbles of white water `depth` meters below the surface. The

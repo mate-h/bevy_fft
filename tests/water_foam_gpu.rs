@@ -38,8 +38,16 @@ fn next_capture(app: &mut App) -> Vec<u8> {
     app.world().resource::<Capture>().bytes.clone()
 }
 
+/// The newer of the two frames the foam state array holds, by the sim time stamped in alpha.
+fn newest_half(bytes: &[u8]) -> &[u8] {
+    let (a, b) = bytes.split_at(bytes.len() / 2);
+    let stamp = |half: &[u8]| f32::from_le_bytes(half[12..16].try_into().unwrap());
+    if stamp(b) > stamp(a) { b } else { a }
+}
+
 /// Active and residual foam per texel, row by row.
 fn foam_texels(bytes: &[u8]) -> Vec<Vec2> {
+    let bytes = newest_half(bytes);
     let row = bytes.len() / RES;
     (0..RES)
         .flat_map(|y| {
