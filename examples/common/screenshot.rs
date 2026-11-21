@@ -52,11 +52,9 @@ pub fn default_plugins() -> PluginGroupBuilder {
     // the app stops updating after startup (seen on X11 under Xvfb on a headless NVIDIA box).
     // There a plain loop drives the frames instead.
     #[cfg(target_os = "linux")]
-    let plugins = plugins
-        .disable::<bevy::winit::WinitPlugin>()
-        .add(bevy::app::ScheduleRunnerPlugin::run_loop(
-            std::time::Duration::ZERO,
-        ));
+    let plugins = plugins.disable::<bevy::winit::WinitPlugin>().add(
+        bevy::app::ScheduleRunnerPlugin::run_loop(std::time::Duration::ZERO),
+    );
     plugins
 }
 
