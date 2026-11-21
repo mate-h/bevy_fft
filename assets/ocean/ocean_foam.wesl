@@ -16,7 +16,7 @@ struct OceanFoamParams {
 @group(0) @binding(3) var carry_prev: texture_storage_2d<rgba32float, read>;
 /// Horizontal displacement Z in `.g`, and the change since last frame of displacement X in `.r`,
 /// Z in `.b` and height in `.a`.
-@group(0) @binding(4) var foam_out: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(4) var foam_out: texture_storage_2d<rgba16float, write>;
 /// Level 0 of this cascade's Jacobian statistics: Dupuy and Bruneton's term in `.r`, its square
 /// in `.g`.
 @group(0) @binding(5) var jacobian_out: texture_storage_2d<rgba16float, write>;

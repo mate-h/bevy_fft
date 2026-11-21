@@ -182,8 +182,8 @@ impl ExtractComponent<RenderApp> for OceanFoamUniform {
 
 /// Ping-pong targets written after [`crate::fft::FftNode::ResolveOutputs`]: horizontal
 /// displacement Z in G, and the change since the previous frame of displacement X in R, Z in B and
-/// height in A. The LOD writer turns the changes into orbital velocity, so it needs no copy of last
-/// frame's displacement. `carry_a` and `carry_b` keep last frame's raw X, Z and height for those
+/// height in A, as [`OCEAN_FOAM_FORMAT`] half floats. The LOD writer turns the changes into orbital
+/// velocity, so it needs no copy of last frame's displacement. `carry_a` and `carry_b` keep last frame's raw X, Z and height for those
 /// changes, with A set once they hold a frame.
 ///
 /// `jacobian` holds this cascade's term of the Jacobian determinant for far whitecaps, after
@@ -250,6 +250,10 @@ pub struct OceanFoamLabel;
 
 /// Format of [`OceanFoamMask::jacobian`]. Filterable, so readers get trilinear filtering.
 pub const OCEAN_JACOBIAN_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
+/// Format of each cascade's foam texture: displacement Z and the per-frame change of X, Z and
+/// height. The LOD writer reads it with gradients at every water LOD texel and is bound by those
+/// reads, and its outputs are half floats too.
+pub const OCEAN_FOAM_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 
 #[derive(Resource)]
 pub struct OceanFoamPipelines {
@@ -271,7 +275,7 @@ impl FromWorld for OceanFoamPipelines {
                 texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadOnly),
                 texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadOnly),
                 texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadOnly),
-                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
+                texture_storage_2d(OCEAN_FOAM_FORMAT, StorageTextureAccess::WriteOnly),
                 texture_storage_2d(OCEAN_JACOBIAN_FORMAT, StorageTextureAccess::WriteOnly),
                 texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
             ),
@@ -483,22 +487,22 @@ pub(super) fn prepare_ocean_foam_mask_image(
             height: source.size.y,
             depth_or_array_layers: 1,
         };
-        let mut make_tex = || {
+        let mut make_tex = |format: TextureFormat| {
             let mut image = Image::new_fill(
                 extent,
                 TextureDimension::D2,
-                &[0; 16],
-                TextureFormat::Rgba32Float,
+                &vec![0; format.block_copy_size(None).unwrap() as usize],
+                format,
                 RenderAssetUsages::default(),
             );
             image.texture_descriptor.usage =
                 TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING;
             images.add(image)
         };
-        let texture_a = make_tex();
-        let texture_b = make_tex();
-        let carry_a = make_tex();
-        let carry_b = make_tex();
+        let texture_a = make_tex(OCEAN_FOAM_FORMAT);
+        let texture_b = make_tex(OCEAN_FOAM_FORMAT);
+        let carry_a = make_tex(TextureFormat::Rgba32Float);
+        let carry_b = make_tex(TextureFormat::Rgba32Float);
         let mut jacobian = Image::new_uninit(
             extent,
             TextureDimension::D2,
