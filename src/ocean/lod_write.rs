@@ -95,7 +95,7 @@ pub(super) fn gather_ocean_lod_write(
 
     let mut slots: Vec<_> = cascades
         .iter()
-        .filter_map(|(sim, tex, mask, phase, cascade, drift, variance)| {
+        .filter_map(|(sim, _, mask, phase, cascade, drift, variance)| {
             let slot = cascade.map_or(0, |c| c.index as usize);
             // Same half that `sync_ocean_foam_display` treats as most recent.
             let latest = if phase.0 % 2 == 0 {
@@ -107,7 +107,7 @@ pub(super) fn gather_ocean_lod_write(
                 (
                     slot,
                     sim.tile_size,
-                    tex.spatial_output.clone(),
+                    mask.displacement.clone(),
                     latest.clone(),
                     sim.depth,
                     sim.time_scale,

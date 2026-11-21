@@ -21,6 +21,8 @@ struct OceanFoamParams {
 /// in `.g`.
 @group(0) @binding(5) var jacobian_out: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(6) var carry_out: texture_storage_2d<rgba32float, write>;
+/// Half-float copy of `spatial_in` for the LOD writer, which is bound by its texture reads.
+@group(0) @binding(7) var displacement_out: texture_storage_2d<rgba16float, write>;
 
 fn wrap_ix(i: i32, n: u32) -> i32 {
     let nn = i32(n);
@@ -54,6 +56,7 @@ fn ocean_jacobian_foam(@builtin(global_invocation_id) gid: vec3<u32>) {
     let carried = textureLoad(carry_prev, p);
     let change = select(vec3<f32>(0.0), now - carried.xyz, carried.w > 0.5);
     textureStore(carry_out, p, vec4<f32>(now, 1.0));
+    textureStore(displacement_out, p, spatial);
     textureStore(foam_out, p, vec4<f32>(change.x, dz, change.y, change.z));
 
     let scale = params.chop * 0.5 * f32(n) / params.tile_size;

@@ -183,8 +183,11 @@ impl ExtractComponent<RenderApp> for OceanFoamUniform {
 /// Ping-pong targets written after [`crate::fft::FftNode::ResolveOutputs`]: horizontal
 /// displacement Z in G, and the change since the previous frame of displacement X in R, Z in B and
 /// height in A, as [`OCEAN_FOAM_FORMAT`] half floats. The LOD writer turns the changes into orbital
-/// velocity, so it needs no copy of last frame's displacement. `carry_a` and `carry_b` keep last frame's raw X, Z and height for those
-/// changes, with A set once they hold a frame.
+/// velocity, so it needs no copy of last frame's displacement. `carry_a` and `carry_b` keep last
+/// frame's raw X, Z and height for those changes, with A set once they hold a frame.
+///
+/// `displacement` is a half-float copy of this frame's FFT spatial output (slopes in R and G,
+/// height in B, displacement X in A), which the LOD writer reads in place of the full-float one.
 ///
 /// `jacobian` holds this cascade's term of the Jacobian determinant for far whitecaps, after
 /// Dupuy and Bruneton (2012, Eq. 7): with `a = dDx/dx`, `b = dDz/dz` and the off-diagonal terms
@@ -198,6 +201,7 @@ pub struct OceanFoamMask {
     pub texture_b: Handle<Image>,
     pub carry_a: Handle<Image>,
     pub carry_b: Handle<Image>,
+    pub displacement: Handle<Image>,
     pub jacobian: Handle<Image>,
 }
 
@@ -278,6 +282,7 @@ impl FromWorld for OceanFoamPipelines {
                 texture_storage_2d(OCEAN_FOAM_FORMAT, StorageTextureAccess::WriteOnly),
                 texture_storage_2d(OCEAN_JACOBIAN_FORMAT, StorageTextureAccess::WriteOnly),
                 texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
+                texture_storage_2d(OCEAN_FOAM_FORMAT, StorageTextureAccess::WriteOnly),
             ),
         );
         let layout = BindGroupLayoutDescriptor::new("ocean_foam_layout", &entries);
@@ -503,6 +508,7 @@ pub(super) fn prepare_ocean_foam_mask_image(
         let texture_b = make_tex(OCEAN_FOAM_FORMAT);
         let carry_a = make_tex(TextureFormat::Rgba32Float);
         let carry_b = make_tex(TextureFormat::Rgba32Float);
+        let displacement = make_tex(OCEAN_FOAM_FORMAT);
         let mut jacobian = Image::new_uninit(
             extent,
             TextureDimension::D2,
@@ -525,6 +531,7 @@ pub(super) fn prepare_ocean_foam_mask_image(
             texture_b,
             carry_a,
             carry_b,
+            displacement,
             jacobian: images.add(jacobian),
         });
     }
@@ -652,7 +659,7 @@ const JACOBIAN_LEVELS_PER_DISPATCH: u32 = 5;
 const JACOBIAN_DOWNSAMPLE_GROUP: u32 = 16;
 
 /// What the foam bind group binds: the uniform buffer and offset, and the texture views.
-type FoamGroupKey = (Option<BufferId>, u32, [TextureViewId; 5], TextureId);
+type FoamGroupKey = (Option<BufferId>, u32, [TextureViewId; 6], TextureId);
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_ocean_foam_bind_groups(
@@ -706,6 +713,12 @@ pub(super) fn prepare_ocean_foam_bind_groups(
             gpu_images.get(carry_read).map(|g| &g.texture_view),
             gpu_images.get(carry_write).map(|g| &g.texture_view),
         ) else {
+            continue;
+        };
+        let Some(displacement) = gpu_images
+            .get(&foam_mask.displacement)
+            .map(|g| &g.texture_view)
+        else {
             continue;
         };
         let Some(jacobian) = gpu_images.get(&foam_mask.jacobian) else {
@@ -784,6 +797,7 @@ pub(super) fn prepare_ocean_foam_bind_groups(
                 foam_write.id(),
                 carry_read.id(),
                 carry_write.id(),
+                displacement.id(),
             ],
             jacobian_id,
         );
@@ -802,6 +816,7 @@ pub(super) fn prepare_ocean_foam_bind_groups(
                         foam_write,
                         jacobian_out,
                         carry_write,
+                        displacement,
                     )),
                 );
                 cache.groups.insert((entity, parity), (key, group.clone()));

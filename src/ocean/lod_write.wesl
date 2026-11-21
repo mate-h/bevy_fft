@@ -4,8 +4,9 @@
 // slice once its texels are too coarse for the shorter end of the cascade's band, so coarse slices
 // hold only long waves and never alias.
 //
-// Horizontal displacement X comes from each cascade's FFT output and Z from its foam texture,
-// which also holds each lane's change since the previous frame. Flow is that change.
+// Horizontal displacement X comes from a half-float copy of each cascade's FFT output, which the
+// foam pass writes, and Z from its foam texture, which also holds each lane's change since the
+// previous frame. Flow is that change.
 // Linear waves move each surface particle with the time derivative of its displacement, so this is
 // the orbital velocity. It uses the physical displacement, without the artistic choppiness factor.
 // Drift is the cascades' summed Stokes drift, which the CPU integrates from the spectrum. The foam
