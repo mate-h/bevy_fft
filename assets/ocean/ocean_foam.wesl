@@ -12,12 +12,15 @@ struct OceanFoamParams {
 @group(0) @binding(1) var spatial_in: texture_storage_2d<rgba32float, read>;
 /// Imaginary half of the inverse FFT. `.w` holds horizontal displacement Z.
 @group(0) @binding(2) var spatial_im: texture_storage_2d<rgba32float, read>;
-@group(0) @binding(3) var foam_prev: texture_storage_2d<rgba32float, read>;
-/// Horizontal displacement Z in `.g` and last frame's displacement Z in `.b`.
+/// Last frame's displacement X, Z and height, with `.w` set once it holds a frame.
+@group(0) @binding(3) var carry_prev: texture_storage_2d<rgba32float, read>;
+/// Horizontal displacement Z in `.g`, and the change since last frame of displacement X in `.r`,
+/// Z in `.b` and height in `.a`.
 @group(0) @binding(4) var foam_out: texture_storage_2d<rgba32float, write>;
 /// Level 0 of this cascade's Jacobian statistics: Dupuy and Bruneton's term in `.r`, its square
 /// in `.g`.
 @group(0) @binding(5) var jacobian_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(6) var carry_out: texture_storage_2d<rgba32float, write>;
 
 fn wrap_ix(i: i32, n: u32) -> i32 {
     let nn = i32(n);
@@ -33,7 +36,9 @@ fn load_displacement(ix: i32, iz: i32) -> vec2<f32> {
 }
 
 /// Stores horizontal displacement Z for the LOD writer, since the FFT spatial output has room for
-/// X only, and keeps last frame's Z beside it. The LOD writer finds breaking from these lanes.
+/// X only, and the change of X, Z and height since last frame, from which the LOD writer takes the
+/// orbital velocity. Bilinear filtering is linear, so the writer's filtered change equals the
+/// change of its filtered displacement. The LOD writer finds breaking from these lanes.
 /// Also writes this cascade's term of the Jacobian determinant, `k_i - 1 / n` in Dupuy and
 /// Bruneton (2012, Eq. 7), from central differences, and its square.
 @compute @workgroup_size(8, 8, 1)
@@ -43,9 +48,13 @@ fn ocean_jacobian_foam(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let p = vec2<i32>(gid.xy);
+    let spatial = textureLoad(spatial_in, p);
     let dz = textureLoad(spatial_im, p).w * params.normalization;
-    let prev = textureLoad(foam_prev, p);
-    textureStore(foam_out, p, vec4<f32>(0.0, dz, prev.g, 1.0));
+    let now = vec3<f32>(spatial.w, dz, spatial.z);
+    let carried = textureLoad(carry_prev, p);
+    let change = select(vec3<f32>(0.0), now - carried.xyz, carried.w > 0.5);
+    textureStore(carry_out, p, vec4<f32>(now, 1.0));
+    textureStore(foam_out, p, vec4<f32>(change.x, dz, change.y, change.z));
 
     let scale = params.chop * 0.5 * f32(n) / params.tile_size;
     let d_dx = (load_displacement(p.x + 1, p.y) - load_displacement(p.x - 1, p.y)) * scale;

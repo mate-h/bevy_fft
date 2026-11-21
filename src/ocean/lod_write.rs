@@ -2,8 +2,9 @@
 //!
 //! Flow comes from the change in each cascade's displacement since the previous frame. In linear
 //! wave theory a surface particle moves with the time derivative of its displacement, so the
-//! difference of two frames gives the orbital velocity without extra FFT lanes. The writer keeps a
-//! copy of every cascade's output for the next frame.
+//! difference of two frames gives the orbital velocity without extra FFT lanes. The foam pass
+//! stores that change in each cascade's foam texture (see [`OceanFoamMask`]), so this pass reads it
+//! with the taps it already makes.
 //!
 //! Drift is the summed Stokes drift of the cascades, the same in every texel.
 
@@ -198,10 +199,6 @@ impl FromWorld for OceanLodWritePipeline {
                 tex(),
                 tex(),
                 tex(),
-                tex(),
-                tex(),
-                tex(),
-                tex(),
                 filtered(),
                 filtered(),
                 filtered(),
@@ -239,21 +236,11 @@ impl FromWorld for OceanLodWritePipeline {
     }
 }
 
-/// Last frame's displacement for one cascade slot.
-struct PreviousDisplacement {
-    texture: Texture,
-    view: TextureView,
-    size: Extent3d,
-}
-
 #[derive(Resource, Default)]
 pub struct OceanLodWriteBindGroup {
     group: Option<BindGroup>,
     params: UniformBuffer<OceanLodWriteParams>,
     dispatch: UVec3,
-    previous: Vec<PreviousDisplacement>,
-    /// Pairs of cascade output and previous copy to refresh after the pass.
-    copies: Vec<(Texture, usize)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -269,7 +256,6 @@ pub(super) fn prepare_ocean_lod_write(
     mut state: ResMut<OceanLodWriteBindGroup>,
 ) {
     state.group = None;
-    state.copies.clear();
     let Some(lod) = lod else {
         return;
     };
@@ -307,53 +293,12 @@ pub(super) fn prepare_ocean_lod_write(
         return;
     };
 
-    // A new or resized copy holds no previous frame, so flow stays zero until the next one.
-    let mut params = frame.params;
-    let active = frame.params.cascade_count as usize;
-    state.previous.truncate(OCEAN_MAX_CASCADES);
-    for (i, source) in disp.iter().enumerate().take(OCEAN_MAX_CASCADES) {
-        let size = source.texture_descriptor.size;
-        if state.previous.get(i).is_some_and(|p| p.size == size) {
-            continue;
-        }
-        let texture = device.create_texture(&TextureDescriptor {
-            label: Some("ocean_lod_previous_displacement"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: source.texture_descriptor.format,
-            usage: TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&TextureViewDescriptor::default());
-        let previous = PreviousDisplacement {
-            texture,
-            view,
-            size,
-        };
-        if i < state.previous.len() {
-            state.previous[i] = previous;
-        } else {
-            state.previous.push(previous);
-        }
-        if i < active {
-            params.inv_dt = 0.0;
-        }
-    }
-    state.copies = disp
-        .iter()
-        .take(active)
-        .enumerate()
-        .map(|(i, g)| (g.texture.clone(), i))
-        .collect();
-
+    let params = frame.params;
     state.params.set(params);
     state.params.write_buffer(&device, &queue);
     let Some(params) = state.params.binding() else {
         return;
     };
-    let prev = &state.previous;
     let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout);
     let group = device.create_bind_group(
         "ocean_lod_write_bind_group",
@@ -373,10 +318,6 @@ pub(super) fn prepare_ocean_lod_write(
             foam[1],
             foam[2],
             foam[3],
-            &prev[0].view,
-            &prev[1].view,
-            &prev[2].view,
-            &prev[3].view,
             jacobian[0],
             jacobian[1],
             jacobian[2],
@@ -410,14 +351,6 @@ pub fn run_ocean_lod_write(
         pass.set_pipeline(compute);
         pass.set_bind_group(0, group, &[]);
         pass.dispatch_workgroups(state.dispatch.x, state.dispatch.y, state.dispatch.z);
-    }
-    for (source, slot) in &state.copies {
-        let previous = &state.previous[*slot];
-        encoder.copy_texture_to_texture(
-            source.as_image_copy(),
-            previous.texture.as_image_copy(),
-            previous.size,
-        );
     }
     time_span.end(encoder);
 }

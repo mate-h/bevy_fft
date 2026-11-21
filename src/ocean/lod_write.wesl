@@ -5,7 +5,7 @@
 // hold only long waves and never alias.
 //
 // Horizontal displacement X comes from each cascade's FFT output and Z from its foam texture,
-// which also keeps last frame's Z. Flow is the change in displacement since the previous frame.
+// which also holds each lane's change since the previous frame. Flow is that change.
 // Linear waves move each surface particle with the time derivative of its displacement, so this is
 // the orbital velocity. It uses the physical displacement, without the artistic choppiness factor.
 // Drift is the cascades' summed Stokes drift, which the CPU integrates from the spectrum. The foam
@@ -23,7 +23,7 @@
 // Jacobian keep its statistics.
 
 import bevy_fft::ocean::sampling::{
-    BilinearSample, WrapTaps, bilinear_taps, bilinear_taps_with_gradient, wrap_taps,
+    BilinearSample, WrapTaps, bilinear_taps_with_gradient, wrap_taps,
 };
 import bevy_fft::water::lod::{WaterLodSlices, lod_texel_world};
 
@@ -68,17 +68,13 @@ struct OceanLodWriteParams {
 @group(0) @binding(11) var foam_1: texture_2d<f32>;
 @group(0) @binding(12) var foam_2: texture_2d<f32>;
 @group(0) @binding(13) var foam_3: texture_2d<f32>;
-@group(0) @binding(14) var previous_0: texture_2d<f32>;
-@group(0) @binding(15) var previous_1: texture_2d<f32>;
-@group(0) @binding(16) var previous_2: texture_2d<f32>;
-@group(0) @binding(17) var previous_3: texture_2d<f32>;
 /// Each cascade's term of the Jacobian determinant in `.r` and its square in `.g`, with mips.
-@group(0) @binding(18) var jacobian_0: texture_2d<f32>;
-@group(0) @binding(19) var jacobian_1: texture_2d<f32>;
-@group(0) @binding(20) var jacobian_2: texture_2d<f32>;
-@group(0) @binding(21) var jacobian_3: texture_2d<f32>;
+@group(0) @binding(14) var jacobian_0: texture_2d<f32>;
+@group(0) @binding(15) var jacobian_1: texture_2d<f32>;
+@group(0) @binding(16) var jacobian_2: texture_2d<f32>;
+@group(0) @binding(17) var jacobian_3: texture_2d<f32>;
 /// Trilinear and repeating.
-@group(0) @binding(22) var jacobian_sampler: sampler;
+@group(0) @binding(18) var jacobian_sampler: sampler;
 
 /// Mean of cascade `i`'s determinant term and of its square over a footprint `level` mips wide.
 fn jacobian_cascade(i: u32, uv: vec2<f32>, level: f32) -> vec2<f32> {
@@ -111,18 +107,8 @@ fn displacement_cascade(i: u32, t: WrapTaps) -> BilinearSample {
     return bilinear_taps_with_gradient(displacement_3, t);
 }
 
-fn previous_cascade(i: u32, t: WrapTaps) -> vec4<f32> {
-    if i == 0u {
-        return bilinear_taps(previous_0, t);
-    } else if i == 1u {
-        return bilinear_taps(previous_1, t);
-    } else if i == 2u {
-        return bilinear_taps(previous_2, t);
-    }
-    return bilinear_taps(previous_3, t);
-}
-
-/// Horizontal displacement Z in `.g` and last frame's displacement Z in `.b`.
+/// Horizontal displacement Z in `.g`, and the change since last frame of displacement X in `.r`,
+/// Z in `.b` and height in `.a`.
 fn foam_cascade(i: u32, t: WrapTaps) -> BilinearSample {
     if i == 0u {
         return bilinear_taps_with_gradient(foam_0, t);
@@ -134,7 +120,7 @@ fn foam_cascade(i: u32, t: WrapTaps) -> BilinearSample {
     return bilinear_taps_with_gradient(foam_3, t);
 }
 
-/// Size of cascade `i`. The displacement, previous and foam textures of a cascade share it.
+/// Size of cascade `i`. The displacement and foam textures of a cascade share it.
 fn cascade_dims(i: u32) -> vec2<i32> {
     if i == 0u {
         return vec2<i32>(textureDimensions(displacement_0, 0));
@@ -165,9 +151,9 @@ fn ocean_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     let texel = lod.slices[slice].z;
 
     var disp = vec4<f32>(0.0);
-    var change = vec4<f32>(0.0);
+    // Change since last frame of displacement X, Z and height.
+    var change = vec3<f32>(0.0);
     var dz = 0.0;
-    var dz_change = 0.0;
     // Unscaled derivatives dDx/dx, dDx/dz, dDz/dx and dDz/dz in meters per meter.
     var jacobian = vec4<f32>(0.0);
     // Mean and variance of the Jacobian determinant over the texel, after Dupuy and Bruneton
@@ -211,9 +197,8 @@ fn ocean_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
         jacobian += vec4<f32>(d.d_dx.a, d.d_dy.a, f.d_dx.g, f.d_dy.g) * per_meter.xyxy * breaking;
         if w > 0.0 {
             disp += d.value * w;
-            change += (d.value - previous_cascade(i, taps)) * w;
+            change += f.value.rba * w;
             dz += f.value.g * w;
-            dz_change += (f.value.g - f.value.b) * w;
         }
     }
     let amp = params.amplitude;
@@ -231,7 +216,7 @@ fn ocean_lod_write(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(displacement_out, gid.xy, slice, scaled);
     textureStore(foam_out, gid.xy, slice, vec4<f32>(foam, params.depth, dz * chop, unresolved));
     let rate = amp * params.inv_dt;
-    let velocity = vec3<f32>(change.a, dz_change, change.b) * rate;
+    let velocity = change * rate;
     textureStore(flow_out, gid.xy, slice, vec4<f32>(velocity, 0.0));
     textureStore(drift_out, gid.xy, slice, vec4<f32>(params.stokes_drift, 0.0, 0.0));
 }

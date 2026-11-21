@@ -181,7 +181,10 @@ impl ExtractComponent<RenderApp> for OceanFoamUniform {
 }
 
 /// Ping-pong targets written after [`crate::fft::FftNode::ResolveOutputs`]: horizontal
-/// displacement Z in G and last frame's Z in B. R and A are unused.
+/// displacement Z in G, and the change since the previous frame of displacement X in R, Z in B and
+/// height in A. The LOD writer turns the changes into orbital velocity, so it needs no copy of last
+/// frame's displacement. `carry_a` and `carry_b` keep last frame's raw X, Z and height for those
+/// changes, with A set once they hold a frame.
 ///
 /// `jacobian` holds this cascade's term of the Jacobian determinant for far whitecaps, after
 /// Dupuy and Bruneton (2012, Eq. 7): with `a = dDx/dx`, `b = dDz/dz` and the off-diagonal terms
@@ -193,6 +196,8 @@ impl ExtractComponent<RenderApp> for OceanFoamUniform {
 pub struct OceanFoamMask {
     pub texture_a: Handle<Image>,
     pub texture_b: Handle<Image>,
+    pub carry_a: Handle<Image>,
+    pub carry_b: Handle<Image>,
     pub jacobian: Handle<Image>,
 }
 
@@ -268,6 +273,7 @@ impl FromWorld for OceanFoamPipelines {
                 texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::ReadOnly),
                 texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
                 texture_storage_2d(OCEAN_JACOBIAN_FORMAT, StorageTextureAccess::WriteOnly),
+                texture_storage_2d(TextureFormat::Rgba32Float, StorageTextureAccess::WriteOnly),
             ),
         );
         let layout = BindGroupLayoutDescriptor::new("ocean_foam_layout", &entries);
@@ -487,6 +493,8 @@ pub(super) fn prepare_ocean_foam_mask_image(
         };
         let texture_a = make_tex();
         let texture_b = make_tex();
+        let carry_a = make_tex();
+        let carry_b = make_tex();
         let mut jacobian = Image::new_uninit(
             extent,
             TextureDimension::D2,
@@ -507,6 +515,8 @@ pub(super) fn prepare_ocean_foam_mask_image(
         commands.entity(entity).insert(OceanFoamMask {
             texture_a,
             texture_b,
+            carry_a,
+            carry_b,
             jacobian: images.add(jacobian),
         });
     }
@@ -628,7 +638,7 @@ pub(super) struct OceanFoamBindGroupCache {
 type JacobianMips = (TextureId, Vec<(BindGroup, u32)>, TextureView);
 
 /// What the foam bind group binds: the uniform buffer and offset, and the texture views.
-type FoamGroupKey = (Option<BufferId>, u32, [TextureViewId; 4], TextureId);
+type FoamGroupKey = (Option<BufferId>, u32, [TextureViewId; 5], TextureId);
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_ocean_foam_bind_groups(
@@ -646,7 +656,9 @@ pub(super) fn prepare_ocean_foam_bind_groups(
 
     // Forget oceans that are gone.
     cache.mips.retain(|entity, _| query.contains(*entity));
-    cache.groups.retain(|(entity, _), _| query.contains(*entity));
+    cache
+        .groups
+        .retain(|(entity, _), _| query.contains(*entity));
     for (entity, textures, foam_mask, phase, foam_index) in &query {
         let Some(foam_binding) = component_uniform_binding(&foam_uniforms, foam_index) else {
             continue;
@@ -663,27 +675,33 @@ pub(super) fn prepare_ocean_foam_bind_groups(
         else {
             continue;
         };
-        let read_handle = if phase.0 % 2 == 0 {
-            &foam_mask.texture_a
-        } else {
-            &foam_mask.texture_b
-        };
         let write_handle = if phase.0 % 2 == 0 {
             &foam_mask.texture_b
         } else {
             &foam_mask.texture_a
         };
-        let Some(foam_read) = gpu_images.get(read_handle).map(|g| &g.texture_view) else {
+        let Some(foam_write) = gpu_images.get(write_handle).map(|g| &g.texture_view) else {
             continue;
         };
-        let Some(foam_write) = gpu_images.get(write_handle).map(|g| &g.texture_view) else {
+        let (carry_read, carry_write) = if phase.0 % 2 == 0 {
+            (&foam_mask.carry_a, &foam_mask.carry_b)
+        } else {
+            (&foam_mask.carry_b, &foam_mask.carry_a)
+        };
+        let (Some(carry_read), Some(carry_write)) = (
+            gpu_images.get(carry_read).map(|g| &g.texture_view),
+            gpu_images.get(carry_write).map(|g| &g.texture_view),
+        ) else {
             continue;
         };
         let Some(jacobian) = gpu_images.get(&foam_mask.jacobian) else {
             continue;
         };
         let jacobian_id = jacobian.texture.id();
-        let mip_entry = cache.mips.get(&entity).filter(|(id, ..)| *id == jacobian_id);
+        let mip_entry = cache
+            .mips
+            .get(&entity)
+            .filter(|(id, ..)| *id == jacobian_id);
         if mip_entry.is_none() {
             let level = |mip: u32| {
                 jacobian.texture.create_view(&TextureViewDescriptor {
@@ -712,7 +730,13 @@ pub(super) fn prepare_ocean_foam_bind_groups(
         let key: FoamGroupKey = (
             foam_uniforms.uniforms().buffer().map(|b| b.id()),
             foam_index.index(),
-            [spatial.id(), spatial_im.id(), foam_read.id(), foam_write.id()],
+            [
+                spatial.id(),
+                spatial_im.id(),
+                foam_write.id(),
+                carry_read.id(),
+                carry_write.id(),
+            ],
             jacobian_id,
         );
         let parity = phase.0 % 2 == 0;
@@ -726,9 +750,10 @@ pub(super) fn prepare_ocean_foam_bind_groups(
                         foam_binding,
                         spatial,
                         spatial_im,
-                        foam_read,
+                        carry_read,
                         foam_write,
                         jacobian_out,
+                        carry_write,
                     )),
                 );
                 cache.groups.insert((entity, parity), (key, group.clone()));
