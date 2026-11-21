@@ -124,7 +124,11 @@ fn wait_for_pipelines(app: &mut App) {
         RenderApp,
         render_resource::{CachedPipelineState, PipelineCache},
     };
+    // Passes queue their pipelines a frame or more after what needs them appears, such as a body's
+    // footprint passes after it is spawned, so nothing pending for one frame doesn't mean done.
+    const READY_FRAMES: u32 = 10;
     let deadline = Instant::now() + Duration::from_secs(60);
+    let mut ready_frames = 0;
     loop {
         let cache = app.sub_app(RenderApp).world().resource::<PipelineCache>();
         let mut ready = cache.waiting_pipelines().next().is_none();
@@ -135,7 +139,8 @@ fn wait_for_pipelines(app: &mut App) {
                 _ => ready = false,
             }
         }
-        if ready {
+        ready_frames = if ready { ready_frames + 1 } else { 0 };
+        if ready_frames >= READY_FRAMES {
             return;
         }
         step(app);
