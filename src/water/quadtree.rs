@@ -50,7 +50,10 @@ use super::{WaterSurfaceMaterial, WaterSurfaceTag, WaterViewer};
 pub struct WaterQuadtree {
     /// Selects tiles in compute. Disable to use the CPU reference selector.
     pub gpu_selection: bool,
-    /// Edge length of the smallest tiles in meters.
+    /// Edge length of the smallest tiles in meters. Over a heightfield, keep the vertex spacing,
+    /// `tile size / tile_cells`, near the heightfield's cell size as far out as small water shows:
+    /// coarser vertices straddle wet and dry cells and turn shores into diamonds. bevy_erosion's
+    /// 5 km map with 10 m cells uses 8 m leaves, 16 cells per tile, range 8 and 12 levels.
     pub leaf_size: f32,
     /// Grid cells along each tile edge. Rounded to an even number, since morphing pairs cells.
     pub tile_cells: u32,
