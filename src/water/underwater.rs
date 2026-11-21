@@ -324,6 +324,57 @@ pub(super) fn run_waterline(
     pass.dispatch_workgroups(gpu.dispatch.x, gpu.dispatch.y, 1);
 }
 
+/// Eye depth in meters below which the viewer's sky pass is put aside, and above which it comes
+/// back. The gap keeps waves at the eye from toggling it every frame.
+const ATMOSPHERE_STOW_DEPTH: (f32, f32) = (1.0, 0.5);
+
+/// The viewer's [`AtmosphereSettings`](bevy::pbr::AtmosphereSettings), put aside while the eye is
+/// under water.
+#[derive(Component)]
+struct StowedAtmosphere(bevy::pbr::AtmosphereSettings);
+
+/// Takes [`AtmosphereSettings`](bevy::pbr::AtmosphereSettings) off the water viewer while its eye is
+/// more than a meter under water, and puts it back once the eye rises within half a meter of the
+/// surface. Bevy's sky pass composites the air's aerial perspective over all geometry, so seen from
+/// under water it laid an air haze over the water's underside, brightest as a line at the far edge
+/// of the surface mesh, and lifted the whole underwater image by about 30%. Under water the sky
+/// shows only through Snell's window, which the surface shades from the environment map, which
+/// stays. A camera that straddles the surface keeps the sky pass.
+#[allow(clippy::type_complexity)]
+fn stow_atmosphere_under_water(
+    mut commands: Commands,
+    waterline: Option<Res<WaterWaterline>>,
+    viewers: Query<
+        (
+            Entity,
+            Option<&bevy::pbr::AtmosphereSettings>,
+            Option<&StowedAtmosphere>,
+        ),
+        With<WaterUnderwater>,
+    >,
+) {
+    let Some(height) = waterline.and_then(|w| w.eye_height) else {
+        return;
+    };
+    for (entity, settings, stowed) in &viewers {
+        match (settings, stowed) {
+            (Some(settings), None) if height < -ATMOSPHERE_STOW_DEPTH.0 => {
+                commands
+                    .entity(entity)
+                    .remove::<bevy::pbr::AtmosphereSettings>()
+                    .insert(StowedAtmosphere(settings.clone()));
+            }
+            (None, Some(stowed)) if height > -ATMOSPHERE_STOW_DEPTH.1 => {
+                commands
+                    .entity(entity)
+                    .insert(stowed.0.clone())
+                    .remove::<StowedAtmosphere>();
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(super) fn configure(app: &mut App) {
     bevy::asset::embedded_asset!(app, "waterline.wesl");
     app.register_type::<WaterUnderwater>()
@@ -338,7 +389,8 @@ pub(super) fn configure(app: &mut App) {
             update_waterline
                 .after(CameraUpdateSystems)
                 .after(bevy::transform::TransformSystems::Propagate),
-        );
+        )
+        .add_systems(Update, stow_atmosphere_under_water);
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
         render_app.init_resource::<WaterWaterlineGpu>().add_systems(
             bevy::render::Render,
